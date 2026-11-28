@@ -351,7 +351,6 @@ class LaunchIdentityMixin:
         baseline ref is materialized from the SAME layers as ``current_best``
         (not just its flags/env), closing the cross-harness baseline gap.
         """
-        cb = self.shared_state.current_best
         materialized = self.current_best_launch_config()
         # ``extra_server_args`` remains the current_best delta; ``extra_envs`` is the
         # current_best delta layered over the measured round's environment (see below).
@@ -380,10 +379,7 @@ class LaunchIdentityMixin:
                 # when unavailable, args_mode governs recipe inheritance.
                 "server_launch_flags": server_launch_flags,
             },
-            # current_best's embedded stack was promoted with its tput. Reading the
-            # mutable global stack here could attach an unrelated source patch after
-            # a resume or partial state write.
-            "source_snapshots": _source_snapshot_layers(cb.get("optimization_stack")),
+            "source_snapshots": _source_snapshot_layers(self.shared_state.optimization_stack),
             "overlay_pythonpath": materialized.get("final_overlay") or "",
             "overlay_digest": _geak_overlay_digest(str(materialized.get("final_overlay") or "")),
             "launch_json": str(RunLayout(Path(measurement["benchmark_workspace"])).launch) if launch else "",

@@ -629,7 +629,6 @@ def test_optimize_phase_budget_exhaustion_advances():
         phase_started_unix=1.0,
         max_minutes=10,  # 600s total; 60% explore budget = 360s
         phase_budget_pct=normalize_budget_pct(None),
-        params_no_promote_streak=0,
         explore_search={},
         optimization_stack=[{"action": "explore"}],
         resumed_ts="",
@@ -745,7 +744,6 @@ def test_compute_next_phase_terminal_overrides_phase():
         max_minutes=0,
         phase_budget_pct={},
         stop_reason="target_reached",
-        params_no_promote_streak=0,
         explore_search={},
         optimization_stack=[],
     )
@@ -767,7 +765,6 @@ class TestAMetTargetDoesNotOutrankTheGuards:
             stop_reason="",
             closing_phase=False,
             target_reached_at="2026-09-04T00:00:00+00:00",
-            params_no_promote_streak=0,
             explore_search={},
             optimization_stack=[],
             resumed_ts="",
@@ -891,30 +888,9 @@ def test_langfuse_status_includes_explore_runtime_and_kb_hit():
     assert "session_elapsed_s" in summary
 
 
-def _make_role_registry():
-    from hyperloom.orchestrator.roles.agent_role import default_role_registry
-
-    return default_role_registry()
-
-
-def test_policy_gate_phase_strict_allows_in_phase_action():
-    state = SharedState()
-    phase_state.record_phase_transition(
-        state,
-        to_phase="PRELUDE",
-        reason="phase_entered",
-        evidence={},
-        at=phase_state.PhaseClock(ts="2026-05-19T00:00:00+00:00", ts_unix=1.0),
-    )
-    gate = PolicyGate(
-        role_registry=_make_role_registry(),
-        shared_state=state,
-    )
-    intent = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={"action_name": "baseline", "predicted_gain_pct": 0.0},
-    )
-    gate.validate_intent("orchestration", intent)  # no exception
+def test_policy_gate_admits_a_baseline_delegate():
+    intent = Intent(type=IntentType.DELEGATE, payload={"action_name": "baseline"})
+    PolicyGate().validate_intent("orchestration", intent)  # no exception
 
 
 @pytest.fixture
@@ -932,7 +908,9 @@ def coordinator_with_mocks(session_dir):
     backends = {
         "orchestration": MockBackend(silent, name="orch"),
     }
-    return Coordinator(session_dir, backends=backends)
+    coordinator = Coordinator(session_dir, backends=backends)
+    coordinator.orch_prompt.set("orchestration", "SYSTEM PROMPT")
+    return coordinator
 
 
 def test_coordinator_init_writes_phase_prelude_for_fresh_session(coordinator_with_mocks):
@@ -1008,11 +986,13 @@ def no_kernel_coordinator(session_dir):
         turns=[],
         default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
     )
-    return Coordinator(
+    coordinator = Coordinator(
         session_dir,
         backends={"orchestration": MockBackend(silent, name="orch")},
         settings=CoordinatorSettings(phase_budget_pct=dict(_NO_KERNEL_CLI_BUDGET_PCT)),
     )
+    coordinator.orch_prompt.set("orchestration", "SYSTEM PROMPT")
+    return coordinator
 
 
 def _enter_framework_for(c, elapsed_sec: float) -> None:
@@ -1028,7 +1008,7 @@ def _enter_framework_for(c, elapsed_sec: float) -> None:
 
 
 async def _phase_block(c) -> str:
-    prompt = (await c.conversation.compose_prompt("orchestration")).text
+    prompt = (await c.conversation.compose_prompt()).text
     return prompt.split("=== Phase ===", 1)[1]
 
 

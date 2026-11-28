@@ -193,7 +193,7 @@ class _FrameworkProposalsMixin:
             }
             for row in rows
         ]
-        # The grid's attempts join their proposal row through this id, as a proposed or delegated grid's do.
+        # The grid's attempts join their proposal row through this id, as a delegated grid's do.
         proposal_id = uuid.uuid4().hex
         params: dict[str, Any] = {
             "source": "coordinator_internal",

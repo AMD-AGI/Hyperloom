@@ -1,17 +1,24 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Admission control: whether a phase, the action sequence or the time budget refuses an action or request."""
+"""Admission control: the GPU-pool, phase and time-budget gates on an action, the baseline and time-budget gates on a kernel request."""
 
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
 from typing import Any
+from hyperloom_common.coerce import to_int
+from hyperloom_common.env import is_truthy
 from hyperloom.inference_optimizer.protocol.action_surfaces import REQUEST_KIND_TO_OWNED_ACTION
+from ..bus.gpu_pool import SpecialistGpuPool
 from ..phases import machine_state as _phase_state
 from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS
 from ..policy.denial import PolicyDenied
+from ..policy.gate import SPECIALIST_ACTION_NAME
+from ..policy.projection import gpu_specialist_ceiling, serving_tp_for_policy
 from ..policy.specialist_in_flight import specialist_in_flight_denial
+from ..specialists.profile import is_authoring_specialist, requires_gpu, uses_whole_machine_gpu_lane
 from ._explore_grid import explore_grid_denial
 from ._untested_backlog import untested_backlog_denial
 from ..state.task_registry import IllegalTransition, Task, TaskNotFound
@@ -26,15 +33,112 @@ import logging as _logging
 
 log = _logging.getLogger(__name__)
 
+SPECIALIST_GPU_REQUEST_EXCEEDS_CAPACITY = "specialist_gpu_request_exceeds_capacity"
+
+
+@dataclass(frozen=True)
+class GpuRequest:
+    """The cards a GPU specialist leases.
+
+    Attributes:
+        pool: The pool they come from.
+        count: How many it takes.
+        least: The fewest it is leased whatever count it names: serving TP for a bench specialist, else one.
+    """
+
+    pool: SpecialistGpuPool
+    count: int
+    least: int
+
 
 class AdmissionMixin:
     """Decides whether an action may be admitted, and cancels queued tasks the time budget no longer covers."""
+
+    def specialist_gpu_request(self, params: dict[str, Any]) -> GpuRequest | None:
+        """Size the GPU lease of a specialist dispatch; ``None`` when it needs no card.
+
+        The one sizing: admission judges the request it returns and the dispatcher leases it.
+
+        Args:
+            params: The specialist dispatch ``params``.
+        """
+        if not requires_gpu(params):
+            return None
+        serving_tp = serving_tp_for_policy(self.shared_state)
+        whole_machine = uses_whole_machine_gpu_lane(params)
+        pool = self.framework_gpu_pool if whole_machine else self.gpu_specialist_pool
+        if not whole_machine:
+            default_count = serving_tp or 1
+        elif is_authoring_specialist(params):
+            default_count = pool.capacity or 1
+        else:
+            # Bench specialist: size to the serving TP.
+            default_count = serving_tp or pool.capacity or 1
+        count = to_int(params.get("gpu_count")) or default_count
+        bench_floor = serving_tp if is_truthy(params.get("bench")) else 0
+        if bench_floor and count < bench_floor:
+            log.info(
+                "specialist: bench=true with gpu_count=%d < serving TP=%d; flooring gpu_count to TP "
+                "(a bench specialist starts a real TP-sharded server and cannot run on fewer cards).",
+                count,
+                bench_floor,
+            )
+            count = bench_floor
+        return GpuRequest(pool, count, max(1, bench_floor))
+
+    def _gpu_denial_for_action(self, action_name: str, params: dict[str, Any] | None) -> PolicyDenied | None:
+        """Refuse a GPU specialist whose request its pool can never fund.
+
+        The pool answers a busy acquire and an impossible one alike, so a task
+        queued for the latter would wait for cards no release brings.
+
+        Args:
+            action_name: The delegated action name.
+            params: The specialist dispatch ``params``.
+
+        Returns:
+            A :class:`PolicyDenied` when the sized request exceeds the pool it leases from, else ``None``.
+        """
+        if str(action_name or "").strip() != SPECIALIST_ACTION_NAME:
+            return None
+        request = self.specialist_gpu_request(dict(params or {}))
+        if request is None or request.pool.can_fund(request.count):
+            return None
+        capacity = request.pool.capacity
+        whole_machine = request.pool is self.framework_gpu_pool
+        pool_name = "whole-machine GPU pool" if whole_machine else "serving-disjoint GPU specialist pool"
+        sizes = (
+            f"(configured capacity={gpu_specialist_ceiling(self.shared_state)}, "
+            f"serving_tp={serving_tp_for_policy(self.shared_state)})"
+        )
+        if capacity == 0:
+            return PolicyDenied(
+                f"delegate{{action='specialist'}}: the {pool_name} holds no card {sizes}",
+                rule=SPECIALIST_GPU_REQUEST_EXCEEDS_CAPACITY,
+                hint=(
+                    "No gpu_count fits an empty pool. Dispatch the work without a GPU request; the "
+                    "'=== Resource pools ===' block shows which pool holds cards."
+                ),
+            )
+        if request.least > capacity:
+            hint = (
+                f"No gpu_count fits: a bench specialist takes at least serving TP cards ({request.least}) "
+                f"and the pool holds {capacity}. Dispatch the work without bench=true."
+            )
+        else:
+            hint = f"Pass a gpu_count between {request.least} and {capacity}."
+        return PolicyDenied(
+            f"delegate{{action='specialist'}}: effective gpu_count={request.count} cannot be leased from the "
+            f"{pool_name} size={capacity} {sizes}",
+            rule=SPECIALIST_GPU_REQUEST_EXCEEDS_CAPACITY,
+            hint=hint,
+        )
 
     def _phase_denial_for_action(self, action_name: str) -> PolicyDenied | None:
         """Refuse an action the current phase does not let an agent propose.
 
         Args:
-            action_name: The proposed/delegated action name.
+            action_name: The delegated action name.
 
         Returns:
             A :class:`PolicyDenied` when the phase does not offer the action, else ``None``.
@@ -49,39 +153,6 @@ class AdmissionMixin:
             rule="phase_incompatible",
             hint=f"{phase} proposes: {', '.join(proposable) or '(none)'}",
         )
-
-    def _sequence_denial_for_action(
-        self,
-        action_name: str,
-    ) -> PolicyDenied | None:
-        """Reject orchestration action/delegate attempts before baseline. Only invariant: nothing runs until baseline_tput > 0 (a data-dependency).
-
-        Args:
-            action_name: The proposed/delegated action name.
-
-        Returns:
-            A :class:`PolicyDenied` when the action must wait for baseline, else
-            ``None``.
-        """
-        action = str(action_name or "").strip()
-        sequence_actions = {
-            "target_analysis",
-            "baseline",
-            "report",
-            "integrate",
-            "explore",
-        }
-        if action not in sequence_actions:
-            return None
-        if self.shared_state.stop_reason:
-            return None
-        if self.shared_state.baseline_tput <= 0 and action not in {"baseline", "target_analysis"}:
-            return PolicyDenied(
-                f"action={action!r} denied: baseline must run first",
-                rule="execution_order",
-                hint="propose/delegate `baseline` until baseline_tput > 0",
-            )
-        return None
 
     def admission_cost_minutes(self, action_name: str) -> float:
         """What a catalogued action is admitted at, priced on this session's measured baseline round once one exists."""
@@ -106,7 +177,7 @@ class AdmissionMixin:
         What the action costs is :meth:`admission_cost_minutes`.
 
         Args:
-            action_name: The proposed/delegated action name.
+            action_name: The delegated action name.
             fallback_cost_minutes: What to price the action at when the
                 catalogue does not carry it. Without it, a kind deliberately
                 kept out of the catalogue is admitted at any remaining budget.
@@ -140,15 +211,15 @@ class AdmissionMixin:
         reaches all paths at once.
 
         Args:
-            action_name: The proposed/delegated action name.
+            action_name: The delegated action name.
             params: The proposal's parameters: a specialist's price, an explore's grid.
 
         Returns:
             The first :class:`PolicyDenied` that fires, else ``None``.
         """
         return (
-            self._phase_denial_for_action(action_name)
-            or self._sequence_denial_for_action(action_name)
+            self._gpu_denial_for_action(action_name, params)
+            or self._phase_denial_for_action(action_name)
             or specialist_in_flight_denial(action_name, params, self.tasks, self.shared_state.find_gap)
             or self.time_budget_denial_for_action(action_name, params=params)
             or untested_backlog_denial(action_name, params, self.shared_state, self.tasks)
@@ -246,6 +317,6 @@ class AdmissionMixin:
             return PolicyDenied(
                 f"request kind={req_kind!r} denied: baseline must run first",
                 rule="execution_order",
-                hint="propose/delegate `baseline` before kernel requests",
+                hint="delegate `baseline` before kernel requests",
             )
         return self.time_budget_denial_for_action(REQUEST_KIND_TO_OWNED_ACTION.get(req_kind, req_kind))

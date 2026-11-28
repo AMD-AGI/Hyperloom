@@ -13,7 +13,6 @@ from typing import Any
 
 from . import machine_state as _phase_state
 from . import phase_predicates, phase_transitions
-from ..bus.message_bus import Message
 from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
 from ..collaborator import CoordinatorCollaborator
 
@@ -254,23 +253,6 @@ class MachinePhase(CoordinatorCollaborator):
         )
         self._coord.dispatcher.admission_frozen = self._transition_pending(next_phase)
 
-    def settle_escalate_hint(self, move: Transition) -> None:
-        """Consume or discard the pending escalate hint, according to what drove this transition."""
-        state = self.shared_state
-        if "hint" in move.evidence:
-            state.consume_pending_escalate_hint()
-        elif state.pending_escalate_hint:
-            # A hint speaks for the phase it was emitted in; carried across a transition it did not drive, it would
-            # act on a phase it was never about.
-            discarded_hint = state.discard_pending_escalate_hint()
-            log.info(
-                "phase_machine: discarded stale pending_escalate_hint=%r on unrelated transition %s -> %s (reason=%s)",
-                discarded_hint,
-                move.from_phase,
-                move.to_phase,
-                move.reason,
-            )
-
     def _carry_cycle_facts_across(self, move: Transition) -> None:
         """Persist the cycle-level facts the entered phase, or a later resume, has to see."""
         state = self.shared_state
@@ -306,26 +288,6 @@ class MachinePhase(CoordinatorCollaborator):
             state.gain_at_cycle_start,
         )
 
-    async def _announce_transition(self, move: Transition) -> None:
-        """Publish the phase boundary on the bus for the roles that follow it."""
-        try:
-            await self.bus.append_and_seq(
-                Message.new(
-                    "coordinator",
-                    "*",
-                    "event",
-                    {
-                        "kind": "phase_transition",
-                        "from_phase": move.from_phase,
-                        "to_phase": move.to_phase,
-                        "reason": move.reason,
-                        "evidence": move.evidence,
-                    },
-                )
-            )
-        except sqlite3.Error:
-            log.exception("Coordinator: phase_transition event bus write failed")
-
     async def _fire_phase_entry(self, move: Transition) -> None:
         """Run the entered phase's side effects, recording rather than raising a hook's storage failure."""
         # Phase-entry side effects are additive; storage failures are logged only. They run on the transition itself,
@@ -346,7 +308,6 @@ class MachinePhase(CoordinatorCollaborator):
     async def _commit_transition(self, move: Transition) -> None:
         """Record the phase move and run everything the boundary owes, in order."""
         state = self.shared_state
-        self.settle_escalate_hint(move)
         if move.to_phase == _phase_state.PHASE_CLOSE:
             self.set_terminal_stop_reason(move.reason)
         self._carry_cycle_facts_across(move)
@@ -382,7 +343,6 @@ class MachinePhase(CoordinatorCollaborator):
             move.to_phase,
             move.reason,
         )
-        await self._announce_transition(move)
         await self._fire_phase_entry(move)
         if is_loopback:
             await self._coord.phase_macro_cycle.run_cycle_soft_restart(

@@ -4,32 +4,29 @@
 
 Consult these SharedState surfaces in order before re-proposing:
 
-1. **`last_<action>`** (snapshot of the latest attempt) and
-   **`<action>_attempts`** (capped per-action history, newest last).
-   Each entry carries `status` / `decision` / `error_class` /
+1. **`last_baseline`** (the latest baseline attempt, failed or
+   measured). It carries `status` / `decision` / `error_class` /
    `error_excerpt` / `workspace` / `raw_result_path` /
    `extras.fingerprint`. The fingerprint is the canonical hash of the
    params fields that determine the action's behaviour, and Coordinator
-   keys task idempotency on that same fingerprint — so a proposal
-   matching a queued or running task is dropped before it ever reaches
-   the executor, and any key you add to `params` outside the
+   keys task idempotency on that same fingerprint — so a `baseline`
+   delegate matching a queued or running task is refused before it ever
+   reaches the executor, and any key you add to `params` outside the
    fingerprint (a tag, a note, a counter) is invisible to it and does
-   NOT make the proposal distinct.
+   NOT make the delegate distinct.
 2. **`last_action_failures`** (global rolling log capped at the last
    30 unpromotable results across ALL kinds, including kernel_agent-owned).
-   Use this when the per-action history doesn't carry the kind you
-   need (e.g. `integrate` failure visible here but `<action>_attempts`
-   only covers the six explore/validate kinds).
+   This is where a failure of any other kind is recorded.
    Each entry now carries `failure_id` when the failure has a structured
    evidence packet; use
    `mcp__inference_optimizer_context__get_failure(failure_id)` to retrieve
    the full packet and `Read` to open the raw crash log.
 3. **Structured failure evidence** — explore variant crashes write a
-   full evidence packet to `failures[]` (accessible via
-   `mcp__inference_optimizer_context__get_variant_failures` /
-   `mcp__inference_optimizer_context__get_failure`), mirrored to
-   `<session_dir>/reports/failures/<failure_id>.json` so a packet
-   evicted from `failures[]` is still readable with `Read`.  The packet
+   full evidence packet to
+   `<session_dir>/reports/failures/<failure_id>.json` (listed by
+   `mcp__inference_optimizer_context__get_variant_failures`, returned by
+   `mcp__inference_optimizer_context__get_failure`, readable with
+   `Read`).  The packet
    carries: `failure_id`, `stage` (warmup or decision), `error_class`,
    `error_excerpt` (tail of the error blob), `server_log_path`,
    `workspace`, and the variant knobs that produced the failure.
@@ -66,9 +63,9 @@ measurement, NOT a failure — do not retry it.
   persistent conversation you remember the attempts you already made this
   session — do not re-propose a baseline whose params fingerprint
   matches a recent failure; it will fail the same way. Changing a
-  field OUTSIDE the seven does not count and does not get you a new
-  attempt: the proposal is dropped as a duplicate and you have burned
-  a tick. Change the launch: `params.extra_server_args` or
+  field OUTSIDE the seven does not count: the delegate is the same
+  baseline again, run under a retry key while retries remain, and it
+  fails the same way. Change the launch: `params.extra_server_args` or
   `params.extra_envs`.
 * **RULE F2 — repeated `error_class='subprocess_nonzero'` or `'client_failed'`
   on `baseline` ⇒ stop retrying baseline.** Each class means the benchmark
@@ -96,8 +93,7 @@ measurement, NOT a failure — do not retry it.
 
 ## Example (PRELUDE — baseline failed twice with `error_class='server_init_dead'`)
 
-    propose_action{action_name='baseline',
+    delegate{action_name='baseline',
         params={extra_server_args: '--mem-fraction-static 0.8'},
-        predicted_gain_pct: 0,
         notes: 'server_log_path shows an OOM during KV-cache allocation;
                 lower the static memory fraction'}

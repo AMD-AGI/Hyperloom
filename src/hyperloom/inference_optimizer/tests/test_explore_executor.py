@@ -27,6 +27,7 @@ from hyperloom.orchestrator.actions.executors.explore_prefilter.launch_filters i
     restates_the_baseline_launch,
 )
 from hyperloom.orchestrator.actions.executors.workload._launch_restatement import Launch, launch_change, named_settings
+from hyperloom.orchestrator.state.round_store import RoundStore
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.bus.resource_lock import (
     SqliteLeaseBackend,
@@ -84,7 +85,7 @@ def sub_agent_runner(tmp_path):
     db = SqliteConnection(tmp_path / "db.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    runner = SubAgentRunner(locks, tr)
+    runner = SubAgentRunner(locks, tr, RoundStore(db))
     yield runner, tr, tmp_path
     db.close()
 
@@ -534,64 +535,10 @@ def test_launch_change_names_every_change_and_discounts_what_the_server_resolved
     assert launch_change(Launch(base.settings, base.envs, {}), same_server, observed) == {}
 
 
-def test_record_explore_accepted_dedup_by_fingerprint():
-    state = SharedState()
-    variant = {
-        "name": "vllm_kv_fp8",
-        "fingerprint": "cc" * 8,
-        "extra_server_args": "--kv-cache-dtype fp8",
-        "extra_envs": {},
-        "output_throughput": 1500.0,
-        "gain_pct": 4.0,
-        "provenance": "llm_direct",
-    }
-    state.record_explore_accepted(variant)
-    state.record_explore_accepted(variant)
-    assert len(state.explore_search["accepted"]) == 1
-
-
-def test_apply_explore_search_update_preserves_accepted():
-    state = SharedState()
-    state.record_explore_accepted(
-        {
-            "name": "a",
-            "extra_server_args": "--flag-a",
-            "fingerprint": "aa" * 8,
-            "gain_pct": 3.0,
-        }
-    )
-    # Update arrives with tested/rejected but NOT accepted; the bucket survives the merge.
-    state.apply_explore_search_update(
-        {
-            "tested": {
-                "bb" * 8: {
-                    "name": "b",
-                    "extra_server_args": "--flag-b",
-                    "extra_envs": {},
-                    "outcome": "REVERT",
-                }
-            },
-            "rejected": [
-                {
-                    "fingerprint": "bb" * 8,
-                    "name": "b",
-                    "reason": "not_keep",
-                }
-            ],
-            "cursor": 1,
-            "last_round": {"round_id": "explore-001"},
-        }
-    )
-    assert len(state.explore_search["accepted"]) == 1
-    assert state.explore_search["accepted"][0]["name"] == "a"
-    assert "bb" * 8 in state.explore_search["tested"]
-
-
 def _round_update(round_no: int, fingerprint: str, name: str) -> dict:
     """One round's worth of executor ledger writes."""
     return {
         "tested": {fingerprint: {"name": name, "outcome": "REVERT"}},
-        "rejected": [{"fingerprint": fingerprint, "name": name, "reason": "not_keep"}],
         "last_round": {"round_id": f"explore-{round_no:03d}"},
     }
 
@@ -604,18 +551,31 @@ def test_apply_explore_search_update_accumulates_across_rounds():
 
     search = state.explore_search
     assert set(search["tested"]) == {"aa" * 8, "bb" * 8}
-    assert {r["fingerprint"] for r in search["rejected"]} == {"aa" * 8, "bb" * 8}
 
 
 def test_apply_explore_search_update_remeasured_fingerprint_replaces_its_row():
     state = SharedState()
     state.apply_explore_search_update(_round_update(1, "aa" * 8, "a"))
-    second = _round_update(2, "aa" * 8, "a")
-    second["tested"]["aa" * 8]["outcome"] = "KEEP"
-    state.apply_explore_search_update(second)
+    state.apply_explore_search_update(_round_update(2, "aa" * 8, "a"))
 
-    assert state.explore_search["tested"]["aa" * 8]["outcome"] == "KEEP"
-    assert len(state.explore_search["rejected"]) == 1
+    assert state.explore_search["tested"] == {"aa" * 8: {"name": "a", "outcome": "REVERT", "cycle": 0}}
+
+
+def test_a_fingerprint_measured_keep_replaces_its_earlier_verdict():
+    """A re-proposed variant that KEEPs is no longer a rejection; the rows of other fingerprints stay."""
+    state = SharedState()
+    state.apply_explore_search_update(_round_update(1, "aa" * 8, "a"))
+    state.apply_explore_search_update(
+        {
+            "tested": {"aa" * 8: {"name": "a", "outcome": "KEEP"}, "bb" * 8: {"name": "b", "outcome": "REVERT"}},
+            "last_round": {"round_id": "explore-002"},
+        }
+    )
+
+    assert {fp: row["outcome"] for fp, row in state.explore_search["tested"].items()} == {
+        "aa" * 8: "KEEP",
+        "bb" * 8: "REVERT",
+    }
 
 
 def test_apply_explore_search_update_advances_the_cursor_per_round():
@@ -628,16 +588,6 @@ def test_apply_explore_search_update_advances_the_cursor_per_round():
     third["tested"].update({"cc" * 8: {"name": "c"}, "dd" * 8: {"name": "d"}})
     state.apply_explore_search_update(third)
     assert state.explore_search["cursor"] == 2
-
-
-def test_warm_history_rejected_rows_survive_the_first_round():
-    """Warm-start pre-fills ``rejected`` so the dedup gate denies re-tests; a round must not wipe it."""
-    state = SharedState()
-    state.explore_search = {
-        "rejected": [{"fingerprint": "ee" * 8, "name": "warm", "reason": "warm_recipe_what_failed"}]
-    }
-    state.apply_explore_search_update(_round_update(1, "aa" * 8, "a"))
-    assert {r["fingerprint"] for r in state.explore_search["rejected"]} == {"ee" * 8, "aa" * 8}
 
 
 def test_observed_launch_after_drops_only_what_the_stack_changed():
@@ -1002,13 +952,23 @@ def test_a_leave_one_out_arm_that_regressed_attributes_its_lever():
     from hyperloom.orchestrator.actions.executors.grid._explore_variants import outcome_row
 
     row = outcome_row(
-        {"name": "fwlever_drop_hl_a", "outcome": "REVERT", "gain_pct": None, "graded_gain_pct": -4.0}, "fp", "", "t"
+        {"name": "fwlever_drop_hl_a", "outcome": "REVERT", "gain_pct": None, "graded_gain_pct": -4.0}, "fp", "t"
     )
     seed = {"name": "fwlever_drop_hl_a", "framework_lever": "HL_A", "framework_lever_source": "leave_one_out"}
 
     attributions = framework_lever_attributions([row], [seed])
 
     assert [(a["switch"], a["gain_pct"], a["outcome"]) for a in attributions] == [("HL_A", 4.0, "REVERT")]
+
+
+def test_a_variant_outcome_carries_the_reason_its_measured_row_recorded():
+    """The gate that refused a variant is named on its ledger row, and the round's outcome row for it says the same."""
+    from hyperloom.orchestrator.actions.executors.grid._explore_variants import outcome_row
+
+    refused = outcome_row({"name": "v1", "outcome": "REVERT", "reason": "accuracy_drop"}, "fp1", "t")
+    kept = outcome_row({"name": "v2", "outcome": "KEEP"}, "fp2", "t")
+
+    assert (refused["reason"], kept["reason"]) == ("accuracy_drop", "")
 
 
 def test_a_lever_attribution_arm_runs_after_the_candidates_that_could_keep():

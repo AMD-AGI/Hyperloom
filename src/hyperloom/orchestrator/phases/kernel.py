@@ -671,7 +671,6 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
                 "orchestration",
                 "response",
                 {
-                    "in_reply_to": "",
                     "kind": "run_gemm_tuning_done",
                     "status": status,
                     "result": result,
@@ -914,7 +913,6 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
                 "orchestration",
                 "response",
                 {
-                    "in_reply_to": "",
                     "kind": "kernel_rewrite_controller_done",
                     "status": result.get("status", "failed"),
                     "result": result,
@@ -1019,7 +1017,6 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
                     "orchestration",
                     "response",
                     {
-                        "in_reply_to": "",
                         "kind": "run_fusion_done",
                         "status": status,
                         "result": result,

@@ -31,11 +31,7 @@ class CycleEndPhase(CoordinatorCollaborator):
     async def pump(self) -> None:
         """Ask Orchestration, once per macro-cycle, how the next cycle should open."""
         state = self.shared_state
-        if (
-            "orchestration" not in self.backends
-            or self.orch_prompt.is_user_supplied
-            or state.orchestration_memory.get("for_cycle") == state.macro_cycle
-        ):
+        if self.orch_prompt.is_user_supplied or state.orchestration_memory.get("for_cycle") == state.macro_cycle:
             return
         feasible, _ = phase_transitions.cycle_reloop_decision(state)
         if not feasible:
@@ -43,7 +39,7 @@ class CycleEndPhase(CoordinatorCollaborator):
         replies: list[Any] = []
 
         async def _directive_turn() -> None:
-            replies.append(await self._coord.reactor_pass("orchestration", request=CYCLE_DIRECTIVE_REQUEST))
+            replies.append(await self._coord.reactor_pass(request=CYCLE_DIRECTIVE_REQUEST))
 
         await self._coord.await_within_session_bound(_directive_turn, stage="reactor:orchestration")
         state.orchestration_memory = build_cycle_memory(replies[0] if replies else None, cycle=state.macro_cycle)

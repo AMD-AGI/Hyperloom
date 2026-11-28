@@ -16,7 +16,6 @@ from hyperloom.orchestrator.roles import (
     CodexBackend,
     DeepSeekBackend,
 )
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
 
 _ORCHESTRATION_ROLE = "orchestration"
 
@@ -59,16 +58,14 @@ def _build_orchestration_backend(models: ModelRouting, *, session_dir: Path) -> 
     name = _resolve_orchestration_backend(
         codex_follows_claude=models.codex_follows_claude, claude_follows_codex=models.claude_follows_codex
     )
-    allowed_intents = default_role_registry()[_ORCHESTRATION_ROLE].allowed_intents
     # Scratch only.
     scratch = agent_dir(session_dir, _ORCHESTRATION_ROLE)
     if name == llm_config.AGENT_BACKEND_CODEX:
-        return CodexBackend(allowed_intents=allowed_intents, model=models.codex_model, cwd=scratch / "codex_workspace")
+        return CodexBackend(model=models.codex_model, cwd=scratch / "codex_workspace")
     if name == llm_config.AGENT_BACKEND_DEEPSEEK:
         # The role reads state and answers with intents; it writes no files,
         # so the harness gets no write permission to confine.
         return DeepSeekBackend(
-            allowed_intents=allowed_intents,
             model=models.deepseek_model,
             cwd=scratch / "deepseek_workspace",
             permission_mode="read-only",
@@ -76,10 +73,7 @@ def _build_orchestration_backend(models: ModelRouting, *, session_dir: Path) -> 
     # Orchestration is stateless: every tick opens a fresh session and
     # carries the full state projection, so it needs the agentic turn
     # budget.
-    return ClaudeBackend(
-        model=models.claude_model,
-        allowed_intents=allowed_intents,
-    )
+    return ClaudeBackend(model=models.claude_model)
 
 
 def _build_backends(models: ModelRouting, *, session_dir: Path) -> dict[str, Any]:

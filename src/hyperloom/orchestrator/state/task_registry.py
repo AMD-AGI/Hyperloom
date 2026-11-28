@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from hyperloom_common.timeutil import now_iso
-from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
+from hyperloom.orchestrator.bus.resource_lock import CLEANUP_CONFIRMED_KEY, SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.state.task_states import TERMINAL_STATES, TRANSITIONS
 from hyperloom.inference_optimizer.trace.trajectory_trace import (
@@ -45,6 +45,7 @@ _DISPATCH_CLASSES = frozenset({"llm", "coordinator", "inline"})
 _QUEUED_SQL = "SELECT * FROM tasks WHERE state='queued' ORDER BY created_at ASC"
 _RUNNING_SQL = "SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC"
 _KEY_PREFIX_SQL = "SELECT * FROM tasks WHERE kind=? AND substr(idempotency_key, 1, ?)=? ORDER BY created_at ASC"
+_OUTCOMES_SQL = "SELECT task_id, history FROM tasks WHERE task_id IN (SELECT value FROM json_each(?))"
 
 
 @dataclass(frozen=True)
@@ -91,6 +92,51 @@ class Task:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
+
+
+@dataclass(frozen=True)
+class TaskOutcome:
+    """What a task's executor returned, as its runner recorded it on the row before anything was told about it."""
+
+    result: dict[str, Any]
+    error: str | None
+    cleanup_confirmed: bool
+
+
+def _outcome_in(history: list[Any]) -> TaskOutcome | None:
+    for entry in reversed(history):
+        evidence = entry.get("evidence") if isinstance(entry, dict) else None
+        if isinstance(evidence, dict) and isinstance(evidence.get("outcome"), dict):
+            outcome = evidence["outcome"]
+            return TaskOutcome(
+                result=outcome["result"],
+                error=outcome.get("error"),
+                cleanup_confirmed=evidence.get(CLEANUP_CONFIRMED_KEY) is True,
+            )
+    return None
+
+
+def recorded_outcome(task: Task) -> TaskOutcome | None:
+    """The outcome on ``task``'s row, or ``None`` while its executor has not ended."""
+    return _outcome_in(task.history)
+
+
+def confirmed_result(task: Task) -> dict[str, Any] | None:
+    """The result ``task``'s executor produced, once its physical cleanup confirmed.
+
+    An unconfirmed cleanup makes the outcome diagnostic only -- the work it describes may still hold resources -- so
+    it is not returned.
+
+    TODO: ``bringup.reconcile._terminal_by_observation`` reads the same evidence under slightly different rules; the
+    two want one reader.
+    """
+    outcome = recorded_outcome(task)
+    return outcome.result if outcome is not None and outcome.cleanup_confirmed else None
+
+
+def _outcomes_by_task(rows: Iterable[Any]) -> dict[str, TaskOutcome]:
+    found = ((str(row["task_id"]), _outcome_in(json.loads(row["history"]))) for row in rows)
+    return {task_id: outcome for task_id, outcome in found if outcome is not None}
 
 
 def _validate_dispatch_class(dispatch_class: str | None) -> None:
@@ -193,27 +239,12 @@ def task_dispatch_class(task: Task) -> str | None:
     return evidence[0] if evidence is not None else None
 
 
-def _validate_dispatch_reuse(task: Task, requested: str | None) -> None:
-    _validate_dispatch_class(requested)
-    if requested is None:
-        return
-    existing = task_dispatch_class(task)
-    if existing is None:
-        return
-    if existing != requested:
-        raise ValueError(f"idempotent task dispatch_class mismatch: existing={existing!r}, requested={requested!r}")
-
-
 class IllegalTransition(RuntimeError):
     """Raised when a requested task state transition is not allowed."""
 
 
 class TaskNotFound(RuntimeError):
     """Raised when a task lookup by ``task_id`` finds no row."""
-
-
-class TerminalTaskReuse(RuntimeError):
-    """An idempotency key already names a task in a terminal state."""
 
 
 def _record_task_state(
@@ -298,10 +329,12 @@ def _insert_queued_task(cur: Any, spec: TaskSpec) -> Task:
 
 
 def create_in_cursor(cur: Any, spec: TaskSpec) -> tuple[Task, bool]:
-    """Create (or adopt) a task row on a cursor the caller already owns.
+    """Create a task row on a cursor the caller already owns, or return the task its key already names.
 
-    Unlike :meth:`TaskRegistry.create_or_return_existing`, which opens its own
-    transaction, the row commits with the caller's work or not at all.
+    The look-up and the insert share the caller's write transaction, so the
+    row commits with the caller's work or not at all. An existing task is
+    returned in whatever state it is in; what an ended one means is the
+    caller's rule.
 
     Args:
         cur: Open cursor inside the caller's write transaction.
@@ -310,46 +343,58 @@ def create_in_cursor(cur: Any, spec: TaskSpec) -> tuple[Task, bool]:
 
     Returns:
         tuple[Task, bool]: ``(task, was_existing)``.
-
-    Raises:
-        TerminalTaskReuse: When the key already names a task in a terminal
-            state.
     """
     _validate_dispatch_class(spec.dispatch_class)
     cur.execute("SELECT * FROM tasks WHERE idempotency_key=?", (spec.idempotency_key,))
     existing = cur.fetchone()
     if existing is not None:
-        task = Task.from_row(existing)
-        _validate_dispatch_reuse(task, spec.dispatch_class)
-        if task.state in TERMINAL_STATES:
-            raise TerminalTaskReuse(f"idempotency key {spec.idempotency_key!r} already names a {task.state} task")
-        return task, True
-
+        return Task.from_row(existing), True
     return _insert_queued_task(cur, spec), False
 
 
-#: Keys :func:`create_on_free_key` tries: the spec's own, then ``-retry1`` onwards.
+#: Keys :func:`first_unspent_key` tries: the given one, then ``-retry1`` onwards.
 RETRY_KEY_ATTEMPTS: int = 6
 
 
-async def create_on_free_key(tasks: Any, spec: TaskSpec, *, spent: Callable[[Task], bool]) -> tuple[Task, bool] | None:
-    """Create ``spec``, stepping its key to ``<key>-retry<n>`` past every existing task ``spent`` accepts.
+@dataclass(frozen=True)
+class UnspentKey:
+    """The first key of a retry series that is not spent, and the task already under it, if any."""
+
+    key: str
+    holder: Task | None
+
+
+async def first_unspent_key(tasks: Any, key: str, *, spent: Callable[[Task], bool]) -> UnspentKey | None:
+    """Step ``key`` to ``<key>-retry<n>`` past every existing task ``spent`` accepts.
 
     Args:
-        tasks: The registry the task is created in.
-        spec: The task to create under its own key first.
+        tasks: The registry the keys are looked up in.
+        key: The first key of the series.
         spent: Whether an existing task leaves its key to the next attempt.
 
     Returns:
-        ``(task, was_existing)`` for the first key not spent, or ``None`` once
-        :data:`RETRY_KEY_ATTEMPTS` keys are.
+        The first key not spent, free or held, or ``None`` once :data:`RETRY_KEY_ATTEMPTS` keys are.
     """
     for attempt in range(RETRY_KEY_ATTEMPTS):
-        key = spec.idempotency_key if attempt == 0 else f"{spec.idempotency_key}-retry{attempt}"
-        task, was_existing = await tasks.create_or_return_existing(replace(spec, idempotency_key=key))
-        if not (was_existing and spent(task)):
-            return task, was_existing
+        candidate = key if attempt == 0 else f"{key}-retry{attempt}"
+        holder = await tasks.find_by_idempotency_key(candidate)
+        if holder is None or not spent(holder):
+            return UnspentKey(candidate, holder)
     return None
+
+
+async def create_on_free_key(tasks: Any, spec: TaskSpec, *, spent: Callable[[Task], bool]) -> tuple[Task, bool] | None:
+    """Create ``spec`` under the :func:`first_unspent_key` of its own key, or return the task that holds that key.
+
+    Returns:
+        ``(task, was_existing)``, or ``None`` once every retry key is spent.
+    """
+    unspent = await first_unspent_key(tasks, spec.idempotency_key, spent=spent)
+    if unspent is None:
+        return None
+    if unspent.holder is not None:
+        return unspent.holder, True
+    return await tasks.create_or_return_existing(replace(spec, idempotency_key=unspent.key))
 
 
 def _is_progress_note(entry: Any) -> bool:
@@ -400,13 +445,6 @@ class TaskRegistry:
 
     async def create_or_return_existing(self, spec: TaskSpec) -> tuple[Task, bool]:
         """Insert a new task row OR return the existing one keyed by idempotency_key. Returns ``(task, was_existing)``."""
-        _validate_dispatch_class(spec.dispatch_class)
-        existing = await self.db.fetchone("SELECT * FROM tasks WHERE idempotency_key=?", (spec.idempotency_key,))
-        if existing is not None:
-            task = Task.from_row(existing)
-            _validate_dispatch_reuse(task, spec.dispatch_class)
-            return task, True
-
         if (
             spec.dispatch_class is not None
             and spec.dispatch_origin is None
@@ -414,8 +452,7 @@ class TaskRegistry:
         ):
             spec = replace(spec, dispatch_origin=self._dispatch_origin_provider())
         async with self.db.transaction() as cur:
-            task = _insert_queued_task(cur, spec)
-        return task, False
+            return create_in_cursor(cur, spec)
 
     async def get(self, task_id: str) -> Task:
         """Fetch a single task by id."""
@@ -495,6 +532,14 @@ class TaskRegistry:
             history.append({"ts": now_iso(), "evidence": evidence or {}})
             cur.execute("UPDATE tasks SET history=? WHERE task_id=?", (json.dumps(history), task_id))
 
+    async def outcomes(self, task_ids: Iterable[str]) -> dict[str, TaskOutcome]:
+        """The recorded outcome of each of ``task_ids`` whose executor ended; the others are absent."""
+        return _outcomes_by_task(await self.db.fetchall(_OUTCOMES_SQL, (json.dumps(list(task_ids)),)))
+
+    def outcomes_sync(self, task_ids: Iterable[str]) -> dict[str, TaskOutcome]:
+        """:meth:`outcomes` off the sync path."""
+        return _outcomes_by_task(self.db.fetchall_sync(_OUTCOMES_SQL, (json.dumps(list(task_ids)),)))
+
     async def with_key_prefix(self, kind: str, key_prefix: str) -> list[Task]:
         """Return every task of ``kind`` whose idempotency key starts with ``key_prefix``, oldest first."""
         rows = await self.db.fetchall(_KEY_PREFIX_SQL, (kind, len(key_prefix), key_prefix))
@@ -565,12 +610,9 @@ class TaskRegistry:
         rows = await self.db.fetchall("SELECT * FROM tasks WHERE state=? ORDER BY updated_at ASC", (state,))
         return [Task.from_row(r) for r in rows]
 
-    async def reclaim_dead_running(
-        self,
-        *,
-        reason: str = "dead_holder",
-    ) -> list[str]:
+    async def reclaim_dead_running(self) -> list[str]:
         """Fail running tasks whose lease-holder process is provably dead."""
+        reason = "reconciler_dead_holder"
         reclaimed: list[str] = []
         reclaimed_rows: list[tuple[str, str, int]] = []
         async with self.db.transaction() as cur:
@@ -681,9 +723,13 @@ __all__ = [
     "TERMINAL_STATES",
     "Task",
     "TaskNotFound",
+    "TaskOutcome",
     "TaskRegistry",
     "TaskSpec",
-    "TerminalTaskReuse",
+    "UnspentKey",
+    "confirmed_result",
     "create_in_cursor",
     "create_on_free_key",
+    "first_unspent_key",
+    "recorded_outcome",
 ]

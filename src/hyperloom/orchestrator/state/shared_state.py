@@ -36,8 +36,6 @@ from hyperloom_common.jsonio import read_json_strict
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
 
-from .kernel_decision_settings import _DEFAULT_ATTEMPTS_HISTORY
-from ._shared_state.attempt_audit import _AUDIT_ACTIONS, _KEY_METRIC_MAP
 from ._shared_state.budget import _BudgetStateMixin
 from ._shared_state.enablement_round import EnablementRound
 from ._shared_state.roofline import _RooflineStateMixin, first_positive_tput
@@ -45,22 +43,11 @@ from ._shared_state.roofline import _RooflineStateMixin, first_positive_tput
 log = logging.getLogger(__name__)
 
 
-# escalate_strategy_change hint vocabulary (closed enum; unknown hints are denied). ``skip_to_kernel`` is the
-# "exhausted the current lever" signal from FRAMEWORK_AGENT; it advances to KERNEL.
-# KERNEL exits automatically when settled with no pending work — the LLM does not self-set a sweep hint.
+# The two hints the FRAMEWORK_AGENT exit reads. ``skip_to_kernel`` is the model's "this lever is exhausted", sent as
+# ``escalate_strategy_change``; ``skip_to_sweep`` is the Coordinator's own, set when a custom-specialist-only cycle
+# has run all its work.
 ESCALATE_HINT_SKIP_TO_KERNEL: str = "skip_to_kernel"
 ESCALATE_HINT_SKIP_TO_SWEEP: str = "skip_to_sweep"
-ESCALATE_HINT_VOCAB: frozenset[str] = frozenset(
-    {
-        ESCALATE_HINT_SKIP_TO_KERNEL,
-        ESCALATE_HINT_SKIP_TO_SWEEP,
-    }
-)
-
-
-def is_valid_escalate_hint(hint: str) -> bool:
-    """Return True for any hint Coordinator should act on (closed vocab)."""
-    return (hint or "").strip() in ESCALATE_HINT_VOCAB
 
 
 def resolve_anchor_with_drift(snapshot_tput: float, state: Any) -> tuple[float, bool]:
@@ -209,14 +196,14 @@ class KbInjection:
 
 
 @dataclass(frozen=True)
-class ActionAttempt:
-    """One settled attempt of an audited action, as ``record_action_attempt`` ledgers it."""
+class BaselineAttempt:
+    """One settled baseline and what the write-back decided about it, as ``record_baseline_attempt`` keeps it."""
 
     task_id: str
     status: str
     decision: str
-    result: dict[str, Any] | None
-    extras: dict[str, Any] | None = None
+    result: dict[str, Any]
+    extras: dict[str, Any]
 
 
 #: top-level state.json schema version, stamped on every save.
@@ -350,8 +337,6 @@ class SharedState(
     # Combined backstop counting ANY baseline failure regardless of error_class, catching mixed classes that never
     # trip a per-class streak (anti time-exhaustion).
     baseline_total_failures: int = 0
-    # One-shot: a cuda-graph capture failure asks the next baseline to retry with cuda-graph capture disabled.
-    baseline_eager_fallback: bool = False
     # Admission for both enablement lanes, from ``--enablement``: ``launch``, ``eval``, ``all`` (default) or ``off`` —
     # with ``off`` a broken baseline fast-fails instead of opening an authoring loop.
     enablement_mode: str = "all"
@@ -369,8 +354,6 @@ class SharedState(
     baseline_workload_extra: dict = field(default_factory=dict)
     # One-shot guard for PRELUDE warm-recipe replay (resume can't re-enqueue).
     warm_replay_attempted: bool = False
-    # One-shot guard for injecting warm-recipe history into explore ledger.
-    warm_history_injected: bool = False
     # Structured warm-replay outcome for reports/prompts (status reproduced|drift|failed|skipped, etc.).
     warm_replay_outcome: dict = field(default_factory=dict)
     # Crash-safe rollback/bookkeeping state for the combined Recipe + Kernel PRELUDE validation.
@@ -425,8 +408,6 @@ class SharedState(
     compute_partition: dict[str, Any] = field(default_factory=dict)
     # ``--nodes``, feeding the IR-8 check.
     nodes: int = 1
-    # Per-agent Unix timestamp of the most recent completed reactor pass.
-    agent_last_active: dict[str, float] = field(default_factory=dict)
     # Warm-recipe replay gates (``--no-warm-replay`` / ``--warm-replay-min-confidence``).
     warm_replay_enabled: bool = True
     warm_replay_min_confidence: float = 0.7
@@ -569,45 +550,28 @@ class SharedState(
     # How many times a fusion round left targets its lane ceiling never funded, counted here for the same reason as
     # the aborts above.
     fusion_withheld_retries: int = 0
-    # Per-action audit (kernel parity): each ``last_<action>`` is the most recent attempt snapshot; ``<action>_attempts`` is a capped list.
+    # The latest baseline attempt, failed or measured, with the write-back's decision on it. A result is announced
+    # before it is promoted, so this is the only record of a re-baseline the anchor was held against.
     last_baseline: dict[str, Any] = field(default_factory=dict)
-    last_profile: dict[str, Any] = field(default_factory=dict)
     # GEAK FP8 GEMM tuning snapshot (kernel_agent-owned): aiter A8W8 tuned CSV + SGLang dispatch patch before kernel_opt.
     last_gemm_tuning: dict[str, Any] = field(default_factory=dict)
-    # merged explore action snapshot (same schema as other ``last_<action>`` mirrors).
-    last_explore: dict[str, Any] = field(default_factory=dict)
-    last_roofline: dict[str, Any] = field(default_factory=dict)
-    baseline_attempts: list[dict[str, Any]] = field(default_factory=list)
-    profile_attempts: list[dict[str, Any]] = field(default_factory=list)
-    gemm_tuning_attempts: list[dict[str, Any]] = field(default_factory=list)
-    # explore audit log (capped per _DEFAULT_ATTEMPTS_HISTORY).
-    explore_attempts: list[dict[str, Any]] = field(default_factory=list)
-    # Capped roofline audit log with snapshot ids and analysis paths.
-    roofline_attempts: list[dict[str, Any]] = field(default_factory=list)
     # Global rolling log of unpromotable task results (cap _DEFAULT_LAST_FAILURES); rich failure context for self-correction. Covers every task kind.
     last_action_failures: list[dict[str, Any]] = field(default_factory=list)
-    # Structured per-variant failure evidence, capped and keyed by failure_id (last-wins).
-    failures: list[dict[str, Any]] = field(default_factory=list)
     # Immutable KEEP snapshots awaiting E2E integration, keyed by integration_id.
     pending_kernel_integrations: dict[str, Any] = field(default_factory=dict)
-    # Consecutive grid-runner tasks with no new current_best; Robustness nudges Orch off the plateau. Reset on advance.
-    params_no_promote_streak: int = 0
-    # Cumulative count of explore/integrate_patch rounds that produced at least one valid throughput measurement.
-    gain_gated_action_count: int = 0
-    # Unified persistent explore-search ledger; ``tested`` keyed by canonical_fingerprint, ``accepted`` holds the round's KEEPs, everything graded down moves to rejected.
+    # Unified persistent explore-search ledger; ``tested`` holds every variant a round judged, keyed by canonical_fingerprint.
     explore_search: dict[str, Any] = field(default_factory=dict)
     # specialist sub-agent rolling state; one entry per config-arm round (round_id, tasks, proposals_total/kept/rejected/skipped, etc.).
     specialist_rounds: list[dict[str, Any]] = field(default_factory=list)
     # Intervention-mix ledger ({change_type∈{config,code_patch,config_attempt,code_patch_attempt}}); Robustness detects config-only loops.
     intervention_mix: list[dict[str, Any]] = field(default_factory=list)
-    # Research scout bookkeeping; master switch ``--no-research-scout``; seen_pr_ids shared with FRAMEWORK to avoid re-mining.
+    # Research scout bookkeeping; master switch ``--no-research-scout``.
     research_scout_enabled: bool = True
     research_scout_interval: int = 3
     # Master switch for advisory "External target gap" prompt block (``--no-target-advisory``); never gates Objective.
     target_advisory_enabled: bool = True
     # Master switch for sedimenting KEEP/REVERT provenance into the persistent recipe; off => recipe stays ephemeral.
     recipe_sediment_enabled: bool = True
-    research_scout_seen_pr_ids: list[str] = field(default_factory=list)
     # Round id of last scout dispatch so K-round re-dispatch fires once per qualifying round.
     research_scout_last_round: int = -1
     # Static-recon specialist bookkeeping (explore-opt-5 capability A); master switch ``--no-static-recon``.
@@ -616,11 +580,8 @@ class SharedState(
     research_lane_capacity: int = 1
     # GPU pool capacity for needs_gpu specialists (0 disables); locked at session start.
     gpu_specialist_capacity: int = 0
-    # escalate_strategy_change carry-over: Coordinator writes validated next_action_hint here for compute_next_phase, then clears it either by consuming it (drove a transition) or discarding it (an unrelated transition fired while it was pending).
+    # The hint the FRAMEWORK_AGENT exit reads on the next phase decision; every phase transition clears it.
     pending_escalate_hint: str = ""
-    # last hint thrown away by an unrelated transition, never acted on (audit only) for the breakdown.
-    last_discarded_escalate_hint: str = ""
-    last_discarded_escalate_hint_ts: str = ""
     # per-phase plateau threshold overrides locked at session start (CLI flags); empty => library defaults.
     plateau_overrides: dict[str, Any] = field(default_factory=dict)
     # E2E integrate bookkeeping keyed by kernel_id+patch_path+args; prevents re-validating the same patch after NEEDS_REVIEW/REVERT.
@@ -628,7 +589,6 @@ class SharedState(
     # Crash-safe stack-validation checkpoints (CYCLE_END-entry combo E2E).
     pending_stack_validation_result: dict[str, Any] = field(default_factory=dict)
     pending_stack_validation_apply_results: list[dict[str, Any]] = field(default_factory=list)
-    rejected_kernel_patches: list[dict[str, Any]] = field(default_factory=list)
     # Kernel ids with no remaining automated path (from REVERTs + exhausted integrate attempts).
     rejected_kernel_ids: list[str] = field(default_factory=list)
     # Consecutive KERNEL_AGENT ticks that observed no forward motion AND no kernel-lane task in flight.
@@ -695,7 +655,7 @@ class SharedState(
     # Model-facing advisory context built by ``recipe_kb_t0``.
     warm_start_context: dict[str, Any] = field(default_factory=dict)
 
-    # structured gaps ledger: dedup'd unresolved bottlenecks (Coordinator-only refresh_gaps); dedup keyed by canonical_id, attempts capped 20/gap, list capped _GAPS_MAX_ENTRIES.
+    # structured gaps ledger: dedup'd unresolved bottlenecks (Coordinator-only writer); dedup keyed by canonical_id, attempts capped 20/gap, list capped _GAPS_MAX_ENTRIES.
     gaps: list[dict[str, Any]] = field(default_factory=list)
 
     # The CYCLE_END handoff turn's result: ``next_cycle_directive``, its ``for_cycle``, and ``parse_error``. Coordinator-only writer.
@@ -768,33 +728,6 @@ class SharedState(
         """Report whether an action family has been pruned."""
         return family in self.pruned_families
 
-    # escalate hint plumbing
-    def set_pending_escalate_hint(self, hint: str) -> str:
-        """Stash the LLM-supplied hint for the next phase compute pass; unknown hints dropped (Inv-8.2: closed vocab). Returns value written."""
-        text = str(hint or "").strip()
-        if text and not is_valid_escalate_hint(text):
-            return ""
-        self.pending_escalate_hint = text
-        return text
-
-    def consume_pending_escalate_hint(self) -> str:
-        """Pop the pending hint because it drove a phase transition; returns cleared hint."""
-        hint = (self.pending_escalate_hint or "").strip()
-        if not hint:
-            return ""
-        self.pending_escalate_hint = ""
-        return hint
-
-    def discard_pending_escalate_hint(self) -> str:
-        """Pop the pending hint because an unrelated transition fired without acting on it; returns cleared hint."""
-        hint = (self.pending_escalate_hint or "").strip()
-        if not hint:
-            return ""
-        self.pending_escalate_hint = ""
-        self.last_discarded_escalate_hint = hint
-        self.last_discarded_escalate_hint_ts = now_iso()
-        return hint
-
     def accepted_baseline_script(self) -> str | None:
         """Benchmark script belonging to the accepted baseline anchor, or None."""
         if self.baseline_benchmark_script is not None:
@@ -859,45 +792,27 @@ class SharedState(
             row["seq"] = index
         self.lifecycle = merged
 
-    def record_action_attempt(self, action: str, attempt: ActionAttempt) -> dict[str, Any] | None:
-        """Append one attempt to ``<action>_attempts`` and refresh ``last_<action>``. Entry schema {ts, task_id, status, decision, key_metric, key_metric_kind, workspace, error_class, error_excerpt, stderr_tail, stderr_log_path, raw_result_path, reported_success, variant_name, extras}. Returns the entry, or None when ``action`` not in the audit set (kernel_agent-owned actions use bespoke recorders). Does NOT call :meth:`save`."""
-        if action not in _AUDIT_ACTIONS:
-            return None
-        attempts_attr = f"{action}_attempts"
-        last_attr = f"last_{action}"
-        result = attempt.result or {}
-        metric_key, metric_kind = _KEY_METRIC_MAP[action]
-        raw_metric = result.get(metric_key)
-        try:
-            key_metric: float | None = float(raw_metric) if isinstance(raw_metric, (int, float)) else None
-        except (TypeError, ValueError):
-            key_metric = None
-        entry: dict[str, Any] = {
+    def record_baseline_attempt(self, attempt: BaselineAttempt) -> None:
+        """Replace ``last_baseline`` with ``attempt`` and tell the breakdown its decision. Does NOT call :meth:`save`."""
+        measured = attempt.result.get("output_throughput")
+        self.last_baseline = {
             "ts": now_iso(),
-            "task_id": str(attempt.task_id or ""),
-            "status": str(attempt.status or ""),
-            "decision": str(attempt.decision or ""),
-            "key_metric": key_metric,
-            "key_metric_kind": metric_kind,
-            **self._common_result_fields(result),
-            "extras": dict(attempt.extras or {}),
+            "task_id": attempt.task_id,
+            "status": attempt.status,
+            "decision": attempt.decision,
+            "key_metric": float(measured) if isinstance(measured, (int, float)) else None,
+            "key_metric_kind": "output_throughput",
+            **self._common_result_fields(attempt.result),
+            "extras": dict(attempt.extras),
         }
-        history: list[dict[str, Any]] = list(getattr(self, attempts_attr) or [])
-        history.append(entry)
-        if len(history) > _DEFAULT_ATTEMPTS_HISTORY:
-            history = history[-_DEFAULT_ATTEMPTS_HISTORY:]
-        setattr(self, attempts_attr, history)
-        setattr(self, last_attr, dict(entry))
-        if action == "baseline":
-            from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import record_action_decision
+        from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import record_action_decision
 
-            record_action_decision(
-                phase=str(getattr(self, "phase", "") or "unphased"),
-                macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
-                task_id=str(entry.get("task_id") or ""),
-                decision=str(entry.get("decision") or ""),
-            )
-        return entry
+        record_action_decision(
+            phase=str(getattr(self, "phase", "") or "unphased"),
+            macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
+            task_id=attempt.task_id,
+            decision=attempt.decision,
+        )
 
     # No action-score API; ``increment_tick`` is a pure monotonic counter for plateau/phase budget math.
     def increment_tick(self) -> int:

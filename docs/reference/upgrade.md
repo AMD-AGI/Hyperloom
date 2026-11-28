@@ -197,20 +197,17 @@ Critic was idle or healthy.
 
 What a proposal and a specialist deliverable now do:
 
-* A `propose_action` from Orchestration passes PolicyGate and the admission
-  chain, and its task is queued in the same step, announced by a `task_queued`
-  event as a `delegate` is. A repeat is answered by what already exists: a
-  task of the same content still queued or running, a `baseline` that already
-  measured, or an `integrate_patch` that already benchmarked that specialist's
-  deliverable. It is recorded as a `proposal_materialize_skipped` observation
-  with reason `duplicate_proposal_content`, `baseline_already_succeeded`,
-  `integrate_patch_already_measured` or `idempotency_key_exhausted`.
+* Nothing waits for a review. Orchestration queues every action with a
+  `delegate`, which passes PolicyGate and the admission chain and is queued in
+  the same step, announced by a `task_queued` event. The `propose_action`
+  intent, which 1.2.x held until the Critic ruled, is removed: see
+  [`propose_action` is removed](#required-propose_action-is-removed-and-delegate-queues-every-task).
 * When a specialist finishes with a patch or a routable artifact, or an
   ENABLEMENT round finishes with a config-only deliverable, the Coordinator
   queues the `integrate_patch` for that deliverable itself. A deliverable has
   one idempotency key, `integrate_patch:<specialist_task_id>`, whoever asks.
-* An `integrate_patch` that Orchestration asks for, by `delegate` or by
-  `propose_action`, is that same task: it carries the deliverable's own params
+* An `integrate_patch` that Orchestration asks for is that same task: it
+  carries the deliverable's own params
   (its patch name, companion flags and environment, ENABLEMENT round context
   and owner), with anything else Orchestration sent beside them. It is denied
   with `policy_denied` rule `integrate_patch_no_specialist` when it names no
@@ -223,8 +220,8 @@ What a proposal and a specialist deliverable now do:
   `integrate_patch` already benchmarked the deliverable is denied with
   `duplicate_idempotency_key`; one whose earlier `integrate_patch` ended
   without a benchmark starts a new task. The same rule now answers every
-  `delegate`: one that reuses the key of a `baseline` that already measured is
-  denied with `duplicate_idempotency_key` where it started a second baseline.
+  `delegate`: one that repeats a `baseline` that already measured is denied
+  with `duplicate_idempotency_key` where it started a second baseline.
 * Orchestration cannot queue an `integrate_patch` with
   `patch_source=upstream_pr`: it is denied with rule
   `integrate_patch_upstream_pr`. Only the FRAMEWORK_AGENT phase lands the
@@ -274,9 +271,9 @@ of the keys that go:
   `materialized` counters and its `rows`, including each row's `critic_review`
   and `outcome`;
 * `critic_review` on the proposal rows of a `framework_agent` event, whose
-  `lifecycle` no longer has a `reviewed` step. A grid Orchestration sent as a
-  `propose_action` now has the lifecycle a delegated grid has, `proposed` then
-  `attempted`, without the `routed` step in between.
+  `lifecycle` no longer has a `reviewed` step. Every grid Orchestration sends
+  has the lifecycle a delegated grid had, `proposed` then `attempted`, without
+  the `routed` step a reviewed proposal had in between.
 
 A consumer reads the task a proposal became from the dispatch row in
 `ext.actions.rows[]` of the phase event, and a refused intent from a row in
@@ -351,6 +348,992 @@ from scripts, and read `reports/final.md` for the session's own summary and
 `HYPERLOOM_REPORT_LLM_BACKEND`, `HYPERLOOM_REPORT_MODEL` and
 `HYPERLOOM_REPORT_MAX_TOKENS` are no longer read and are silently ignored, so
 drop them.
+
+### Recommended: stop matching the `role` and `custom_specialist_only` denial rules
+
+A `policy_denied` observation, and the `denials` row it becomes on a phase
+event in `session_breakdown.json`, no longer carries rule `role` or rule
+`custom_specialist_only`. Neither could fire in 1.2.x once Orchestration was
+the only agent taking turns: `role` refused an unknown agent or an intent type
+outside an agent's set, and Orchestration's set was every intent type;
+`custom_specialist_only` refused Orchestration's `specialist`, `explore` and
+`integrate_patch` in FRAMEWORK_AGENT under `HYPERLOOM_CUSTOM_SPECIALIST_ONLY=1`,
+where Orchestration takes no turn. Anything that counts or alerts on those two
+rule ids can drop them; every other rule id is unchanged.
+
+The `emit_intent` tool no longer refuses a call with `this role cannot emit`.
+An intent type outside the vocabulary is refused as before, by the tool schema
+and with `unknown intent_type`. Removing the role registry changes none of the
+tool's schema, the output-format block and Orchestration's tool list; the
+sections below on `propose_action` and on the context tools do.
+
+### Recommended: stop reading the records that nothing produced or read
+
+`hyperloom optimize` no longer writes a set of fields, rows and log lines that
+had a writer and no reader, or a reader and no writer. A session behaves as it
+did; what changes is what is left behind for anything that inspects a session
+by hand.
+
+In `state.json`:
+
+* `baseline_eager_fallback` is gone. It armed a one-shot retry of the baseline
+  with CUDA graphs disabled after a `cuda_graph_capture_failed` baseline, and
+  nothing returns that error class, so the flag was always `false`. A baseline
+  whose server needs CUDA graphs off takes the flag in `extra_server_args`, as
+  before.
+* A row of `kb_stage_outbox` or `kb_stage_dead_letter` no longer carries
+  `include_patches`; it was `true` on every row. A row names a realized diff
+  by its canonical path, as it already named a delivered patch, and the
+  `host_origin.sources` of the staged provenance row carries the same path.
+* `last_baseline` never has the decision `discarded`, and its
+  `anchor_held.reason` is never `no_measurement`. Neither could be written: a
+  baseline is promoted only with a positive throughput. (The roofline and
+  profile rows that could not be `skipped` or `discarded` either are removed
+  altogether; see the section on a task's result below.) A failed roofline is
+  still counted in `roofline_failure_streak`.
+
+In `storage/coordinator.db`:
+
+* The `round_events` table and its index are gone. It recorded every open,
+  renew, handoff and settle of a bring-up round and nothing read it. A refused
+  attempt is still answered to its caller with the reason, and
+  `bringup_rounds` still holds each round's state and outcome.
+* `events` has no `in_reply_to` column, and the payload of a `response` event
+  has no `in_reply_to` key. Neither was read; a reply still names what it
+  answers in `kind` (`<request kind>_done`). Orchestration's inbox line for a
+  `response` is shorter by that key.
+* A kernel step that runs inline no longer appends a `kernel_step_running`
+  observation every 150 seconds, so `hyperloom session events` and the
+  `event_counts_by_topic` of the final report count fewer `observation` rows
+  for a session with long kernel steps. The step's liveness stamp is unchanged.
+
+A database written by 1.2.x keeps its `round_events` table and `in_reply_to`
+column; this release leaves both alone and writes neither.
+
+In `agents/orchestration/mcp_setup.json`, `emit_intent.registered` is gone.
+It was `false` only for a backend that had started without the tool's server,
+which now does not start (see below). `emit_intent.offered` still says whether
+Claude Code offered the tool to the model.
+
+In the log, three lines no longer appear: `dispatch audit: ... has no
+registered executor` (the task still ends `failed` with `no_executor`),
+`dispatcher: reclaimed N running task(s) with dead holders`, and `patch kb:
+KEEP at stack index N references missing patch members` (a KEEP whose patch
+files are gone is still dropped to `kb_stage_dead_letter` with a warning).
+
+Five behaviours change at the edges:
+
+* After a restart, the tasks the previous process left `running` are failed by
+  the reconciler at the start of the tick, as before; the dispatcher no longer
+  repeats the same query later in that tick. If the reconciler's query fails
+  on a database error, the reclaim is retried on the next tick instead of
+  later in the same one. The failure charged for such a task (`error_class`
+  `dead_holder_reaped`) ends `task reclaimed by the reconciler`; 1.2.x ended
+  it `task reclaimed by dead_holder_pump`.
+* A delegate whose key names a task another author created is answered like
+  any other repeated key: with `duplicate_idempotency_key` or
+  `duplicate_idempotency_key_running`, or with a new task under
+  `<key>-retry<n>` when the earlier one ended unmeasured. 1.2.x raised
+  `idempotent task dispatch_class mismatch`, recorded as a
+  `handle_intent_exception` observation. The existing task keeps the dispatch
+  class it was created with.
+* `get_inbox` shows the text of Orchestration's own `alert` as it was written;
+  1.2.x rewrote prompt-structure markers in it. Orchestration is the only
+  author of an `alert`, and its own rows are not part of the inbox it is sent
+  each turn.
+* A baseline result whose `output_throughput` is a numeric string anchors as
+  the number it spells. 1.2.x admitted such a result to promotion and then
+  recorded it `discarded`, neither anchoring it nor counting a failure. The
+  optimizer's own executors report the throughput as a number.
+* A `claude-agent-sdk` that lacks `tool` or `create_sdk_mcp_server` ends
+  `hyperloom optimize` at start-up with `claude_agent_sdk loaded but missing
+  ...`. 1.2.x started the session without the `emit_intent` tool, and it ended
+  later on turns that emitted no intent. Every SDK the `llm` extra allows
+  (`>=0.2.110`) has both.
+
+### Required: `state.json` drops its second copies and its prompt-only counters
+
+`hyperloom optimize` kept several facts twice, and a few counters only to
+print one line of the Orchestration prompt. Each fact now has one copy.
+Anything that reads the removed copy reads the one that stays.
+
+In `state.json`:
+
+| Removed key | Read instead |
+|---|---|
+| `current_best.optimization_stack` | `optimization_stack` at the top level. Every KEEP appended to it and rewrote `current_best` in the same step, so the two were equal. |
+| `explore_search.accepted` | The rows of `optimization_stack` with `action` `explore` for the variants the session adopted; `explore_search.winners_history` for every variant a round measured KEEP. The removed list also held winners the KEEP gate went on to refuse. |
+| `rejected_kernel_patches` | `kernel_integrate_attempts.<key>.rejected`, the same record under the patch's key. |
+| `enablement.observed_accuracy`, `observed_task`, `observed_metric`, `eval_definition_digest`, `baseline_eval_evidence` | The `trigger` block of the enablement event in `session_breakdown.json`, which is where they were copied to. `enablement.baseline_eval_kind`, `probe_config_path` and `accuracy_floor` stay. |
+| `research_scout_seen_pr_ids` | Nothing; see the discovery change below. |
+| `params_no_promote_streak` | `explore_search.winners_history` and `attempts`. |
+| `gain_gated_action_count` | Nothing read it. |
+| `agent_last_active` | Nothing read it. |
+
+`reports/final.json` copies `current_best` from `state.json`, so its
+`current_best` no longer carries `optimization_stack` either, in the full
+report and in the crash-safe one. `optimization_stack_len` stays.
+
+`storage/coordinator.db` no longer has a `lane_capacity` table. The capacity of
+`research_lane` is the session's `--research-lane-capacity`, held in
+`state.json` as `research_lane_capacity`; every other lane admits one holder.
+Editing the table during a session, which 1.2.x read on every lease, no longer
+changes a capacity. A database written by 1.2.x keeps the table; this release
+neither reads nor writes it.
+
+The Orchestration prompt changes with them:
+
+* The `=== Tick ===` block is `tick=N`. The `agent_last_active=` line under it
+  is gone.
+* `elapsed=` in the `=== Time budget ===` block is the time the session has
+  been charged across every run of it, so `elapsed` plus `remaining` is the
+  budget on a resumed session. 1.2.x printed the time since the current
+  process started next to a `remaining` that already counted earlier runs.
+* The `=== Shared session state ===` block has no `params_no_promote_streak=`
+  or `gain_gated_action_count=` line, and the first line under
+  `explore_search=` has no `accepted=N`. `rejected_kernel_patches=` prints the
+  same five most recent rejections as before.
+
+Six behaviours change:
+
+* No `<workload>#explore_plateau` gap is created. 1.2.x added it to
+  `state.json` `gaps`, the `=== Current gaps ===` block, `get_gaps` and the
+  `remaining_gaps` of a published recipe after three explore tasks in a row
+  set no new `current_best` and none of the last five recorded winners had a
+  gain. Whether the configuration search has run dry is still judged from
+  `attempts`, and the plateau advisory still reports it.
+* A research-scout task's `params` have no `seen_pr_ids`; the specialist was
+  never shown them. Its `already_proven` list names the warm recipe's proven
+  items and the explore variants on `optimization_stack`; 1.2.x listed every
+  winner an explore round reported, adopted or not.
+* FRAMEWORK candidate discovery drops a proposed pull request as already known
+  only when an earlier discovery batch holds it. 1.2.x also dropped one whose
+  URL a research hint gave as its `source`, a specialist proposal cited in
+  `pr_evidence` or `source_evidence`, or a specialist listed in the `research`
+  block of its result (`prs_fetched`, `pr_diffs_read`, `nvidia_refs`), so a
+  pull request a specialist had only read could never become a candidate. The
+  `research` block is no longer read, and the research scout's prompt no
+  longer says the Coordinator de-duplicates by pull-request id.
+* The `trigger` block of the enablement event in `session_breakdown.json`
+  reports `observed_accuracy: null` when the failed baseline eval scored
+  nothing (an `eval_runtime_failure`, for example). 1.2.x reported `0.0`.
+* A queued task that still holds a row on a lane it needs is dispatched; the
+  lease refreshes its row. 1.2.x counted the task's own row against the lane
+  and left it queued on every pass. Two tasks that need the same lane, or
+  lanes that exclude each other, still never run together.
+* `explore_search.rejected` is removed as well (see the section on a task's
+  result below), so a variant that a later round measures KEEP has one row,
+  its `tested` row, and that row says KEEP. In 1.2.x its `rejected` row
+  stayed behind whenever the KEEP came from a stack-revalidation round.
+
+The log no longer prints `depth: aggregated N new research reference(s) into
+seen-set`, and `specialist findings harvested` reports `hints_added` only.
+
+### Recommended: stop reading the discarded-hint record, and stop sending `skip_to_sweep`
+
+`escalate_strategy_change` has one hint Orchestration may send,
+`next_action_hint='skip_to_kernel'`, accepted in FRAMEWORK_AGENT. The
+Orchestration prompt already offered only that one. The hint is checked once,
+when the intent arrives, and a phase transition clears a pending hint without
+keeping a record of it.
+
+* `state.json` no longer has `last_discarded_escalate_hint` or
+  `last_discarded_escalate_hint_ts`. `pending_escalate_hint` stays, and is
+  empty after every phase transition, as before.
+* The Orchestration prompt has no `=== Discarded escalation hint (advisory)
+  ===` section. 1.2.x showed it for one turn after a phase transition dropped
+  a pending hint, and asked for the hint to be sent again. By then the session
+  had left the phase the hint was about, so a re-sent `skip_to_kernel` was
+  denied (`escalate_hint_phase`); and the section also reported a
+  `skip_to_sweep` the Coordinator had set itself as Orchestration's own. The
+  Phase block reports the transition.
+* `escalate_strategy_change{next_action_hint='skip_to_sweep'}` from
+  Orchestration is denied with rule `escalate_hint_not_in_vocab`. 1.2.x
+  accepted it in every phase, and in FRAMEWORK_AGENT it ended the phase with
+  no round run, which `skip_to_kernel` does not. The Coordinator still sets
+  `skip_to_sweep` itself when a custom-specialist-only cycle
+  (`HYPERLOOM_CUSTOM_SPECIALIST_ONLY=1`) has run all its work; the exit
+  evidence and the `hint` of `predicate_inputs` in `session_breakdown.json`
+  record it as before, and the values `hint` can take do not change.
+* The `hint` of an `escalate_hint_not_in_vocab` denial reads `skip_to_kernel,
+  sent in FRAMEWORK_AGENT, is the one hint; the run closes itself.` Rule ids
+  `escalate_hint_not_in_vocab` and `escalate_hint_phase` are unchanged.
+* The log no longer prints `phase_machine: discarded stale
+  pending_escalate_hint=...`.
+
+### Required: a malformed timeout or retry variable stops the launch
+
+`INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC`,
+`INFERENCE_OPTIMIZER_CLAUDE_TURN_TIMEOUT_SEC`,
+`INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC` and
+`INFERENCE_OPTIMIZER_DEEPSEEK_CALL_TIMEOUT_SEC` must be a positive finite
+number of seconds. `INFERENCE_OPTIMIZER_LLM_RETRY_ATTEMPTS`, `_BASE_S`,
+`_MAX_S`, `_MULT` and `_JITTER_S` must be a non-negative finite number. Any
+other value ends `hyperloom optimize` with an `EnvValueError` that names the
+variable, when the Orchestration backend is built at start-up. 1.2.x logged a
+warning and ran on the default, so a session could run to its end on a
+timeout its operator had not set. Unset and blank still mean the default, and
+`INFERENCE_OPTIMIZER_LLM_RETRY_ATTEMPTS=0` still means one attempt.
+
+Check the launchers and environment files that set any of the nine, and remove
+or correct a value such as `0`, `-1`, `inf` or `30s`.
+
+### Recommended: stop matching the denials the Coordinator no longer issues
+
+Checks that refused an intent for its shape, or that repeated a decision
+another component owns, are removed. Each input is now handled by the code
+that acts on it, and none of them is recorded as a failed action.
+
+* `send_message` is never denied with rule `payload`. A blank `topic` is
+  stored under `observation`, as an unknown topic already was. A `to` that is
+  an empty string or an empty list broadcasts. Any other `to` is addressed as
+  written: one message per list entry, each name converted to a string. 1.2.x
+  denied a blank topic, and a `to` that was neither a non-empty string nor a
+  non-empty list of them.
+* `prune_branch` is never denied with rule `prune_scope`. `scope='family'`,
+  or no scope, retires the family as before. Every other value cancels the
+  family's queued tasks and leaves the family usable, as `scope='queued'`
+  does. A blank `family` is still denied (`payload`).
+* `extend_lease` is never denied with rule `extend_lease_task_not_live`. An
+  extension for a task that is not running is refused by the task registry
+  and reported as an `extend_lease_rejected` observation, with the task's
+  state in `error`; that was already the outcome when the task finished
+  between the check and the extension. It has no row in the `denials` of a
+  phase event in `session_breakdown.json`. The removed check read the running
+  tasks at the start of the tick, so it also refused a task that had started
+  during the Orchestration turn; that extension is now granted.
+  `extend_lease_bounds` is unchanged.
+* A `delegate` is never denied with rule `execution_order`, which also
+  refused the removed `propose_action`. The rule refused `explore`,
+  `integrate` and `report`
+  before a baseline, and the phase table already does (`phase_incompatible`):
+  a session with no baseline is in PRELUDE or ENABLEMENT, which offer none of
+  the three, or in CLOSE, where the rule did not apply. A kernel `request`
+  before a baseline is still denied with `execution_order`.
+* The Coordinator no longer broadcasts the observations
+  `stale_stack_revalidation` and `current_best_drift`. A stack revalidation
+  that measured an older recipe generation is still discarded, with the same
+  `not validating` warning in the log. A current one still restamps
+  `cumulative_gain_validated`, which is where a lower re-measurement shows.
+* The Claude backend keeps every `emit_intent` call of a turn. 1.2.x dropped
+  a call whose input arrived in Claude Code's `__unparsedToolInput` wrapper
+  when the turn had already carried the same intent, and logged `claude
+  fallback intent deduped`. Both forms of the wrapper are still decoded.
+
+### Required: five Orchestration context tools are removed
+
+Orchestration's read-only context server no longer mounts five tools. Four
+returned a block every turn's prompt already carries, and the fifth returned a
+file the prompt now names. A model that calls one gets a tool error inside its
+turn; no session state changes.
+
+| Removed tool (`mcp__inference_optimizer_context__...`) | Where the same content is |
+|---|---|
+| `get_mission_status` | The `=== Mission progress ===` block of every turn. |
+| `get_shared_state` | The `=== Shared session state ===` block of every turn. |
+| `get_warm_start` | The `=== Warm start (Recipe KB T0) ===` block of the session context. |
+| `get_intervention_mix` | The `=== Intervention mix (telemetry) ===` block of the session context. |
+| `show_analysis_md` | The file on the `analysis_md=` line of the session-state block, which is `last_trace_analyze.analysis_md_path` in `state.json`. |
+
+* If you pass your own Orchestration prompt with `--orch-prompt` and it names
+  one of the five, remove the name: the tool is neither mounted nor allowed.
+* `agents/orchestration/mcp_setup.json` lists eight context tools in
+  `allowed_tools` and `mcp_tools`: `get_gaps`, `get_runtime_findings`,
+  `get_inbox`, `get_recent_outcomes`, `get_running_tasks`, `read_reference`,
+  `get_failure` and `get_variant_failures`. Those eight and their arguments
+  are unchanged; the section on a task's result below lists what four of them
+  answer differently.
+* `show_analysis_md` replaced each embedded base64 image of `analysis.md` with
+  a placeholder. The file itself holds the images as TraceLens wrote them.
+* `last_trace_analyze` in `state.json` no longer has `analysis_md_text`, the
+  whole text of `analysis.md`, embedded images included, which only
+  `show_analysis_md` returned and every save rewrote. Read the file at
+  `last_trace_analyze.analysis_md_path`. The new
+  `last_trace_analyze.has_analysis_md` is `true` when that file held anything
+  at the time the roofline was recorded, and `false` for a report that was
+  missing or empty, which 1.2.x stored as an empty `analysis_md_text`.
+* In the session-state block, the `analysis_md=` line of a session with a
+  TraceLens snapshot ends `Report file: <path>` where it named the tool.
+  Before the first snapshot the line said that `roofline` and `profile` could
+  also be proposed directly; no phase admits that proposal
+  (`phase_incompatible`), and the line now says it is denied.
+
+The built-in Orchestration system prompt changes with them. None of this
+changes what the Coordinator admits or dispatches:
+
+* The `## 3. PIPELINE & TIME BUDGET` section is gone, and `## 3a. PHASE
+  CONTRACT` is `## 3. PHASE CONTRACT`. The section summed a typical runtime per
+  action group against the session budget (`--max-hours`) and advised skipping
+  analysis or adding an explore round before the report, both of which the
+  Coordinator schedules.
+  The Phase block of every turn carries the remaining budget, and each
+  catalogue entry its own typical cost.
+* The catalogue entry of `roofline` shows no proposal template; it showed
+  `propose_action{action_name='roofline', ...}` beside the rule that forbids
+  proposing it.
+* The prompt no longer says that the session-state block carries the full
+  `analysis.md`, that dispatches are deferred while a roofline refresh runs,
+  or that a `=== Phase-allowed actions ===` block, a working-memory block or a
+  `KB hints` block exists. It names `untried_hot_kernels` and the `tested:`
+  rows of `explore_search`, which are what a turn shows, where it named
+  `untried_hot_reusable_kernels`, `explore_search.winners_history`,
+  `explore_search.rejected` and `<action>_attempts`.
+
+### Recommended: stop reading the pruning counts; the session database keeps every row
+
+The Coordinator no longer deletes anything from `storage/coordinator.db`.
+1.2.x deleted rows on every maintenance pass (every 30 minutes) and at the
+start of each macro-cycle: the rows of `events` older than the newest 5,000,
+except a `proposal` the Critic had not ruled on yet, and every `succeeded` or
+`cancelled` row of `tasks` but the 2,000 most recently updated.
+
+The 5,000 counted events of every topic, so in a session that wrote more, the
+deleted rows included `delegated_result`, the record of what each task
+returned. In 1.2.x `--resume-from` read those rows to replay a KEEP whose
+promotion a crash interrupted, and `reports/final.json` counts them: such a
+session resumed without its earlier results and reported only its newest
+events.
+Deleting a finished task row also released its idempotency key, so the same
+action could have been queued a second time.
+
+* The `events` and `tasks` tables now hold the whole session, and the database
+  grows with it: a session of 17 hours, 3,361 events and 399 tasks left a
+  database of 15.7 MB, about 20 MB a day. Nothing needs to be configured: no
+  flag or environment variable set the two limits.
+* A session that runs for about three days or longer is packaged without its
+  database. The must-ship files of a session package share a ceiling of 64 MB,
+  and `storage/coordinator.db` is left out once it is larger than that. In
+  1.2.x the two limits kept the file under the ceiling (it levelled off near
+  54 MB at the row sizes of one recorded session); at 20 MB a day it now
+  passes 64 MB on the fourth day. The package says so: `PACKAGE_MANIFEST.json`
+  has `complete: false`, `truncated: true` and `reserved_overflow: true` and
+  names the file in `dropped_files`, `PACKAGE_MANIFEST.txt` carries the line
+  `!! RESERVED PARTITION OVERFLOWED`, and the log has an error that starts
+  `session package: MUST-SHIP artifact storage/coordinator.db`. Shortly before
+  that, a must-ship file listed after the database (`state.json`,
+  `manifest.json`, `session_breakdown.json`, `reports/final.json`) is the one
+  left out when it no longer fits under the ceiling beside it. Nothing is
+  removed from the session directory: read the database and those files there
+  when a package reports the overflow.
+* `events_pruned` and `tasks_pruned` are gone from the `maintenance tick N:
+  {...}` line of the log and from the payload of the `cycle_soft_restart`
+  observation. Stop parsing them; the other keys are unchanged.
+* `event_counts_by_topic` and the highlights of `reports/final.json` and
+  `reports/final.md` are taken from the newest 10,000 events. In 1.2.x they
+  covered what the last pass had left: the newest 5,000 events and those
+  written since.
+* `hyperloom session events --all` counts every event of the session, where it
+  counted what the last pass had left. Without `--all` it still reads the
+  newest 500.
+* `get_inbox` called without `since_seq` returns every event of the session
+  that is addressed to Orchestration or broadcast, where it returned what the
+  last pass had left. Pass `since_seq` to page.
+* The `resource_lock` warning for a lane held under an id that is no task (a
+  kernel request holds its lanes under its message id) ends `the holder has no
+  task row, so nothing can attest it ended`. It ended `the holder's task row
+  no longer exists, ...`, which described a row the pruning had deleted.
+
+### Required: a task's result is kept once, on its task row
+
+`hyperloom optimize` wrote what a finished task returned to several places:
+the task's row, the `delegated_result` event that announces it, and for some
+actions one or two lists in `state.json`. It now writes it to the task row,
+and each of the other places either goes or keeps only what the row does not
+hold. Anything that read a removed copy reads the row.
+
+In `storage/coordinator.db`:
+
+* The payload of a `delegated_result` row of `events` is
+  `{"task_id", "kind", "state"}`. It no longer carries `result` or `error`.
+  Both are in the task's row, in the newest entry of `tasks.history` that has
+  `evidence.outcome`: `outcome.result`, `outcome.error` and
+  `outcome.error_class`, written before the event:
+
+  ```bash
+  sqlite3 "$SESSION_DIR/storage/coordinator.db" "
+    SELECT e.seq, json_extract(e.payload, '\$.kind'), json_extract(h.value, '\$.evidence.outcome.result')
+    FROM events e JOIN tasks t ON t.task_id = json_extract(e.payload, '\$.task_id'), json_each(t.history) h
+    WHERE e.topic = 'delegated_result' AND json_extract(h.value, '\$.evidence.outcome') IS NOT NULL
+    ORDER BY e.seq"
+  ```
+
+  The event is still written once per booked result, in the same order, and a
+  task whose attempt was retried instead of booked still has no event.
+  `hyperloom session events` prints the same `delegated:<kind>:<state>` counts.
+* The event's copy of an authored patch's result carried `reauthor_attempt`.
+  Read `params.reauthor_attempt` of the task row.
+* The database grows more slowly: in one recorded session of 21 hours the
+  result copies were 3.5 MB of a 19.2 MB database.
+* An open bring-up round no longer holds a row of `leases` under the lane
+  `bringup_round`. The round, its holder and its expiry are in
+  `bringup_rounds`, as before. A database written by 1.2.x for a session that
+  stopped while a round was open still holds such a row, and `--resume-from`
+  refuses that session, naming the holder task with `lane='bringup_round'` and
+  `execution owner scope or PID is unobservable`. Once you have checked that
+  the task's processes are gone, delete the row:
+
+  ```bash
+  sqlite3 "$SESSION_DIR/storage/coordinator.db" "DELETE FROM leases WHERE lane = 'bringup_round'"
+  ```
+
+  The task's other leases are then checked as on any resume. `hyperloom
+  recover --session-dir <session> --confirm-stopped <task-id>
+  --confirmation-reason <reason>` removes the row only when it is the only
+  lease the task holds. A session that stopped in the middle of a round
+  usually still records the task's execution lease too; `--confirm-stopped`
+  then fails with `confirmation is limited to strictly empty owner scope on
+  every target lease`, and `--confirm-scope-gone` is refused on the round row.
+
+In `state.json`:
+
+| Removed key | Read instead |
+|---|---|
+| `baseline_attempts` | `last_baseline` for the latest attempt and the decision on it; the rows of `tasks` with `kind = 'baseline'` for every attempt and what it returned; the baseline rows of `session_breakdown.json` for each attempt's decision. |
+| `last_profile`, `profile_attempts` | `last_profile_trace`, `last_profile_status` and `last_profile_args` for what the latest profile left; the `profile` rows of `tasks` for every attempt. |
+| `last_roofline`, `roofline_attempts` | `last_trace_analyze` and `roofline_snapshots` for what each roofline produced, `roofline_failure_streak` for failures in a row; the `roofline` rows of `tasks`. |
+| `last_explore`, `explore_attempts` | `explore_search.last_round` and `explore_search.tested` for what the rounds measured; the `explore` rows of `tasks`. |
+| `explore_search.rejected` | The rows of `explore_search.tested` whose `outcome` is not `KEEP`. Each rejected row was a shorter copy of its `tested` row. |
+| `gemm_tuning_attempts` | `last_gemm_tuning` for the latest GEMM tuning result and its end-to-end verdict; the `result.json` in the workspace of each earlier tuning run. Nothing read the list. |
+| `warm_history_injected` | Nothing read it but the copy below. |
+| `failures` | The files `reports/failures/<failure_id>.json`, one per failed explore variant, which were written beside it. |
+
+`last_baseline` stays as it was, `extras.anchor_held` included: a result is
+announced before the write-back decides on it, so this is the only record of a
+re-baseline that measured and did not move the anchor. `last_action_failures`,
+`explore_search.last_round`, `gain_per_stack_entry` and `last_gemm_tuning`
+stay too.
+
+The rows of a warm recipe's `what_failed` are no longer copied into
+`explore_search.rejected` after the first baseline. They are still in
+`warm_start_context.do_not_repeat` and in the `avoid` line of the warm-start
+block. No check read the copies: a variant is answered without a launch from
+its `tested` row only.
+
+In `reports/`:
+
+* Each `delegated_result` entry of `highlights` in `final.json` has the
+  three-key payload above, and its `summary` is `kind=<kind> state=<state>`.
+  1.2.x embedded the whole result in `payload` and ended the summary with
+  `tput=` and `decision=`.
+* The stop report of a `baseline_failed` session (`failure_summary` in
+  `final.json`) is built from `last_baseline`, which holds the same fields as
+  the last row of the removed list.
+* The emergency `final.md`, written when CLOSE did not finish, has a `## Last
+  baseline attempt` section with the `last_baseline` bullet. It was `## Last
+  action attempts` with three bullets.
+* A failure packet that cannot be written to `reports/failures/` is now an
+  error, and the booking of that explore round stops there. When the tick
+  itself was booking the round, it records the exception in `state.json`
+  `last_tick_exception` (stage `tick_body`) and counts it in `crash_count`.
+  When the round was booked while an Orchestration turn was running, the
+  exception is only the log line `turn_pump: the dispatcher pump beside a
+  reactor turn raised; paused until the turn ends`, with its traceback, and
+  nothing is written to `state.json`. 1.2.x logged it at debug level and
+  kept the copy in `state.json`.
+
+In `session_breakdown.json`, `outcome.stage_reached` of a session that ended in
+PRELUDE with no typed timeline event no longer counts a `profile` task that
+failed, which PRELUDE runs in place of the roofline under
+`--no-enable-roofline`: a session whose only profile failed reports the stage
+before it (`warm_replay` or `baseline`), where 1.2.x reported `profile` from
+the failed attempt's row. A roofline that failed is still reported as
+`roofline`, from `roofline_failure_streak`.
+
+What Orchestration reads changes with them:
+
+* A `delegated_result` line of the inbox, of `get_inbox` and of
+  `get_recent_outcomes` no longer prints `kept=` or `tput=`, and `status=` and
+  `gain=` are taken from `status` / `runner_status` and `gain_pct` /
+  `delta_pct` only. No executor writes the other names the line looked for
+  (`verdict`, `outcome`, `validated_gain_pct`, `predicted_gain_pct`,
+  `tokens_per_s`, `tput`, `throughput`, `tput_tok_s`, `kept`), so no recorded
+  line carried them. The rest of the line, and the failure and skip rows
+  under it, are the same text, read from the task row.
+* The `=== Shared session state ===` block has no `last_profile=`,
+  `last_explore=` or `attempts_history=` line. `last_baseline=` and
+  `last_gemm_tuning=` stay. The first line under `explore_search=` has no
+  `rejected=N`.
+* The `=== Acceptance threshold (advisory) ===` block lists each measured
+  variant once. 1.2.x listed every variant that was not a KEEP twice, and
+  listed the warm recipe's failed rows that carried a gain.
+* `get_failure` returns any packet of the session. 1.2.x answered `not in
+  memory` for all but the 30 newest and named the file to read.
+  `get_variant_failures` lists from the same files, newest first, up to
+  `top_k` (50 at most), so it also reaches past the 30 newest.
+* In a `=== Tasks in flight ===` line, `lanes=[...]` no longer lists
+  `bringup_round` for the task that holds an open round, and
+  `lease_expires_in_sec` counts down to the expiry of the task's own lanes.
+  The lanes an `extend_lease` observation reports as refreshed no longer
+  include it.
+* The failure-recovery reference (`read_reference('failure_recovery')`) and
+  the FAILURE RECOVERY block name `last_baseline` and `last_action_failures`,
+  where they named `last_<action>` and `<action>_attempts`.
+
+Four behaviours change on `--resume-from`:
+
+* A KEEP whose promotion a crash interrupted is adopted from the task row and
+  the `pending_integrate` sentinel alone. This is where 1.2.x looked second;
+  it first searched every `delegated_result` event for a `kept` result. The
+  row is written before the event and holds the same result, so the same
+  KEEPs are adopted, and one whose event was never written is too. The
+  `resume_consistency` warning `pending_integrate_scan_failed`, which
+  reported that the event search could not read the log and left the
+  sentinel for the next start, is no longer written.
+* The resume no longer searches the events for a `kept` result that is not on
+  `optimization_stack`. That search re-tried on every start a KEEP the
+  promotion gate had refused, and after `--reset-state` replayed the KEEPs of
+  the discarded state onto the new one. The `resume_consistency` observation
+  therefore never carries `replayed_orphaned_keep`, `orphaned_keep`,
+  `orphaned_keep_discarded` or `orphaned_keep_replay_noop`, and no
+  `orphaned_keep` observation is sent.
+
+  With `--reset-state` this leaves the patches the discarded state had kept
+  on the framework tree (in a git tree, as the commits whose subject starts
+  `hyperloom KEEP`), and nothing in the new state records them:
+  `optimization_stack` starts empty, no stack rebench is queued, the next
+  baseline is measured on a tree that carries them, and the recipe the
+  session publishes has no step for them. 1.2.x adopted them again from the
+  event log and queued a rebench of the stack. Put the framework tree back
+  to what it was before the session before you pass `--reset-state`; the
+  `optimization_stack` of the backup `state.json.preReset.<unix time>` lists
+  what was kept. Otherwise the new baseline includes those patches.
+* A database error while the open integrate window is read ends the start-up
+  with that error, and no stop reason is set. 1.2.x ended it with `pending
+  integrate recovery is incomplete; refusing resume before measurement` and
+  `stop_reason=patch_recovery_incomplete`. Either way the window is left as
+  it was.
+* An authored patch whose outcome was booked while its phase had moved on is
+  recovered from the task rows of the booked results, not from the events'
+  copies; the same rows are recovered.
+
+### Required: `propose_action` is removed and `delegate` queues every task
+
+Orchestration had two intents that queue an action. `propose_action` waited
+for the Critic in 1.2.x; with the Critic gone it created the same task as
+`delegate`, seeded and keyed a little differently, and for a `specialist` it
+skipped the specialist contract and took only `research_lane`, so a bench
+specialist sent that way could start beside a serving benchmark. `delegate` is
+now the only one, and a delegate names its task by the work it asks for.
+
+Do these first:
+
+* In an Orchestration prompt you pass with `--orch-prompt`, replace every
+  `propose_action{action_name=..., predicted_gain_pct=...}` with
+  `delegate{action_name=..., params={...}}`. A `propose_action` is refused in
+  the turn that sends it: the `emit_intent` tool answers
+  `emit_intent: unknown intent_type 'propose_action'`, a JSON envelope fails
+  with `intents[<i>].intent_type 'propose_action' not in allowed set`, and
+  the tool's schema no longer lists the type.
+* Move the estimate from the top-level `predicted_gain_pct` to
+  `params.predicted_gain_pct`: no intent requires the top-level field and
+  nothing reads it there. The action catalogue asks for the estimate on an
+  `explore` delegate only. From `params` it is recorded as before: as
+  `predicted_gain_pct` on each row the task writes to
+  `optimization_journal.json`, on the KEEP and REVERT decisions of
+  `reports/trace/decision_trace.jsonl`, and as the Langfuse score
+  `predicted_gain_pct`. 1.2.x required the estimate on every `propose_action`,
+  so the rows of a proposed `baseline` or `target_analysis` carried one too;
+  those rows now carry none, and neither do an `explore` round's when its
+  delegate sends no estimate. A prompt that wants it on another action asks
+  Orchestration for `params.predicted_gain_pct` on that delegate.
+* Stop sending `idempotency_key`, at the top level or under `params`: both
+  are ignored, and the one under `params` is removed before the task is
+  created. To run identical work again, send it again after its task ended.
+* Stop sending a specialist wave (`params.tasks=[...]`). Send one `delegate`
+  per task; a turn carries as many intents as you emit. A `scope=freeform`
+  delegate that carries `tasks` and no `task_description` is denied with rule
+  `specialist_freeform_empty_description`; beside a `task_description` the
+  list is not read. A delegate that names a `domain` and a
+  `gap_canonical_id` and carries `tasks` was a wave of freeform tasks in
+  1.2.x too: it is now one specialist of that domain on that gap, the list
+  is not read, and nothing is denied. `task_summary` is not read on any
+  delegate: only the wave read it, and the prompt's free-form example no
+  longer sends it.
+
+The key of a task (`tasks.idempotency_key` in `storage/coordinator.db`, shown
+in the `=== Tasks in flight ===` block of the prompt) is now always derived by
+the Coordinator:
+
+| Delegate | Key | What it is taken over |
+|---|---|---|
+| `integrate_patch` naming a specialist | `integrate_patch:<specialist_task_id>` | The deliverable, as before. |
+| `baseline` | `baseline:<16 hex>` | The seven launch fields: `benchmark_script`, `result_dir`, `extra_server_args`, `extra_envs`, `model_path`, `gpu_type`, `config_path`. |
+| `explore` | `explore:<16 hex>` (1.2.x: `explore:<10 hex>`) | The grid with the stack, KEEP bar and round cursor the Coordinator seeds it with, as before. |
+| `specialist` | `specialist:<16 hex>` | The params as delegated, with its owner and a cited predictor mandate resolved, before the dispatch is warmed with session context. |
+| any other action | `<action>:<16 hex>` | Its `params`. |
+
+For a `delegate` other than an `explore`, 1.2.x took the `idempotency_key`
+Orchestration sent, and without one used
+`orchestration:<action>:t<tick>:<10 hex>`, which changed every tick. What
+that changes:
+
+* A `delegate` that repeats work whose task is still queued or running is
+  denied with rule `duplicate_idempotency_key_running`. In 1.2.x a `baseline`
+  delegated again on a later tick was a second bring-up, and a specialist
+  delegated again with the same params was a second task. A refused
+  specialist is not warmed: it reads no Experience KB and adds no row to
+  `experience_kb_injections` in `state.json`.
+* A `delegate` that repeats a `baseline` that measured, or an
+  `integrate_patch` that benchmarked its deliverable, is denied with rule
+  `duplicate_idempotency_key`; the hint names the task that holds the answer.
+* A `delegate` that repeats work whose task ended any other way starts a new
+  task under `<key>-retry<n>`, five times at most. The seventh identical
+  delegate of a session is denied with rule `duplicate_idempotency_key` and
+  the reason `idempotency_key exhausted retries`. That limit now also holds
+  for a `specialist` and a `target_analysis` delegated with unchanged params;
+  change the params to ask for different work.
+* Each of these refusals is a `policy_denied` observation in Orchestration's
+  inbox and a row in `ext.denials.rows[]` of the phase event in
+  `session_breakdown.json`.
+
+Update anything that matches on the following, which no longer occur:
+
+* The observation `proposal_materialize_skipped` and its reasons. A refused
+  repeat is a `policy_denied` observation instead:
+
+  | 1.2.x reason | Now, rule of the `policy_denied` |
+  |---|---|
+  | `duplicate_proposal_content` | `duplicate_idempotency_key_running` |
+  | `baseline_already_succeeded`, `integrate_patch_already_measured` | `duplicate_idempotency_key` |
+  | `idempotency_key_exhausted` | `duplicate_idempotency_key`, reason `... idempotency_key exhausted retries for '<key>'` |
+
+* The observations `proposal_pruned_advisory` and `proposal_rejected`; a
+  delegate in a pruned family or for a patch no phase owns is reported as
+  `delegate_pruned_advisory` and `delegate_rejected`, as it already was.
+* The outcome `submitted` of the `proposed` step in the `lifecycle` of a
+  `framework_agent` proposal row; a grid Orchestration sends has `delegated`.
+* The `policy_denied` rules `specialist_freeform_wave_too_large` and
+  `specialist_freeform_wave_invalid_task`, and task keys ending `-w<index>`.
+* An `intent` event whose `name` is `propose_action` in the trajectory
+  ledger.
+
+The operator-defined specialist (`--custom-specialist-prompt-file`) is no
+longer sent through Orchestration's intent path; the Coordinator creates its
+task itself. The task, its key, its lanes and its owner are what they were.
+What you can see change:
+
+* Its dispatch row in `ext.actions.rows[]` has `dispatch_class` `coordinator`;
+  1.2.x recorded `llm`.
+* No `task_queued` event and no `delegate_pruned_advisory` observation is
+  written for it.
+* When the admission chain refuses it, the log line
+  `custom specialist: dispatch <key> refused (<rule>); not retried this cycle`
+  names the rule and one `custom_specialist_refused` observation carries
+  `rule` and `reason`. 1.2.x recorded that refusal as a `policy_denied`
+  observation addressed to Orchestration, for an intent it had not sent, and
+  as a `denials` row of the phase event with actor `orchestration`; neither
+  is written now.
+
+Two smaller changes:
+
+* A patch-mode specialist refused because no git source tree backs it leaves
+  a row in `last_action_failures` whose `task_id` is empty. No task exists for
+  it; 1.2.x copied the `idempotency_key` Orchestration had sent into that
+  field.
+* The Orchestration prompt shows `EMIT: delegate{action_name='<action>',
+  params?={...}}` for `baseline`, `target_analysis`, `explore`, `report` and
+  `session_breakdown`, its free-form specialist example is one delegate with a
+  `task_description`, and its hard rules say that the Coordinator keys every
+  delegate. The hint of rule `specialist_freeform_empty_description` reads
+  `A freeform specialist needs a natural-language task_description (the whole
+  mandate).` Before the first TraceLens snapshot, the `analysis_md=` line of
+  the session-state block ends `a delegate for either is denied` where it
+  said `a proposal`.
+
+### Required: the gap ledger holds no row derived from the objective, the failure log or the research hints
+
+The gap ledger (`gaps` in `state.json`, the `=== Current gaps ===` block of
+the Orchestration prompt, the `get_gaps` tool, and `remaining_gaps` of a
+published recipe) restated four facts the prompt already shows. 1.2.x
+re-derived the first three rows below after every baseline, explore round and
+specialist round, and upserted one row per research hint after every
+specialist round that returned findings; it no longer does either:
+
+| Removed row (`canonical_id`) | Read instead |
+|---|---|
+| `<workload>#throughput_below_target` | `target_gap_pct=` under `=== Shared session state ===`. |
+| `<workload>#baseline_unstable` | `baseline_failure_streak=` in the same block. |
+| `<workload>#fail:<action>:<error_class>[:<variant>]` | The `last_action_failures=` rows in the same block (`last_action_failures` in `state.json`). |
+| `gap.research_hint.<hash>` | The finding in the `=== Specialist findings ===` block (`research_hints.json` and `research_hints.md` in the session directory). |
+
+The ledger keeps one row per static-recon bridge candidate
+(`gap.static_recon.*`), one per FRAMEWORK local-exploration candidate, and
+the row that collects each explore round's per-variant outcomes (named after
+the workload, or after the gap the explore delegate names). No row has
+`layer` `kernel_agent`, `system` or `research_hint` any more.
+
+A gap row has no `severity`. The removed objective and failure rows were the
+only ones that set anything but `medium`, so the field said nothing. It is
+gone from the rows of `gaps` in `state.json`; from the rows of the
+`=== Current gaps ===` block and of `get_gaps`, which read
+`<canonical_id> [<layer>] <symptom>` where 1.2.x wrote
+`[<layer>/<severity>]`; from the `gap_evidence` the Coordinator fills for a
+specialist from a ledger row, which is `{"recent_attempts": [...]}`; and
+from the rows of `=== Untested proposals (current cycle) ===`, which start
+`• <name> [<domain>]` where 1.2.x wrote `[<domain>·<severity>]`.
+
+What changes for a session:
+
+* A specialist `delegate` still needs a `gap_canonical_id`
+  (rule `specialist_dispatch_source`), and any non-empty id is accepted, as
+  before. An id the ledger does not hold gives the dispatch nothing: name the
+  `domain` (or `tags`) on the delegate, and pass `gap_symptom`, `gap_layer`
+  and `gap_evidence` when the specialist should see them. In 1.2.x a delegate
+  that cited one of the removed rows and no domain took the row's domain
+  (`system_specialist` for `#baseline_unstable` and a failed baseline,
+  `kernel_switch_specialist` for a failed kernel, profile or roofline action,
+  a research hint's first domain tag, the framework's authoring specialist
+  otherwise), its symptom and its last five attempts. Now such a delegate
+  with `scope='domain'` ends `empty_synthesised` with `unknown_domain`, and
+  one with no `scope` runs as a freeform specialist on its
+  `task_description`. The round's outcome is recorded as a gap attempt only
+  when the ledger holds the id.
+* `=== Untested proposals (current cycle) ===` lists predictor rows first,
+  then the proposals of the most recent specialist round first. 1.2.x ranked
+  specialist rounds by the severity of the gap each cited before it looked
+  at recency: a round that cited the `high` `#throughput_below_target` row
+  first, a round whose gap id the ledger did not hold last. The Coordinator
+  benches the head of this list, so the order it benches specialist
+  proposals in changes with it.
+* The operator-defined specialist (`--custom-specialist-prompt-file`) is sent
+  at the least-attempted, then oldest, gap on the ledger; 1.2.x put the
+  highest severity first, so it went to the `high` target row when there was
+  one. With an empty ledger it still takes the session gap, which is now
+  also the case for a session whose ledger held research-hint rows only.
+* A published recipe's `what_failed` no longer lists a variant as
+  `{"name": "<variant>", "reason": "reverted"}` when it failed before it
+  measured anything. 1.2.x labelled every `last_action_failures` row
+  `REVERT` on its `#fail:` gap and published each one that named a variant
+  that way. The failure still reaches `what_failed` as
+  `{"name": "<action>", "reason": "<error_class>"}` from the ten most recent
+  `last_action_failures` rows, and a variant an explore round measured below
+  the KEEP bar is still listed as `reverted`. The next session's warm start
+  counts fewer `avoid` rows.
+* A published recipe's `what_worked` row no longer takes a research hint's
+  `source`. 1.2.x copied it from the hint's gap row when a KEEP was recorded
+  against that row. A KEEP recorded against a static-recon gap still gives
+  the row that gap's predicate file as its `source`. The help of
+  `--recipe-sediment` says so, and the help of `--research-scout` no longer
+  says the scout seeds gaps.
+* The ledger still holds at most 50 rows and still drops the least recently
+  updated one. In 1.2.x a research scout that returned more than 50 hints
+  filled it and pushed out the rows carrying explore and specialist
+  outcomes, because every harvest re-stamped every hint as the newest row;
+  with no hint rows that no longer happens.
+
+The Orchestration prompt changes with it:
+
+* Step 5b of the decision framework says what the block lists, points at
+  `target_gap_pct=`, `last_action_failures` and
+  `=== Specialist findings ===` for the facts that left it, no longer lists
+  `severity` as a column, and no longer says that a missing block means the
+  baseline has not completed.
+* Step 5d, the `=== Untested proposals (current cycle) ===` header and the
+  OPTIMIZE phase goal say specialist proposals come most recent round first
+  where they said `ranked by gap severity`, and the phase goal names the
+  static-recon rows `[static_recon]` where it said `[static_recon/...]`.
+* The description of `get_gaps` no longer lists `severity`.
+* The kernel request reference no longer says that a `layer='kernel_agent'`
+  gap names the target.
+* The hint of rule `specialist_dispatch_source` reads `Pass the canonical_id
+  of the gap to work on: one the '=== Current gaps ===' block lists, or a
+  stable id of your own for a problem it does not list. Or dispatch
+  scope='freeform' with a task_description.`
+
+The debug log line `gaps refresh (reason=...)` is no longer written.
+
+### Recommended: stop matching the denials PolicyGate no longer issues; the two resource rules read live state
+
+PolicyGate judged three things from a copy of the session's resources taken
+at the start of each tick, judged them again when a queued task was
+dispatched, and repeated a few checks another component owns. The copy and
+the second pass are removed. What is left is decided once, where the resource
+is held.
+
+Rules that are gone:
+
+* `specialist_gpu_request_invalid`. A `gpu_count` of `0` now means the
+  default count, as it already did for the lease. A negative count is denied
+  with `specialist_gpu_request_exceeds_capacity`.
+* `specialist_gpu_pool_disabled`. A request against an empty pool is denied
+  with `specialist_gpu_request_exceeds_capacity`; its reason reads `the
+  <pool> holds no card (configured capacity=<n>, serving_tp=<n>)` and its
+  hint says that no `gpu_count` fits.
+* `specialist_freeform_description_too_long`. A free-form `task_description`
+  longer than 8000 characters is accepted. An empty one is still denied
+  (`specialist_freeform_empty_description`).
+* The ceiling of 1000 on `max_turns`, one arm of
+  `specialist_dispatch_source`. A `max_turns` above 1000 is accepted and is
+  the turn cap of that specialist; the wall-clock budget still ends it.
+  `--specialist-max-turns` is the cap of a dispatch that names none, as it
+  was: a dispatch's own `max_turns` replaces it, in either direction, and
+  the flag's help now says so. A `max_turns` that is not an integer, or is
+  negative, is still denied with `specialist_dispatch_source`, and an
+  omitted one or `0` still runs with the default cap.
+* `warm_replay_patch_missing`, `warm_replay_patch_outside_kb_download`,
+  `warm_replay_plan_invalid`, `warm_replay_target_outside_framework_roots`
+  and `warm_replay_patch_target_mismatch`. They were only ever the
+  `error_class` of a cancelled `replay_warm_recipe` task; see the warm-replay
+  item below.
+
+Rules that stay and read live state:
+
+* `enablement_round_in_flight` asks the round store when the `baseline`
+  delegate is handled and again when a queued `baseline` is dispatched. A
+  round opened during the Orchestration turn now refuses the baseline of that
+  turn, and a round settled during the turn no longer refuses it; 1.2.x
+  answered both from the rounds open at the start of the tick.
+* `specialist_gpu_request_exceeds_capacity` compares the count the
+  dispatcher will lease with the size of the pool it will lease from. 1.2.x
+  sized the request a second time with different defaults, so a request could
+  be admitted and then wait for cards for good: a `needs_gpu` research
+  specialist with `bench=true` was judged at its own `gpu_count` and leased
+  at serving TP. The reason now reads `effective gpu_count=<n> cannot be
+  leased from the <pool> size=<n> (configured capacity=<n>, serving_tp=<n>)`.
+  The hint is `Pass a gpu_count between <least> and <pool size>.`, where
+  `<least>` is serving TP for a dispatch with `bench=true` and `1` for any
+  other. When serving TP is itself larger than the pool the hint says so
+  instead of giving a range: `No gpu_count fits: a bench specialist takes at
+  least serving TP cards (<n>) and the pool holds <n>. Dispatch the work
+  without bench=true.` The rule is judged after the gate's other checks; an
+  intent that also names a path outside the session directory is denied for
+  the path.
+
+Both rules are now answered after PolicyGate has admitted the intent, as the
+phase and time-budget rules already were. The `policy_denied` observation
+and the denial row in `session_breakdown.json` are unchanged, but the
+`intent` event in the trajectory ledger (`trajectory/*.jsonl`) of a `baseline`
+refused by `enablement_round_in_flight`, or of a `specialist` refused by
+`specialist_gpu_request_exceeds_capacity`, now carries `admitted: true` and
+no `denied` attribute; 1.2.x wrote `admitted: false` with the reason.
+`admitted` on that event says only that PolicyGate passed the intent.
+
+One `policy_<rule>` cancellation remains at dispatch. `error_class`
+`policy_enablement_round_in_flight` and terminal evidence
+`{"reason": "policy_denied", "rule": "enablement_round_in_flight"}` are still
+written for a `baseline` that was queued before a bring-up round opened. No
+task ends with `policy_path_outside_session_dir`, `policy_payload`,
+`policy_specialist_*` or `policy_warm_replay_*`: those came from running the
+intent checks a second time on the stored row. A queued task the remaining
+time budget no longer covers is still cancelled at dispatch as before, with
+the time-budget rule as its evidence `reason`.
+
+What moved in front of the work it guards:
+
+* **Warm replay.** A kernel item of the warm-start Recipe is applied only
+  when every file it patches lies inside the session's framework checkout.
+  An item that does not is left out before anything is snapshotted or
+  patched: its plan entry is `DEFERRED` with `apply_result`
+  `{"status": "skipped", "reason": "target is outside the Session framework
+  root ...: <path>"}`, the warm-replay event in `session_breakdown.json`
+  lists it as not applied with that reason, and the replay runs with the
+  remaining items. 1.2.x applied the patch first and refused the replay task
+  afterwards, which left the patch in the tree and `warm_replay_outcome` at
+  `in_flight`. In a session that names no framework checkout
+  (`--framework-path`) every kernel patch is left out this way.
+* **Specialist deliverables.** The `integrate_patch` the Coordinator queues
+  for a finished specialist is checked for paths outside the session
+  directory before its task exists. A refused deliverable is one
+  `specialist_patch_integrate_refused` observation carrying
+  `specialist_task_id`, `rule` (`path_outside_session_dir`) and `error`, and
+  a `deliverable not queued` warning in the log; an `integrate_patch`
+  delegate that names that specialist is denied with
+  `path_outside_session_dir`. 1.2.x queued the task and cancelled it at
+  dispatch.
+
+Smaller changes:
+
+* The `warm_kernel_plan` entries of a `replay_warm_recipe` task, and the
+  copies in `state.json` (`warm_kernel_kb_plan`,
+  `warm_replay_pending.kernel_plan`, `warm_replay_outcome.kernel.pending`),
+  no longer carry `resolved_patch_targets`. Nothing read it but the removed
+  dispatch check, and an intent that carries a key of that name is no longer
+  walked for it.
+* A kernel item whose recorded checkout is a directory inside the session's
+  framework checkout is replayed. 1.2.x applied it and then cancelled the
+  replay as `warm_replay_patch_target_mismatch`.
+* `serving_disjoint_gpu_pool=` and `whole_machine_gpu_pool=` in the
+  `=== Resource pools ===` block of the Orchestration prompt print the size
+  of the two pools carved at launch, which are the pools a request is
+  admitted against. 1.2.x recomputed both from the environment on every
+  turn.
+* The `specialist` line of the prompt's action list reads
+  `max_turns?=<int turn cap; omit or 0 for the default>`; 1.2.x wrote
+  `max_turns?=<int<=1000 or 0=unbounded>`.
+* The log line that reports a bench specialist floored to serving TP starts
+  `specialist: bench=true with gpu_count=` (1.2.x named the task id) and is
+  also written when the delegate is admitted. `specialist dispatch
+  gpu_count=... not an integer` is no longer logged; such a value takes the
+  default count.
+
+### Recommended: stop reading the bus rows the Coordinator wrote for its own agent
+
+The Coordinator told Orchestration several things it already held as state by
+writing a row to the `events` table of `storage/coordinator.db`, which the
+next turn's inbox rendered: a failed LLM call, a phase boundary, a failed
+baseline. Those rows are gone.
+
+Rows that are no longer written:
+
+* `backend_error` (one per failed Orchestration call), `backend_unhealthy`
+  (once, when a run of failed calls reached a threshold) and
+  `reactor_exception`, all `observation` rows. 1.2.x put them in the inbox of
+  the agent whose call had failed, where each counted as something for it to
+  act on. A failed call is the `failed` `llm.call` row of
+  `reports/trace/trajectory/*.jsonl`; its `error_type` and `error_message`
+  carry the error the observation's `error` held, cut at 500 characters. A
+  provider failure is also a `status=error` row of
+  `reports/trace/llm_calls.jsonl`, and an unexpected exception is
+  `last_tick_exception` (stage `reactor_pass`) in `state.json` and counts in
+  `crash_count`, both as before. The call is asked again exactly as it was:
+  after a back-off of 2 s doubling to 5 minutes, and the session still stops
+  with `stop_reason=backend_unhealthy` after an hour without a successful
+  turn. `stop_reason_explanation` in `reports/final.json` names the two
+  files instead of the observations.
+* `INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD` is no longer read. It
+  only set after how many failed calls the `backend_unhealthy` row was
+  written.
+* `phase_transition`, an `event` row written at every phase change with the
+  transition's whole evidence. The `entered` line of the `=== Phase ===`
+  block now ends with ` reason=<reason>`, the reason of the transition into
+  the phase. `phase_history` in `state.json` and the phase rows of
+  `session_breakdown.json`, `predicate_inputs` included, are unchanged, and
+  the `tasks_cancelled_on_phase_transition` observation is still written
+  when the transition dropped queued or running work.
+* `baseline_not_promoted`, an `event` row written after a failed baseline was
+  charged. `baseline_failure_streak=`, `last_baseline=`,
+  `last_action_failures=` and `stop_reason=` of the session-state block
+  carry the same facts on every turn, as before. A baseline the previous
+  process left running books no result, so in 1.2.x this event was what
+  admitted a turn able to read its failure. The failure of a task the
+  previous process left running, of any kind, is now charged at the start of
+  the tick, before Orchestration's turn is composed: the first turn after a
+  restart already carries it, where 1.2.x charged it after that turn. It is
+  also charged on a tick that is already stopping, where 1.2.x did not
+  charge it at all.
+
+Rows that change:
+
+* A `send_message` from Orchestration is always stored under the topic
+  `observation`, and the topic it named stays in the row's payload as
+  `topic`. 1.2.x stored it under the named topic when that was a bus topic
+  (`event`, `decision`, `alert`, `delegated_result`, `request`, `response`,
+  `strategy_change`), so a message that named `delegated_result` or
+  `response` was read back as a booked result or a kernel reply by
+  everything that reads those rows, `hyperloom session events` and the
+  final report among them. `event_counts_by_topic` in `reports/final.json`
+  counts every such message under `observation`, `highlights` no longer
+  lists a message that named `decision`, and no row has the topic
+  `decision`: only Orchestration's own choice of topic ever produced one.
+* An inbox line (the `=== Inbox for orchestration ===` block, `get_inbox`,
+  `get_recent_outcomes`) starts `seq=<n> from=<agent> topic=<topic>`. 1.2.x
+  printed `msg_id=<32 hex>` after `seq`, an id nothing Orchestration can send
+  refers to.
+
+Log lines that change:
+
+* `context_tool pull:` and `context tool handler ... raised` name the tool
+  (`get_inbox`) where they named an internal method (`inbox`).
 
 ---
 

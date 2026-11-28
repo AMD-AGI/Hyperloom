@@ -25,7 +25,6 @@ class IntentType(str, Enum):
 
     SEND_MESSAGE = "send_message"
     DELEGATE = "delegate"
-    PROPOSE_ACTION = "propose_action"
     ALERT = "alert"
     # Agent-to-agent request; the handler answers inline on the ``response`` topic.
     REQUEST = "request"
@@ -47,7 +46,6 @@ class Intent:
 PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
     IntentType.SEND_MESSAGE: ("topic",),
     IntentType.DELEGATE: ("action_name",),
-    IntentType.PROPOSE_ACTION: ("action_name", "predicted_gain_pct"),
     IntentType.ALERT: ("severity", "summary"),
     IntentType.REQUEST: ("target_agent", "kind"),
     IntentType.EXTEND_LEASE: ("task_id", "extra_sec"),

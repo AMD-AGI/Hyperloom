@@ -27,7 +27,6 @@ from hyperloom.inference_optimizer.trace.task_progress import report_progress
 from ....measurement.integrate_performance import assess_integrate_performance
 from ...stop_attribution import SESSION_TIME_EXHAUSTED_CLASS, STOPPED_BY_THE_RUN
 from ..serving import _server_lifecycle as _lifecycle
-from .bringup import _disable_cuda_graph_flag, _with_cuda_graph_disabled
 from .records import (
     _ACCURACY_ROUND_DIR,
     _BENCHMARK_MODE_ATTR,
@@ -85,20 +84,6 @@ def _record_accuracy_round(result: dict[str, Any], accuracy_result: dict[str, An
 
 class _BenchmarkRoundsMixin:
     """Round guards, cold-start passes and failed-round results of a benchmark run."""
-
-    def _eager_fallback_armed(self, shared_state: Any | None = None) -> bool:
-        """Peek the one-shot eager fallback flag WITHOUT consuming it."""
-        state = self._resolve_shared_state(shared_state)
-        return bool(getattr(state, "baseline_eager_fallback", False))
-
-    def _consume_eager_fallback(self, shared_state: Any | None = None) -> bool:
-        """Consume the one-shot cuda-graph eager fallback flag from SharedState."""
-        state = self._resolve_shared_state(shared_state)
-        if not getattr(state, "baseline_eager_fallback", False):
-            return False
-        state.baseline_eager_fallback = False
-        state.save(self.session_dir)
-        return True
 
     @staticmethod
     def _warn_on_cold_start_delta(
@@ -163,28 +148,13 @@ class _BenchmarkRoundsMixin:
         self._record_measured_against_warmup(measured_result, warmup_result)
         return measured_result
 
-    def _settle_attempt_server_args(self, params: dict[str, Any], shared_state: Any) -> tuple[str, str]:
-        # One-shot cuda-graph eager fallback: a prior baseline armed state.baseline_eager_fallback.
+    @staticmethod
+    def _settle_attempt_server_args(params: dict[str, Any]) -> tuple[str, str]:
+        """The attempt's framework and server args; args the task named are written back to it as text."""
         server_args = str(params.get("extra_server_args") or "")
-        fw = _requested_framework(params) or ""
-        if not fw and self._eager_fallback_armed(shared_state):
-            log.warning(
-                "baseline_executor: eager fallback is armed but framework is "
-                "unknown; leaving the one-shot armed (not consuming) so a "
-                "later baseline with a known framework can apply it",
-            )
-        elif fw and self._consume_eager_fallback(shared_state):
-            server_args = _with_cuda_graph_disabled(server_args, fw)
-            log.warning(
-                "baseline_executor: retrying with %s after a prior cuda-graph capture failure (framework=%s)",
-                _disable_cuda_graph_flag(fw),
-                fw,
-            )
-        if server_args or "extra_server_args" in params:
-            # Keep the task envelope aligned with the materialized runtime so Roofline fingerprints record one-shot
-            # eager fallback accurately.
+        if "extra_server_args" in params:
             params["extra_server_args"] = server_args
-        return fw, server_args
+        return _requested_framework(params) or "", server_args
 
     def _save_warm_replay_pending(self, state: Any, **fields: Any) -> bool:
         state.warm_replay_pending = {**(state.warm_replay_pending or {}), **fields}

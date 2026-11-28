@@ -19,12 +19,8 @@ from hyperloom.orchestrator.bus import resource_lock
 from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
 from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
-from hyperloom.orchestrator.bus.storage.schema import (
-    DEFAULT_LANE_CAPACITIES,
-    SCHEMA_VERSION,
-    ensure_schema,
-    set_lane_capacity,
-)
+from hyperloom.orchestrator.bus.storage.schema import SCHEMA_VERSION, ensure_schema
+from ._lease_helpers import lane_holders
 
 
 @pytest.fixture
@@ -55,29 +51,10 @@ def test_fresh_db_has_composite_pk(conn):
     assert pk_cols == ["holder_id", "lane"]
 
 
-def test_fresh_db_seeds_default_lane_capacity(conn):
-    cur = conn.raw.execute(
-        "SELECT lane, capacity FROM lane_capacity ORDER BY lane",
-    )
-    rows = {r["lane"]: int(r["capacity"]) for r in cur.fetchall()}
-    for lane, cap in DEFAULT_LANE_CAPACITIES.items():
-        assert rows[lane] == cap
-
-
 def test_fresh_db_has_gpu_leases_table(conn):
     cur = conn.raw.execute("PRAGMA table_info(gpu_leases)")
     cols = {row["name"] for row in cur.fetchall()}
     assert {"gpu_id", "holder_id", "task_id"} <= cols
-
-
-def test_set_lane_capacity_upserts(conn):
-    def _stored() -> int:
-        return conn.raw.execute("SELECT capacity FROM lane_capacity WHERE lane = 'research_lane'").fetchone()[0]
-
-    set_lane_capacity(conn.raw, "research_lane", 6)
-    assert _stored() == 6
-    set_lane_capacity(conn.raw, "research_lane", 1)
-    assert _stored() == 1
 
 
 def test_v2_ensure_schema_is_idempotent(conn):
@@ -123,8 +100,8 @@ async def test_serving_lane_capacity_1_refuses_second_holder(locks):
 
 
 @pytest.mark.asyncio
-async def test_research_lane_capacity_admits_multiple_holders(conn, locks):
-    set_lane_capacity(conn.raw, "research_lane", 3)
+async def test_research_lane_capacity_admits_multiple_holders(conn):
+    locks = SqliteLeaseBackend(conn, research_lane_capacity=3)
     leases = []
     for i in range(3):
         l = await locks.acquire_many(
@@ -135,15 +112,15 @@ async def test_research_lane_capacity_admits_multiple_holders(conn, locks):
             ttl_sec=60,
         )
         leases.append(l)
-    holders = await locks.lane_holders()
+    holders = await lane_holders(locks)
     assert holders["research_lane"] == 3
     for l in leases:
         await locks.release(l)
 
 
 @pytest.mark.asyncio
-async def test_research_lane_overflow_is_refused(conn, locks):
-    set_lane_capacity(conn.raw, "research_lane", 2)
+async def test_research_lane_overflow_is_refused(conn):
+    locks = SqliteLeaseBackend(conn, research_lane_capacity=2)
     leases = [
         await locks.acquire_many(
             ["research_lane"],
@@ -217,9 +194,9 @@ async def test_specialist_gpu_pool_rejects_oversized_request(conn):
 
 
 @pytest.mark.asyncio
-async def test_capacity_zero_means_lane_disabled(conn, locks):
+async def test_capacity_zero_means_lane_disabled(conn):
     """``--research-lane-capacity 0`` disables the research lane."""
-    set_lane_capacity(conn.raw, "research_lane", 0)
+    locks = SqliteLeaseBackend(conn, research_lane_capacity=0)
     assert (
         await locks.acquire_many(
             ["research_lane"],
@@ -233,8 +210,8 @@ async def test_capacity_zero_means_lane_disabled(conn, locks):
 
 
 @pytest.mark.asyncio
-async def test_same_holder_retry_is_idempotent(conn, locks):
-    set_lane_capacity(conn.raw, "research_lane", 1)
+async def test_same_holder_retry_is_idempotent(conn):
+    locks = SqliteLeaseBackend(conn, research_lane_capacity=1)
     a = await locks.acquire_many(
         ["research_lane"],
         holder_id="s0",
@@ -256,9 +233,9 @@ async def test_same_holder_retry_is_idempotent(conn, locks):
 
 
 @pytest.mark.asyncio
-async def test_research_lane_independent_of_benchmark_lane(conn, locks):
+async def test_research_lane_independent_of_benchmark_lane(conn):
     """Inv-7.2: research_lane has no LANE_CONFLICTS, so a benchmark task and a specialist coexist."""
-    set_lane_capacity(conn.raw, "research_lane", 6)
+    locks = SqliteLeaseBackend(conn, research_lane_capacity=6)
     bench = await locks.acquire_many(
         ["benchmark_lane"],
         holder_id="hb",
@@ -300,8 +277,8 @@ async def test_acquire_many_returns_none_on_conflict(conn, locks):
 
 
 @pytest.mark.asyncio
-async def test_release_only_drops_own_holder_row(conn, locks):
-    set_lane_capacity(conn.raw, "research_lane", 2)
+async def test_release_only_drops_own_holder_row(conn):
+    locks = SqliteLeaseBackend(conn, research_lane_capacity=2)
     a = await locks.acquire_many(
         ["research_lane"],
         holder_id="s0",
@@ -317,15 +294,15 @@ async def test_release_only_drops_own_holder_row(conn, locks):
         ttl_sec=60,
     )
     await locks.release(a)
-    holders = await locks.lane_holders()
+    holders = await lane_holders(locks)
     assert holders.get("research_lane") == 1
     await locks.release(b)
 
 
 @pytest.mark.asyncio
-async def test_old_rows_still_count_toward_lane_capacity(conn, locks):
+async def test_old_rows_still_count_toward_lane_capacity(conn):
     """Old timestamps cannot release an owner whose completion is unknown."""
-    set_lane_capacity(conn.raw, "research_lane", 2)
+    locks = SqliteLeaseBackend(conn, research_lane_capacity=2)
     # Insert one expired and one live holder directly to bypass acquire_many's reap pass.
     conn.raw.execute(
         "INSERT INTO leases(lane, holder_id, task_id, action, pid, acquired_at, expires_at) VALUES (?,?,?,?,?,?,?)",
@@ -352,7 +329,7 @@ async def test_old_rows_still_count_toward_lane_capacity(conn, locks):
         ),
     )
     conn.raw.commit()
-    holders = await locks.lane_holders()
+    holders = await lane_holders(locks)
     assert holders.get("research_lane") == 2
     assert (
         await locks.acquire_many(["research_lane"], holder_id="next", task_id="next", action="specialist", ttl_sec=60)
@@ -503,7 +480,7 @@ async def test_an_incident_shaped_row_stays_held_and_hands_the_operator_the_reme
     assert [(r["lane"], r["task_id"], r["reason"]) for r in stuck] == [
         ("build_lane", "tincident", resource_lock.UNVERIFIABLE_CLEANUP_UNCONFIRMED)
     ]
-    assert (await locks.lane_holders())["build_lane"] == 1
+    assert (await lane_holders(locks))["build_lane"] == 1
     remedies = _remedies(caplog)
     assert len(remedies) == 1
     assert resource_lock.UNVERIFIABLE_CLEANUP_UNCONFIRMED in remedies[0]
@@ -516,26 +493,22 @@ async def test_an_incident_shaped_row_stays_held_and_hands_the_operator_the_reme
 
 
 @pytest.mark.asyncio
-async def test_a_lease_that_outlived_its_pruned_task_is_still_reported(conn, locks, caplog):
-    """A holder pruned out from under its lease must not vanish from the report.
+async def test_a_lease_whose_holder_has_no_task_row_is_still_reported(locks, caplog):
+    """A lease whose holder has no task row must not vanish from the report.
 
-    ``prune_tasks`` deletes finished task rows without sparing one that still
-    holds a lease, and reclamation joins through ``tasks`` — so such a row can
-    be held with nothing able to judge it. Retaining unverifiable rows makes
-    that MORE likely, not less, because they now outlive their task on purpose.
-    Silence here would be the 2026-09-21 outcome with no log line at all.
+    A kernel request holds its lanes under its message id, which is no task,
+    and reclamation joins through ``tasks`` -- so such a row can be held with
+    nothing able to judge it. Silence here would be the 2026-09-21 outcome with
+    no log line at all.
     """
-    await locks.acquire_many(["build_lane"], holder_id="orphan", task_id="torphan", action="specialist", ttl_sec=3600)
-    _seed_task(conn, "torphan", "succeeded", evidence={resource_lock.CLEANUP_CONFIRMED_KEY: False})
-    conn.raw.execute("DELETE FROM tasks WHERE task_id=?", ("torphan",))
-    conn.raw.commit()
+    await locks.acquire_many(["build_lane"], holder_id="msg-1", task_id="msg-1", action="kernel_agent", ttl_sec=3600)
 
     caplog.clear()
     with caplog.at_level(logging.WARNING):
         stuck = await locks.diagnose_unverifiable_holders()
 
-    assert [(r["lane"], r["reason"]) for r in stuck] == [("build_lane", resource_lock.UNVERIFIABLE_HOLDER_PRUNED)]
-    assert (await locks.lane_holders())["build_lane"] == 1
+    assert [(r["lane"], r["reason"]) for r in stuck] == [("build_lane", resource_lock.UNVERIFIABLE_NO_TASK_ROW)]
+    assert (await lane_holders(locks))["build_lane"] == 1
     assert len(_remedies(caplog)) == 1
 
 
@@ -590,7 +563,7 @@ async def test_a_holder_whose_work_may_still_run_is_reported_too(conn, locks, ca
             assert await locks.diagnose_unverifiable_holders() == stuck
 
     assert [(r["lane"], r["reason"]) for r in stuck] == [("build_lane", resource_lock.UNVERIFIABLE_CLEANUP_UNCONFIRMED)]
-    assert (await locks.lane_holders())["build_lane"] == 1
+    assert (await lane_holders(locks))["build_lane"] == 1
     remedies = _remedies(caplog)
     assert len(remedies) == 1
     # The recorded spawn group is offered as a lead, explicitly not as proof.
@@ -630,7 +603,6 @@ async def test_reap_dead_holders_releases_crashed_pid(conn, locks, monkeypatch, 
     assert dead_pid != os.getpid()
     monkeypatch.setattr(SqliteLeaseBackend, "_pid_alive", staticmethod(lambda pid: pid != dead_pid))
     monkeypatch.setattr("hyperloom.orchestrator.bus.resource_lock.local_owner_scope", lambda: "test-node")
-    set_lane_capacity(conn.raw, "benchmark_lane", 1)
     # Long-lived (not expired) lease held by a dead PID.
     conn.raw.execute(
         "INSERT INTO leases(lane, holder_id, task_id, action, pid, acquired_at, expires_at) VALUES (?,?,?,?,?,?,?)",
@@ -662,7 +634,7 @@ async def test_reap_dead_holders_releases_crashed_pid(conn, locks, monkeypatch, 
     reaped = await locks.reap_dead_holders()
     assert any(r["holder_id"] == "zombie" for r in reaped)
     assert all(r["holder_id"] != "alive" for r in reaped)
-    holders = await locks.lane_holders()
+    holders = await lane_holders(locks)
     assert "benchmark_lane" not in holders
     assert holders.get("profile_lane") == 1
 
@@ -685,13 +657,13 @@ async def test_reap_dead_holders_skips_null_pid(conn, locks):
     conn.raw.commit()
     reaped = await locks.reap_dead_holders()
     assert reaped == []
-    holders = await locks.lane_holders()
+    holders = await lane_holders(locks)
     assert holders.get("benchmark_lane") == 1
 
 
 @pytest.mark.asyncio
-async def test_lane_holders_distinct(conn, locks):
-    set_lane_capacity(conn.raw, "research_lane", 3)
+async def test_research_lane_admits_one_holder_per_unit_of_capacity(conn):
+    locks = SqliteLeaseBackend(conn, research_lane_capacity=3)
     leases = [
         await locks.acquire_many(
             ["research_lane"],
@@ -702,7 +674,7 @@ async def test_lane_holders_distinct(conn, locks):
         )
         for i in range(3)
     ]
-    holders = await locks.lane_holders()
+    holders = await lane_holders(locks)
     assert holders == {"research_lane": 3}
     for l in leases:
         await locks.release(l)
@@ -717,9 +689,9 @@ def _make_session_with_db(tmp_path: Path) -> tuple[Path, SqliteConnection]:
 
 
 @pytest.mark.asyncio
-async def test_concurrent_acquires_respect_capacity(conn, locks):
+async def test_concurrent_acquires_respect_capacity(conn):
     """Three async acquires racing for capacity=2; exactly one fails."""
-    set_lane_capacity(conn.raw, "research_lane", 2)
+    locks = SqliteLeaseBackend(conn, research_lane_capacity=2)
 
     async def grab(holder: str):
         return await locks.acquire_many(
@@ -791,7 +763,7 @@ async def test_live_old_owner_keeps_conflicting_lanes_until_release(conn, locks)
         await locks.acquire_many(["benchmark_lane"], holder_id="next", task_id="next", action="baseline", ttl_sec=60)
         is None
     )
-    assert (await locks.lane_holders())["gpu_research_lane"] == 1
+    assert (await lane_holders(locks))["gpu_research_lane"] == 1
     await locks.release(lease)
     assert (
         await locks.acquire_many(["benchmark_lane"], holder_id="next", task_id="next", action="baseline", ttl_sec=60)
@@ -821,7 +793,7 @@ async def test_unknown_owner_scope_is_not_probed(conn, locks, monkeypatch, scope
         cur.execute("UPDATE leases SET owner_scope=?, pid=12345", (scope,))
     monkeypatch.setattr(locks, "_pid_alive", lambda pid: pytest.fail("foreign PID must not be probed"))
     assert await locks.reap_dead_holders() == []
-    assert await locks.lane_holders() == {"research_lane": 1}
+    assert await lane_holders(locks) == {"research_lane": 1}
     await locks.release(lease)
 
 
@@ -848,4 +820,4 @@ async def test_dead_coordinator_does_not_release_specialist_gpu_lanes(conn, lock
     pool = SpecialistGpuPool(conn, gpu_ids=[0])
     await pool.try_acquire(count=1, holder_id="specialist", task_id="specialist")
     assert await locks.reap_dead_holders() == []
-    assert (await locks.lane_holders())["gpu_research_lane"] == 1
+    assert (await lane_holders(locks))["gpu_research_lane"] == 1

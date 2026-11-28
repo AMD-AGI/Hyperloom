@@ -39,21 +39,6 @@ def test_ensure_schema_refuses_a_database_recorded_at_an_older_version(tmp_path)
         "that started it, or start a new session."
     )
     assert conn.execute("SELECT version FROM schema_version").fetchall() == [(5,)]
-    assert conn.execute("SELECT COUNT(*) FROM lane_capacity").fetchone() == (0,)
-    conn.close()
-
-
-def test_set_lane_capacity_upserts():
-    conn = _conn()
-    schema.ensure_schema(conn)
-
-    def _stored() -> int:
-        return conn.execute("SELECT capacity FROM lane_capacity WHERE lane = 'research_lane'").fetchone()[0]
-
-    schema.set_lane_capacity(conn, "research_lane", 4)
-    assert _stored() == 4
-    schema.set_lane_capacity(conn, "research_lane", 2)
-    assert _stored() == 2
     conn.close()
 
 
@@ -71,17 +56,6 @@ class _SpyConn(sqlite3.Connection):
     def rollback(self):  # type: ignore[override]
         self.rolled_back = True
         return super().rollback()
-
-
-def test_set_lane_capacity_rolls_back_on_error():
-    conn = sqlite3.connect(":memory:", factory=_SpyConn)
-    schema.ensure_schema(conn)
-    conn.fail_commit = True
-    conn.rolled_back = False
-    with pytest.raises(sqlite3.OperationalError):
-        schema.set_lane_capacity(conn, "research_lane", 3)
-    assert conn.rolled_back is True
-    conn.close()
 
 
 def test_ensure_schema_rolls_back_on_error():

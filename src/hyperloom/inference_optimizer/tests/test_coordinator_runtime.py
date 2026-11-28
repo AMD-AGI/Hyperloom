@@ -25,6 +25,7 @@ from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.loop.proposals import ProposalsCollaborator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType, NoIntentEmitted
 from hyperloom.orchestrator.state.objective import TargetGainObjective
+from hyperloom.orchestrator.state.round_store import RoundStore
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.loop.sub_agent_runner import (
     SubAgentRunner,
@@ -43,6 +44,7 @@ from hyperloom.inference_optimizer.session.session_paths import target_baseline_
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from ._dispatch_helpers import pump_until_settled
 from hyperloom.orchestrator.phases import phase_predicates, phase_transitions
+from ._lease_helpers import lane_holders
 
 
 async def _immediately(payload: dict) -> dict:
@@ -185,8 +187,8 @@ async def test_a_failed_pre_reactor_phase_advance_fails_the_tick(session_dir, mo
     async def _advance():
         raise RuntimeError("phase entry hook broke")
 
-    async def _turn(name, **kwargs):
-        turns.append(name)
+    async def _turn(**kwargs):
+        turns.append("orchestration")
 
     monkeypatch.setattr(c.reconciler, "run", _noop)
     monkeypatch.setattr(c.phase_machine, "advance_phase_if_needed", _advance)
@@ -318,7 +320,7 @@ async def test_sub_agent_runner_succeeds(tmp_path):
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
+    sub = SubAgentRunner(locks, tr, RoundStore(db))
     sub.register_executor("baseline", lambda ctx: _async_return({"tput": 1840}))
     task, _ = await tr.create_or_return_existing(TaskSpec(kind="baseline", params={}, idempotency_key="k-baseline-1"))
     res = await sub.run_task(task)
@@ -338,7 +340,7 @@ async def test_sub_agent_runner_no_executor_fails(tmp_path):
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
+    sub = SubAgentRunner(locks, tr, RoundStore(db))
     task, _ = await tr.create_or_return_existing(TaskSpec(kind="never_registered", params={}, idempotency_key="k-x"))
     res = await sub.run_task(task)
     assert res.state == "failed"
@@ -353,7 +355,7 @@ async def test_sub_agent_runner_executor_exception_sets_error_class(tmp_path):
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
+    sub = SubAgentRunner(locks, tr, RoundStore(db))
 
     async def exe(ctx):
         raise TimeoutError("benchmark server never came up")
@@ -372,7 +374,7 @@ async def test_sub_agent_runner_hands_its_lease_to_the_executor_and_gives_it_bac
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
+    sub = SubAgentRunner(locks, tr, RoundStore(db))
     seen_lease = {}
 
     async def exe(ctx):
@@ -401,7 +403,7 @@ async def test_sub_agent_runner_hands_its_lease_to_the_executor_and_gives_it_bac
 
     assert res.state == "succeeded"
     assert "benchmark_lane" in seen_lease["lanes"]
-    assert "benchmark_lane" not in await locks.lane_holders()
+    assert "benchmark_lane" not in await lane_holders(locks)
     db.close()
 
 
@@ -411,7 +413,7 @@ async def test_sub_agent_runner_refuses_a_lane_holding_task_with_no_lease(tmp_pa
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
+    sub = SubAgentRunner(locks, tr, RoundStore(db))
     ran = {"called": False}
 
     async def exe(_ctx):
@@ -441,11 +443,29 @@ async def test_sub_agent_runner_refuses_a_lane_holding_task_with_no_lease(tmp_pa
 @pytest.mark.asyncio
 async def test_coordinator_starts_with_silent_backends(session_dir):
     c = Coordinator(session_dir, backends=_build_backends({}))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         await c.tick(2)
         msgs = await c.bus.tail(n=20, topic="observation")
         assert len(msgs) == 1
         assert msgs[0].from_agent == "orchestration"
+    finally:
+        await c.stop()
+
+
+def test_a_coordinator_without_the_orchestration_backend_is_refused(session_dir):
+    with pytest.raises(ValueError, match="missing backend for role 'orchestration'"):
+        Coordinator(session_dir, backends={})
+
+
+@pytest.mark.asyncio
+async def test_a_turn_without_an_installed_system_prompt_raises_before_the_backend_is_called(session_dir):
+    backends = _build_backends({})
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        with pytest.raises(KeyError, match="orchestration"):
+            await c.reactor_pass()
+        assert backends["orchestration"].calls == []
     finally:
         await c.stop()
 
@@ -465,6 +485,7 @@ async def test_a_tick_while_closing_runs_no_reactor_turn(session_dir):
 @pytest.mark.asyncio
 async def test_a_phase_advance_that_raises_is_recorded_at_the_session_tick(session_dir, monkeypatch):
     c = Coordinator(session_dir, backends=_build_backends({}))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     calls = 0
 
     async def _raise() -> None:
@@ -498,7 +519,6 @@ class _AlwaysFailingBackend(Backend):
         *,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
-        max_turns: int = 1,
     ) -> "BackendTurnResult":  # noqa: F821 — protocol return type, raises before returning
         from hyperloom.orchestrator.roles.base import BackendError
 
@@ -519,7 +539,6 @@ class _LLMFailingBackend(Backend):
         *,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
-        max_turns: int = 1,
     ) -> "BackendTurnResult":  # noqa: F821 — protocol return type, raises before returning
         from hyperloom.orchestrator.roles.base import LLMCallFailed
 
@@ -541,6 +560,7 @@ def _llm_error_rows(session_dir: Path) -> list[dict]:
 async def test_plain_backend_error_records_no_llm_error_row(session_dir):
     """A deterministic local fault must not be counted as a provider failure."""
     c = Coordinator(session_dir, backends={"orchestration": _AlwaysFailingBackend("orchestration")})
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         await c.tick(2)
         assert _llm_error_rows(session_dir) == []
@@ -552,6 +572,7 @@ async def test_plain_backend_error_records_no_llm_error_row(session_dir):
 async def test_llm_call_failed_records_one_error_row_per_turn(session_dir, monkeypatch):
     monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 0)
     c = Coordinator(session_dir, backends={"orchestration": _LLMFailingBackend("orchestration")})
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         await c.tick(2)
         rows = _llm_error_rows(session_dir)
@@ -561,67 +582,6 @@ async def test_llm_call_failed_records_one_error_row_per_turn(session_dir, monke
         assert row["error_type"] == "LLMCallFailed"
         assert "gateway 400" in row["error_message"]
         assert row["input_tokens"] is None and row["output_tokens"] is None
-    finally:
-        await c.stop()
-
-
-class _SelfTracingLLMFailingBackend(_LLMFailingBackend):
-    """A self-tracing backend: writes its own row, then raises."""
-
-    def __init__(self, name: str, session_dir: Path) -> None:
-        super().__init__(name)
-        self._session_dir = session_dir
-        self.trace_ctx_calls = 0
-        self.trace_contexts: list[dict[str, object]] = []
-
-    def set_trace_context(
-        self,
-        *,
-        tick: int | None = None,
-        phase: str | None = None,
-        macro_cycle: int | None = None,
-    ) -> None:
-        self.trace_ctx_calls += 1
-        self.trace_contexts.append({"tick": tick, "phase": phase, "macro_cycle": macro_cycle})
-
-    async def run(
-        self,
-        prompt: str,
-        *,
-        system_prompt: str | None = None,
-        tools: list[str] | None = None,
-        max_turns: int = 1,
-    ) -> "BackendTurnResult":  # noqa: F821 — protocol return type, raises before returning
-        from hyperloom.orchestrator.roles.base import LLMCallFailed
-        from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call
-
-        self.calls += 1
-        error = LLMCallFailed(f"simulated {self.name} gateway 400 #{self.calls}")
-        append_llm_call(
-            session_dir=self._session_dir,
-            record=LLMCallRecord.for_failure(
-                LLMCallSite(session_id=self._session_dir.name, component=self.name, role=self.name),
-                error,
-                model="claude-opus-4-7",
-            ),
-        )
-        raise error
-
-
-@pytest.mark.asyncio
-async def test_self_tracing_backend_failure_is_recorded_exactly_once(session_dir):
-    """One provider failure must produce one row, not one per writer."""
-    backend = _SelfTracingLLMFailingBackend("orchestration", session_dir)
-    c = Coordinator(session_dir, backends={"orchestration": backend})
-    try:
-        await c.tick(2)
-        rows = _llm_error_rows(session_dir)
-        assert len(rows) == backend.calls
-        # The surviving row is the backend's richer one (it names the model).
-        assert {r["model"] for r in rows} == {"claude-opus-4-7"}
-        assert {r["component"] for r in rows} == {"orchestration"}
-        assert backend.trace_contexts
-        assert all("macro_cycle" in context for context in backend.trace_contexts)
     finally:
         await c.stop()
 
@@ -639,46 +599,43 @@ class _AlwaysCrashingBackend(Backend):
         *,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
-        max_turns: int = 1,
     ) -> "BackendTurnResult":  # noqa: F821 — protocol return type, raises before returning
         self.calls += 1
         raise RuntimeError(f"simulated {self.name} unexpected crash #{self.calls}")
 
 
+_LOOP_FAILURE_KINDS = {"backend_error", "backend_unhealthy", "reactor_exception"}
+
+
+async def _loop_failure_observations(c: Coordinator) -> list[str]:
+    observations = await c.bus.tail(n=200, topic="observation")
+    return [o.payload["kind"] for o in observations if (o.payload or {}).get("kind") in _LOOP_FAILURE_KINDS]
+
+
 @pytest.mark.asyncio
-async def test_backend_error_streak_fires_backend_unhealthy_once_at_threshold(
-    session_dir,
-    monkeypatch,
-):
-    """A consecutive BackendError streak promotes per-call ``backend_error`` events into a single ``backend_unhealthy`` observation, fired once."""
-    monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD",
-        "3",
-    )
+async def test_a_failed_backend_call_is_on_the_trajectory_and_not_in_the_agents_inbox(session_dir, monkeypatch):
+    """The loop's own failure is not news for the agent whose call failed: nothing is written to its inbox, the
+    turn is asked again because it never settled, and the error text is on the call's trajectory row."""
+    from hyperloom.inference_optimizer.trace import trajectory_trace as tt
+
     monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 0)
-    c = Coordinator(session_dir, backends={"orchestration": _AlwaysFailingBackend("orchestration")})
+    failing = _AlwaysFailingBackend("orchestration")
+    c = Coordinator(session_dir, backends={"orchestration": failing})
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
-        await c.tick(4)
-        observations = await c.bus.tail(n=50, topic="observation")
-        backend_errors = [
-            o
-            for o in observations
-            if (o.payload or {}).get("kind") == "backend_error" and (o.payload or {}).get("agent") == "orchestration"
+        assert await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=6)) == "max_ticks"
+
+        assert failing.calls == 6
+        assert c._backend_error_streak == 6
+        assert await _loop_failure_observations(c) == []
+        assert not await c.bus.has_actionable_inbox("orchestration", after_seq=0)
+        calls = [
+            row
+            for row in tt.load_events(session_dir)
+            if row["event_type"] == tt.EVENT_LLM_CALL and row["status"] == tt.STATUS_FAILED
         ]
-        backend_unhealthy = [
-            o
-            for o in observations
-            if (o.payload or {}).get("kind") == "backend_unhealthy"
-            and (o.payload or {}).get("agent") == "orchestration"
-        ]
-        assert len(backend_errors) == 4
-        assert len(backend_unhealthy) == 1
-        promoted = backend_unhealthy[0].payload
-        assert promoted["consecutive_errors"] == 3
-        assert promoted["threshold"] == 3
-        assert promoted["severity"] == "high"
-        assert promoted["agent"] == "orchestration"
-        assert "backend has failed" in promoted["hint"]
+        assert [row["attributes"]["error_type"] for row in calls] == ["BackendError"] * 6
+        assert calls[0]["attributes"]["error_message"] == "simulated orchestration subprocess crash #1"
     finally:
         await c.stop()
 
@@ -688,6 +645,7 @@ async def test_unexpected_backend_exception_records_last_tick_exception(session_
     backends = _build_backends({})
     backends["orchestration"] = _AlwaysCrashingBackend("orchestration")
     c = Coordinator(session_dir, backends=backends)
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         await c.tick(1)
         assert c.shared_state.crash_count == 1
@@ -698,6 +656,7 @@ async def test_unexpected_backend_exception_records_last_tick_exception(session_
 
         persisted = SharedState.load_or_init(session_dir)
         assert persisted.last_tick_exception == c.shared_state.last_tick_exception
+        assert await _loop_failure_observations(c) == []
     finally:
         await c.stop()
 
@@ -707,34 +666,26 @@ async def test_backend_error_streak_resets_after_successful_turn(
     session_dir,
     monkeypatch,
 ):
-    """A successful turn resets the streak counter and re-arms the alarm."""
-    monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD",
-        "2",
-    )
+    """A successful turn resets the streak the back-off grows with."""
     monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 0)
     # Orchestration takes a turn in every tick, as it does once its heartbeat elapses.
     monkeypatch.setattr("hyperloom.orchestrator.loop.conversation._ORCHESTRATION_HEARTBEAT_SEC", 0)
     failing = _AlwaysFailingBackend("orchestration")
     c = Coordinator(session_dir, backends={"orchestration": failing})
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         await c.tick(2)
-        assert c._backend_error_streak["orchestration"] == 2
-        assert c._backend_error_alarm_armed["orchestration"] is False
+        assert c._backend_error_streak == 2
 
         # Healthy backend → reset.
         c.backends.update(_build_backends({}))
         await c.tick(1)
-        assert c._backend_error_streak["orchestration"] == 0
-        assert c._backend_error_alarm_armed["orchestration"] is True
+        assert c._backend_error_streak == 0
+        assert c._backend_retry_at == 0.0
 
-        # Re-arm: failing backend back in → alarm fires again.
         c.backends["orchestration"] = failing
         await c.tick(2)
-        observations = await c.bus.tail(n=50, topic="observation")
-        backend_unhealthy = [o for o in observations if (o.payload or {}).get("kind") == "backend_unhealthy"]
-        assert len(backend_unhealthy) == 2
-        assert backend_unhealthy[-1].payload["consecutive_errors"] == 2
+        assert c._backend_error_streak == 2
     finally:
         await c.stop()
 
@@ -744,6 +695,7 @@ async def test_a_tick_does_not_call_a_failing_backend_before_its_retry(session_d
     monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 3600)
     failing = _AlwaysFailingBackend("orchestration")
     c = Coordinator(session_dir, backends={"orchestration": failing})
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         await c.tick(3)
         assert failing.calls == 1
@@ -756,6 +708,7 @@ async def test_run_waits_for_a_retry_when_every_backend_is_failing(session_dir, 
     monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 0.2)
     failing = _AlwaysFailingBackend("orchestration")
     c = Coordinator(session_dir, backends={"orchestration": failing})
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         assert await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=3)) == "max_ticks"
         assert failing.calls >= 2
@@ -769,6 +722,7 @@ async def test_run_dispatches_and_books_a_task_before_a_failing_backend_is_retri
     monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 3600)
     failing = _AlwaysFailingBackend("orchestration")
     c = Coordinator(session_dir, backends={"orchestration": failing})
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     c.dispatcher.poll_sec = 0.01
 
     async def _profile(_ctx):
@@ -799,6 +753,7 @@ async def test_run_dispatches_and_books_a_task_before_a_failing_backend_is_retri
 async def test_run_stops_once_a_backend_has_failed_for_the_unhealthy_window(session_dir, monkeypatch):
     monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_UNHEALTHY_STOP_SEC", 0.0)
     c = Coordinator(session_dir, backends={"orchestration": _AlwaysFailingBackend("orchestration")})
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         assert await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=5)) == "backend_unhealthy"
         assert c.shared_state.stop_reason == "backend_unhealthy"
@@ -815,12 +770,13 @@ async def test_a_no_intent_streak_stops_the_session_once(session_dir, monkeypatc
         loop_last=True,
     )
     c = Coordinator(session_dir, backends=_build_backends({"orchestration": plan}))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         for _ in range(2):
-            await c.reactor_pass("orchestration")
+            await c.reactor_pass()
         assert not c.shared_state.stop_reason
         for _ in range(2):
-            await c.reactor_pass("orchestration")
+            await c.reactor_pass()
         assert c.shared_state.stop_reason == "backend_unhealthy"
         observations = await c.bus.tail(n=50, topic="observation")
         streaks = [o.payload for o in observations if (o.payload or {}).get("kind") == "no_intent_streak"]
@@ -838,21 +794,21 @@ async def test_a_turn_with_an_intent_ends_the_no_intent_streak(session_dir, monk
     silent = MockTurn(raw_text="thinking out loud")
     plan = ScriptedPlan(turns=[silent, silent, MockTurn(intents=[_heartbeat()]), silent, silent])
     c = Coordinator(session_dir, backends=_build_backends({"orchestration": plan}))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         for _ in range(5):
-            await c.reactor_pass("orchestration")
+            await c.reactor_pass()
         assert not c.shared_state.stop_reason
     finally:
         await c.stop()
 
 
 @pytest.mark.asyncio
-async def test_an_admitted_propose_action_queues_its_task_and_announces_it(session_dir):
+async def test_an_admitted_delegate_queues_its_task_and_announces_it(session_dir):
     c = Coordinator(session_dir, backends=_build_backends({}))
     try:
         await c.router.handle_intent(
-            "orchestration",
-            Intent(type=IntentType.PROPOSE_ACTION, payload={"action_name": "baseline", "predicted_gain_pct": 0.0}),
+            "orchestration", Intent(type=IntentType.DELEGATE, payload={"action_name": "baseline"})
         )
         (task,) = await c.tasks.by_state("queued")
         assert task.kind == "baseline"
@@ -871,12 +827,12 @@ async def test_coordinator_delegate_task_run_via_dispatcher(session_dir):
         payload={
             "action_name": "baseline",
             "params": {"runs": 1},
-            "idempotency_key": "k-deleg-1",
         },
     )
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[delegate])])}
 
     c = Coordinator(session_dir, backends=_build_backends(plans))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     c.sub.register_executor("baseline", lambda ctx: _async_return({"tput": 1840}))
     try:
         await c.tick(1)
@@ -888,14 +844,15 @@ async def test_coordinator_delegate_task_run_via_dispatcher(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_delegate_accepts_nested_params_idempotency_key(session_dir):
-    """When idempotency_key is under params, Coordinator treats it as the delegate key and removes it from executor params."""
+async def test_a_delegate_key_under_params_names_nothing_and_never_reaches_the_executor(session_dir):
+    """An ``idempotency_key`` the agent wrote under params is neither the task's key nor one of its params."""
     delegate = Intent(
         type=IntentType.DELEGATE,
         payload={"action_name": "baseline", "params": {"runs": 1, "idempotency_key": "baseline-nested-1"}},
     )
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[delegate])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     captured: dict[str, object] = {}
 
     async def _runner(ctx):
@@ -907,8 +864,8 @@ async def test_delegate_accepts_nested_params_idempotency_key(session_dir):
     try:
         await c.tick(1)
         await pump_until_settled(c.dispatcher)
-        assert captured["idempotency_key"] == "baseline-nested-1"
-        assert "idempotency_key" not in captured["params"]
+        assert str(captured["idempotency_key"]).startswith("baseline:")
+        assert captured["params"] == {"runs": 1}
         denied = await c.bus.tail(topic="observation")
         assert not any(m.payload.get("rule") == "duplicate_idempotency_key" for m in denied)
     finally:
@@ -927,12 +884,13 @@ async def test_coordinator_request_routes_to_kernel(session_dir):
     )
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[req])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         c.shared_state.baseline_tput = 100.0
         c.shared_state.last_profile_trace = "/tmp/trace.json.gz"
         c.shared_state.save(session_dir)
         await c.tick(1)
-        kernel_inbox = await c.bus.tail(to_agent="kernel_agent", topic="request")
+        kernel_inbox = await c.bus.tail(topic="request")
         assert any(m.payload.get("kind") == "trace_analyze" for m in kernel_inbox)
     finally:
         await c.stop()
@@ -954,6 +912,7 @@ async def test_coordinator_response_routes_back_to_requester(session_dir):
     )
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[req])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
 
     async def _fake_handler(payload, *, session_dir, **_kw):
         return {"status": "ok", "hot_kernels": [], "candidates_path": ""}
@@ -965,9 +924,9 @@ async def test_coordinator_response_routes_back_to_requester(session_dir):
             c.shared_state.kernel_enabled = True
             c.shared_state.save(session_dir)
             await c.tick(1)
-            kernel_inbox = await c.bus.tail(to_agent="kernel_agent", topic="request")
+            kernel_inbox = await c.bus.tail(topic="request")
             assert kernel_inbox, "no request mirrored to kernel"
-            responses = await c.bus.tail(topic="response", to_agent="orchestration")
+            responses = await c.bus.tail(topic="response")
             assert responses
             assert responses[0].payload["status"] == "ok"
             assert responses[0].payload["source"] == "programmatic_handler"
@@ -978,15 +937,10 @@ async def test_coordinator_response_routes_back_to_requester(session_dir):
 @pytest.mark.asyncio
 async def test_explore_not_denied_before_profile(session_dir):
     """After baseline, ``explore`` is no longer blocked on empty ``last_profile_trace``."""
-    propose = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={
-            "action_name": "explore",
-            "predicted_gain_pct": 5.0,
-        },
-    )
-    plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[propose])])}
+    delegate = Intent(type=IntentType.DELEGATE, payload={"action_name": "explore"})
+    plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[delegate])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         c.shared_state.baseline_tput = 100.0
         c.shared_state.last_profile_trace = ""
@@ -994,7 +948,7 @@ async def test_explore_not_denied_before_profile(session_dir):
 
         await c.tick(1)
 
-        obs = await c.bus.tail(to_agent="orchestration", topic="observation")
+        obs = await c.bus.tail(topic="observation")
         for m in obs:
             if m.payload.get("kind") != "policy_denied":
                 continue
@@ -1010,15 +964,10 @@ async def test_execution_order_does_not_deny_backends_when_trace_analyze_stale(
     session_dir,
 ):
     """Actions must NOT be denied when ``last_trace_analyze`` is stale (the action-layer ``trace_analyze`` hard-gate was removed)."""
-    propose = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={
-            "action_name": "explore",
-            "predicted_gain_pct": 3.0,
-        },
-    )
-    plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[propose])])}
+    delegate = Intent(type=IntentType.DELEGATE, payload={"action_name": "explore"})
+    plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[delegate])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         c.shared_state.baseline_tput = 100.0
         c.shared_state.last_profile_trace = "/tmp/trace-a.json.gz"
@@ -1027,7 +976,7 @@ async def test_execution_order_does_not_deny_backends_when_trace_analyze_stale(
 
         await c.tick(1)
 
-        obs = await c.bus.tail(to_agent="orchestration", topic="observation")
+        obs = await c.bus.tail(topic="observation")
         for m in obs:
             if m.payload.get("kind") != "policy_denied":
                 continue
@@ -1060,18 +1009,14 @@ async def test_coordinator_prune_branch_cancels_family_and_records_advisory(sess
         assert b_after.state == "cancelled"
         assert "baseline" in c.shared_state.pruned_families
 
-        # Future propose_action carries an advisory but is not dropped.
+        # A later delegate carries an advisory but is not dropped.
         await c.router.handle_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.PROPOSE_ACTION,
-                payload={"action_name": "baseline", "predicted_gain_pct": 5.0},
-            ),
+            "orchestration", Intent(type=IntentType.DELEGATE, payload={"action_name": "baseline"})
         )
-        (proposed,) = await c.tasks.by_state("queued")
-        assert proposed.kind == "baseline"
+        (delegated,) = await c.tasks.by_state("queued")
+        assert delegated.kind == "baseline"
         obs = await c.bus.tail(topic="observation")
-        assert any(m.payload.get("kind") == "proposal_pruned_advisory" for m in obs)
+        assert any(m.payload.get("kind") == "delegate_pruned_advisory" for m in obs)
     finally:
         await c.stop()
 
@@ -1112,6 +1057,7 @@ async def test_coordinator_policy_denied_surfaces_as_observation(session_dir):
     bad = Intent(type=IntentType.DELEGATE, payload={"params": {"runs": 1}})
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[bad])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         await c.tick(1)
         denied = await c.bus.tail(topic="observation")
@@ -1163,7 +1109,6 @@ async def test_promote_baseline_records_success_attempt(session_dir):
         assert last["key_metric"] == pytest.approx(1500.0)
         assert last["key_metric_kind"] == "output_throughput"
         assert last["extras"]["accuracy"] == 0.81
-        assert len(c.shared_state.baseline_attempts) == 1
     finally:
         await c.stop()
 
@@ -1316,66 +1261,6 @@ async def test_promote_baseline_revalidation_reanchors_below_prior(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_promote_profile_records_success_attempt(session_dir):
-    c = Coordinator(session_dir, backends=_silent_backends())
-    _mute_action_scoring(c)
-    try:
-        task = _mk_task("profile", "t-prof-1")
-        result = {
-            "main_trace_path": "/tmp/trace.json",
-            "output_throughput": 1234.5,
-            "workspace": "/runs/profile/t-prof-1",
-        }
-        await c.writeback.promote_to_shared_state("profile", result, task=task)
-        last = c.shared_state.last_profile
-        assert last["status"] == "succeeded"
-        assert last["decision"] == "promoted"
-        assert last["extras"]["trace_path"] == "/tmp/trace.json"
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_promote_explore_records_success_attempt(session_dir):
-    c = Coordinator(session_dir, backends=_silent_backends())
-    _mute_action_scoring(c)
-    try:
-        c.shared_state.baseline_tput = 800.0
-        c.shared_state.current_best = {"action": "baseline", "tput": 800.0}
-        task = _mk_task("explore", "t-ex-1")
-        result = {
-            "status": "succeeded",
-            "winners": [
-                {
-                    "name": "v1",
-                    "fingerprint": "fp-v1",
-                    "extra_server_args": "--foo",
-                    "extra_envs": {"K": "1"},
-                    "tput": 900.0,
-                }
-            ],
-            "best_variant": {
-                "name": "v1",
-                "extra_server_args": "--foo",
-                "extra_envs": {"K": "1"},
-                "tput": 900.0,
-            },
-            "output_throughput": 900.0,
-            "best_gain_pct": 12.5,
-            "base_tput": 800.0,
-            "round_id": "round-1",
-        }
-        await c.writeback.promote_to_shared_state("explore", result, task=task)
-        last = c.shared_state.last_explore
-        assert last["status"] == "succeeded"
-        assert last["decision"] == "promoted"
-        assert last["extras"]["best_variant_name"] == "v1"
-        assert last["extras"]["winners_count"] == 1
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
 async def test_promote_explore_updates_validated_gain(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
@@ -1464,8 +1349,7 @@ async def test_handle_unpromotable_baseline_records_failure(session_dir):
             "reported_success": False,
         }
         await c.writeback.handle_unpromotable_result(task, result)
-        assert len(c.shared_state.baseline_attempts) == 1
-        attempt = c.shared_state.baseline_attempts[-1]
+        attempt = c.shared_state.last_baseline
         assert attempt["status"] == "failed"
         assert attempt["decision"] == "no_promote"
         assert attempt["error_class"] == "no_report"
@@ -1475,6 +1359,11 @@ async def test_handle_unpromotable_baseline_records_failure(session_dir):
         assert fail["error_class"] == "no_report"
         assert c.shared_state.baseline_failure_streak == 1
         assert c.shared_state.stop_reason in ("", None)
+        # The state summary of every turn carries the failure; the bus is told nothing more about it.
+        summary = c.shared_state.to_prompt_summary()
+        assert "baseline_failure_streak=1" in summary
+        assert "no_report" in summary
+        assert await c.bus.tail(n=20) == []
     finally:
         await c.stop()
 
@@ -1604,7 +1493,6 @@ async def test_handle_unpromotable_baseline_eval_pending_suppresses_stop_single_
         assert c.shared_state.enablement.pending is True
         assert c.shared_state.enablement.accuracy_floor == 0.2
         assert c.shared_state.enablement.probe_config_path == "/runs/baseline/materialized.yaml"
-        assert c.shared_state.enablement.eval_definition_digest == "sha256:abc123"
         assert c.shared_state.enablement.baseline_eval_kind == "eval_runtime_failure"
         assert c.shared_state.enablement.launch_log
     finally:
@@ -1743,22 +1631,18 @@ async def test_eval_less_baseline_does_not_downgrade_measured_trigger(session_di
     try:
         st = c.shared_state
         st.enablement.baseline_eval_kind = "accuracy_below_floor"
-        st.enablement.observed_accuracy = 0.0
-        st.enablement.observed_task = "gsm8k"
-        st.enablement.observed_metric = "exact_match,strict-match"
-        st.enablement.baseline_eval_evidence = "measured: accuracy=0.0 task=gsm8k source=/runs/.../results.json"
         st.enablement.probe_config_path = "/runs/baseline/measured.yaml"
-        st.enablement.eval_definition_digest = "sha256:measured"
+        st.enablement.record_launch_observation(
+            log="measured: accuracy=0.0 task=gsm8k source=/runs/.../results.json", observation_path="/obs/measured.json"
+        )
 
         await c.writeback.handle_unpromotable_result(_mk_task("baseline", "t-noeval"), _eval_unavailable_result())
 
         # The measured characterization survives...
         assert st.enablement.baseline_eval_kind == "accuracy_below_floor"
-        assert st.enablement.observed_task == "gsm8k"
-        assert st.enablement.observed_metric == "exact_match,strict-match"
-        assert "accuracy=0.0" in st.enablement.baseline_eval_evidence
         assert st.enablement.probe_config_path == "/runs/baseline/measured.yaml"
-        assert st.enablement.eval_definition_digest == "sha256:measured"
+        assert "accuracy=0.0" in st.enablement.launch_log
+        assert st.enablement.launch_observation_path == "/obs/measured.json"
         # ...while the round still registers as an eval-rooted failure.
         assert st.enablement.origin == "eval"
         assert st.enablement.pending is True
@@ -1775,7 +1659,7 @@ async def test_measured_trigger_overwrites_earlier_unavailable(session_dir, monk
     try:
         st = c.shared_state
         st.enablement.baseline_eval_kind = "accuracy_unavailable"
-        st.enablement.baseline_eval_evidence = "accuracy=None"
+        st.enablement.record_launch_observation(log="accuracy=None", observation_path="")
 
         measured = _eval_unavailable_result()
         measured["baseline_eval_failure_kind"] = "accuracy_below_floor"
@@ -1786,8 +1670,8 @@ async def test_measured_trigger_overwrites_earlier_unavailable(session_dir, monk
         await c.writeback.handle_unpromotable_result(_mk_task("baseline", "t-measured"), measured)
 
         assert st.enablement.baseline_eval_kind == "accuracy_below_floor"
-        assert st.enablement.observed_task == "gsm8k"
-        assert "measured" in st.enablement.baseline_eval_evidence
+        assert st.enablement.probe_config_path == "/runs/baseline/noeval.yaml"
+        assert "measured" in st.enablement.launch_log
     finally:
         await c.stop()
 
@@ -1801,7 +1685,6 @@ async def test_revalidation_boot_failure_clears_pending_and_rearmes(session_dir,
     try:
         c.shared_state.enablement.validation_pending = True
         c.shared_state.enablement.revalidation_task_id = "t-reval-boot"
-        c.shared_state.enablement.eval_definition_digest = "sha256:frozen"
         c.shared_state.enablement.accuracy_floor = 0.5
         await c.writeback.handle_unpromotable_result(
             _mk_task("baseline", "t-reval-boot"),
@@ -1809,8 +1692,7 @@ async def test_revalidation_boot_failure_clears_pending_and_rearmes(session_dir,
         )
         assert c.shared_state.enablement.validation_pending is False
         assert c.shared_state.enablement.revalidation_task_id == ""
-        # Frozen trigger identity must be preserved.
-        assert c.shared_state.enablement.eval_definition_digest == "sha256:frozen"
+        # The frozen trigger floor must be preserved.
         assert c.shared_state.enablement.accuracy_floor == 0.5
     finally:
         await c.stop()
@@ -1937,8 +1819,7 @@ async def test_handle_unpromotable_records_for_non_baseline_kinds(session_dir):
         )
         assert c.shared_state.baseline_failure_streak == 0
         assert c.shared_state.stop_reason in ("", None)
-        assert len(c.shared_state.explore_attempts) == 1
-        assert c.shared_state.explore_attempts[-1]["status"] == "failed"
+        assert c.shared_state.last_baseline == {}
         assert len(c.shared_state.last_action_failures) == 1
         fail = c.shared_state.last_action_failures[-1]
         assert fail["action"] == "explore"
@@ -1964,97 +1845,6 @@ async def test_handle_unpromotable_kernel_action_records_global_only(
         assert entry["action"] == "kernel_opt"
         assert entry["error_class"] == "timeout"
         assert entry["stderr_tail"] is not None
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_handle_unpromotable_baseline_capture_failure_arms_eager_fallback(
-    session_dir,
-):
-    """cuda_graph_capture_failed (no baseline yet) must arm the one-shot eager fallback flag through the real coordinator failure handler."""
-    c = Coordinator(session_dir, backends=_silent_backends())
-    _mute_action_scoring(c)
-    try:
-        assert c.shared_state.baseline_eager_fallback is False
-        await c.writeback.handle_unpromotable_result(
-            _mk_task("baseline", "t-cg-1"),
-            {
-                "status": "failed",
-                "error_class": "cuda_graph_capture_failed",
-                "error": "operation not permitted when stream is capturing",
-            },
-        )
-        assert c.shared_state.baseline_eager_fallback is True
-        # One-shot: a second capture failure must not re-arm (already set).
-        await c.writeback.handle_unpromotable_result(
-            _mk_task("baseline", "t-cg-2"),
-            {
-                "status": "failed",
-                "error_class": "cuda_graph_capture_failed",
-                "error": "operation not permitted when stream is capturing",
-            },
-        )
-        assert c.shared_state.baseline_eager_fallback is True
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_baseline_eager_fallback_consume_updates_coordinator_live_state(
-    session_dir,
-):
-    """Executor consumption must clear Coordinator's live state too, or a later coordinator save re-persists stale True and makes the one-shot eager fallback sticky for all later baseline retries."""
-    from hyperloom.orchestrator.actions.executors.baseline import (
-        BaselineExecutor,
-    )
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    c = Coordinator(session_dir, backends=_silent_backends())
-    _mute_action_scoring(c)
-    try:
-        await c.writeback.handle_unpromotable_result(
-            _mk_task("baseline", "t-cg-arm"),
-            {
-                "status": "failed",
-                "error_class": "cuda_graph_capture_failed",
-                "error": "operation not permitted when stream is capturing",
-            },
-        )
-        assert c.shared_state.baseline_eager_fallback is True
-
-        executor = BaselineExecutor(
-            session_dir=session_dir,
-            shared_state=c.shared_state,
-        )
-        assert executor._consume_eager_fallback() is True
-        assert c.shared_state.baseline_eager_fallback is False
-
-        # A later coordinator path flushing the live SharedState.
-        c.shared_state.save(session_dir)
-        assert SharedState.load_or_init(session_dir).baseline_eager_fallback is False
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_handle_unpromotable_capture_failure_no_arm_when_baseline_promoted(
-    session_dir,
-):
-    """Resume case: with an existing baseline (tput > 0) the coordinator must NOT arm the eager fallback on a later cuda-graph capture failure."""
-    c = Coordinator(session_dir, backends=_silent_backends())
-    _mute_action_scoring(c)
-    try:
-        c.shared_state.baseline_tput = 1234.0
-        await c.writeback.handle_unpromotable_result(
-            _mk_task("baseline", "t-cg-resume"),
-            {
-                "status": "failed",
-                "error_class": "cuda_graph_capture_failed",
-                "error": "operation not permitted when stream is capturing",
-            },
-        )
-        assert c.shared_state.baseline_eager_fallback is False
     finally:
         await c.stop()
 
@@ -2087,11 +1877,8 @@ async def test_handle_unpromotable_roofline_increments_failure_streak(
                 _mk_task("roofline", task_id),
                 result,
             )
-        # (a) audit entry exists.
-        assert len(c.shared_state.roofline_attempts) == 1
-        attempt = c.shared_state.roofline_attempts[-1]
-        assert attempt["status"] == "failed"
-        assert attempt["decision"] == "no_promote"
+        # (a) the failure is on the global log.
+        assert [row["action"] for row in c.shared_state.last_action_failures] == ["roofline"]
         # (b) failure streak +1.
         assert c.shared_state.roofline_failure_streak == streak_before + 1, (
             "roofline_failure_streak silently stays at 0; LLM + operators have "
@@ -2340,30 +2127,10 @@ async def test_handle_unpromotable_baseline_records_fingerprint(session_dir):
             "error": "benchmark_report.json missing",
         }
         await c.writeback.handle_unpromotable_result(task, result)
-        attempt = c.shared_state.baseline_attempts[-1]
+        attempt = c.shared_state.last_baseline
         assert attempt["status"] == "failed"
         fp = attempt["extras"]["fingerprint"]
         assert fp["benchmark_script"] == "dsr1_fp8_mi300x.sh"
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_handle_unpromotable_non_baseline_omits_fingerprint(session_dir):
-    c = Coordinator(session_dir, backends=_silent_backends())
-    _mute_action_scoring(c)
-    try:
-        task = Task(
-            task_id="t-ex-fail",
-            kind="explore",
-            state="queued",
-            params={"benchmark_script": "sglang_mi300x.sh"},
-            idempotency_key="idem-ex",
-        )
-        await c.writeback.handle_unpromotable_result(task, {"status": "failed"})
-        attempt = c.shared_state.explore_attempts[-1]
-        assert attempt["status"] == "failed"
-        assert "fingerprint" not in attempt["extras"]
     finally:
         await c.stop()
 
@@ -2408,7 +2175,7 @@ async def test_sub_agent_runner_hands_back_lanes_when_the_claim_is_rejected(
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
+    sub = SubAgentRunner(locks, tr, RoundStore(db))
     sub.register_executor("explore", lambda _ctx: _immediately({}))
 
     task, _ = await tr.create_or_return_existing(
@@ -2432,7 +2199,7 @@ async def test_sub_agent_runner_hands_back_lanes_when_the_claim_is_rejected(
     with pytest.raises(IllegalTransition):
         await sub.run_task(task, prebound_lease=lease)
 
-    assert await locks.lane_holders() == {}
+    assert await lane_holders(locks) == {}
     db.close()
 
 
@@ -2444,7 +2211,7 @@ async def test_a_registered_run_leaves_a_row_queued_when_its_lanes_are_busy(
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
+    sub = SubAgentRunner(locks, tr, RoundStore(db))
 
     ran = {"called": False}
 
@@ -2484,7 +2251,7 @@ async def test_a_registered_run_is_reachable_by_the_wall_clock_defences(tmp_path
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
+    sub = SubAgentRunner(locks, tr, RoundStore(db))
     disp = DispatcherCollaborator(SimpleNamespace(locks=locks, sub=sub))
     registered: list[str] = []
 
@@ -2511,7 +2278,7 @@ async def test_a_registered_run_labels_its_llm_calls_with_the_action(tmp_path):
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
+    sub = SubAgentRunner(locks, tr, RoundStore(db))
     disp = DispatcherCollaborator(SimpleNamespace(locks=locks, sub=sub))
     seen: list[str] = []
 
@@ -2537,7 +2304,7 @@ async def test_sub_agent_runner_fails_a_row_whose_workspace_cannot_be_made(
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
+    sub = SubAgentRunner(locks, tr, RoundStore(db))
     sub.register_executor("explore", lambda _ctx: _immediately({}))
 
     def _no_space(_task):
@@ -2560,7 +2327,7 @@ async def test_sub_agent_runner_normal_path_still_records_transitions(
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
+    sub = SubAgentRunner(locks, tr, RoundStore(db))
     sub.register_executor("baseline", lambda ctx: _async_return({"tput": 1.0}))
     task, _ = await tr.create_or_return_existing(TaskSpec(kind="baseline", params={}, idempotency_key="k-ok"))
     res = await sub.run_task(task)
@@ -2653,28 +2420,21 @@ async def test_run_preserves_prior_stop_reason_when_loop_exits_without_new_reaso
 
 
 @pytest.mark.asyncio
-async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
-    # Defensive audit (log-only): a queued task whose kind has no registered executor is flagged in the process log;
-    # dispatch itself is unchanged (the task still fails on the missing runner). Admission refuses such a kind from
-    # the orchestrator, so the task is queued directly, the way a Coordinator-internal producer would.
-    import logging
-
+async def test_a_queued_task_whose_kind_has_no_executor_fails_on_dispatch(session_dir):
+    # Admission refuses such a kind from the orchestrator, so the task is queued directly, the way a
+    # Coordinator-internal producer would.
     c = Coordinator(session_dir, backends=_build_backends({}))
 
     async def _noop_executor(ctx):
         return {}
 
-    # A fresh SubAgentRunner has an empty registry; the audit only fires once the registry is populated, so register
-    # one unrelated executor first.
     c.sub.register_executor("report", _noop_executor)
     try:
-        await c.tasks.create_or_return_existing(
-            TaskSpec(kind="long_running", params={}, idempotency_key="k-audit-dispatch-1")
+        task, _ = await c.tasks.create_or_return_existing(
+            TaskSpec(kind="long_running", params={}, idempotency_key="k-no-executor-1")
         )
-        with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.dispatcher"):
-            await pump_until_settled(c.dispatcher)
-        assert any("dispatch audit" in r.getMessage() and "long_running" in r.getMessage() for r in caplog.records)
-        assert await c.tasks.by_state("failed")
+        await pump_until_settled(c.dispatcher)
+        assert (await c.tasks.get(task.task_id)).state == "failed"
     finally:
         await c.stop()
 

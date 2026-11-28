@@ -8,8 +8,11 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
 import time
+from importlib.machinery import ModuleSpec
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest import mock
 
@@ -198,7 +201,6 @@ def make_coordinator(session_dir: Path, *, shared_state_overrides: dict[str, Any
     by assigning to the returned instance directly after construction.
     """
     from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles.agent_role import default_role_registry
     from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
@@ -214,13 +216,50 @@ def make_coordinator(session_dir: Path, *, shared_state_overrides: dict[str, Any
     coord = Coordinator(
         session_dir=session_dir,
         backends=backends,
-        role_registry=coord_kwargs.pop("role_registry", None) or default_role_registry(),
         **coord_kwargs,
     )
+    coord.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     if shared_state_overrides:
         for k, v in shared_state_overrides.items():
             setattr(coord.shared_state, k, v)
     return coord
+
+
+class SdkOptions:
+    """Stand-in for ``ClaudeAgentOptions`` that keeps the keyword arguments it was built with."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+
+
+async def _no_sdk_messages(*, prompt: Any, options: Any):
+    for message in ():
+        yield message
+
+
+def _sdk_tool(name: str, description: str, input_schema: dict[str, Any]):
+    return lambda handler: SimpleNamespace(
+        name=name, description=description, input_schema=input_schema, handler=handler
+    )
+
+
+@pytest.fixture
+def claude_sdk(monkeypatch) -> ModuleType:
+    """A stand-in ``claude_agent_sdk`` that the Claude backend imports in place of the installed SDK.
+
+    ``query`` streams no messages and ``ClaudeAgentOptions`` keeps its keyword arguments; a test assigns its own to
+    either before it builds or runs the backend. ``tool`` and ``create_sdk_mcp_server`` hand back what they were
+    given, so the tools a server was built with can be read off its config under ``"tools"``.
+    """
+    sdk = ModuleType("claude_agent_sdk")
+    sdk.__spec__ = ModuleSpec("claude_agent_sdk", loader=None)
+    sdk.__version__ = "0.0.0+stand-in"
+    sdk.query = _no_sdk_messages
+    sdk.ClaudeAgentOptions = SdkOptions
+    sdk.tool = _sdk_tool
+    sdk.create_sdk_mcp_server = lambda name, version, tools: {"name": name, "version": version, "tools": tools}
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", sdk)
+    return sdk
 
 
 @pytest.fixture
@@ -635,7 +674,9 @@ def make_idle_coordinator(session_dir: Path):
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
     }
-    return Coordinator(session_dir, backends=backends)
+    coordinator = Coordinator(session_dir, backends=backends)
+    coordinator.orch_prompt.set("orchestration", "SYSTEM PROMPT")
+    return coordinator
 
 
 def silent_backends() -> dict[str, object]:

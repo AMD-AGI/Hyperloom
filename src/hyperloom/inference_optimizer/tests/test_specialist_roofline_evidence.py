@@ -58,7 +58,7 @@ async def test_warm_specialist_params_injects_roofline_evidence(tmp_path):
 
     state = SharedState(
         last_trace_analyze={
-            "analysis_md_text": "FULL ANALYSIS TEXT",
+            "has_analysis_md": True,
             "analysis_md_path": str(analysis_path),
             "roofline_snapshot_id": 3,
             "hot_kernels_top15": [
@@ -112,11 +112,11 @@ async def test_warm_specialist_params_noop_when_no_snapshot(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_warm_specialist_params_noop_when_analysis_md_text_empty(tmp_path):
-    """Empty ``analysis_md_text`` is treated as no-snapshot."""
+async def test_warm_specialist_params_noop_without_an_analysis_report(tmp_path):
+    """A snapshot with no report and no hot kernels is treated as no-snapshot."""
     state = SharedState(
         last_trace_analyze={
-            "analysis_md_text": "",
+            "has_analysis_md": False,
             "analysis_md_path": "/dev/null",
         },
     )
@@ -131,7 +131,7 @@ async def test_warm_specialist_params_packs_hot_kernels_without_analysis_md(tmp_
     """Hot kernels with no analysis.md still reach the specialist."""
     state = SharedState(
         last_trace_analyze={
-            "analysis_md_text": "",
+            "has_analysis_md": False,
             "analysis_md_path": "",
             "roofline_snapshot_id": 4,
             "hot_kernels_top15": [
@@ -162,7 +162,7 @@ async def test_warm_specialist_params_respects_existing_evidence(tmp_path):
     analysis_path.write_text("# stub\n", encoding="utf-8")
     state = SharedState(
         last_trace_analyze={
-            "analysis_md_text": "stub",
+            "has_analysis_md": True,
             "analysis_md_path": str(analysis_path),
             "roofline_snapshot_id": 1,
             "hot_kernels_top15": [],

@@ -22,7 +22,6 @@ from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.actions.executors.integrate._integrate_vocabulary import RESULT_BENCHED
 from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 from hyperloom.orchestrator.phases.machine import Transition
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.phases.framework_records import ProgressStamp
 
@@ -40,12 +39,13 @@ def _tr(reason: str) -> Transition:
 def _coordinator(session_dir: Path) -> Coordinator:
     """Build a real Coordinator with idle agents."""
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
-    return Coordinator(
+    coordinator = Coordinator(
         session_dir=session_dir,
         backends={"orchestration": MockBackend(idle)},
-        role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )
+    coordinator.orch_prompt.set("orchestration", "SYSTEM PROMPT")
+    return coordinator
 
 
 def _events(session_dir: Path) -> list[dict[str, Any]]:
@@ -918,7 +918,7 @@ def test_local_explore_records_proposal_reasoning_before_dispatch(
 
 
 def _propose_grid(coord: Coordinator, grid: list[dict[str, Any]]) -> str:
-    """Propose one explore grid through the real intent seam, returning the id its row is keyed by."""
+    """Delegate one explore grid through the real intent seam, returning the id its proposal row is keyed by."""
     import asyncio
 
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -934,14 +934,14 @@ def _propose_grid(coord: Coordinator, grid: list[dict[str, Any]]) -> str:
 
     async def _propose() -> list[Any]:
         before = {task.task_id for task in await coord.tasks.queued()}
-        await coord.router._handle_propose_action(
+        await coord.router.handle_delegate(
             "orchestration",
-            Intent(type=IntentType.PROPOSE_ACTION, payload={"action_name": "explore", "params": {"grid": grid}}),
+            Intent(type=IntentType.DELEGATE, payload={"action_name": "explore", "params": {"grid": grid}}),
         )
         return [task for task in await coord.tasks.queued() if task.task_id not in before]
 
     queued = asyncio.run(_propose())
-    assert len(queued) == 1, "the propose seam did not queue exactly one task"
+    assert len(queued) == 1, "the delegate did not queue exactly one task"
     return queued[0].params["proposal_msg_id"]
 
 

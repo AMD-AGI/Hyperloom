@@ -122,8 +122,8 @@ PRELUDE establishes the session baseline:
 The `roofline` executor makes no LLM call of its own. It runs the profile and
 the TraceLens analysis, and stores TraceLens's report (`analysis.md`, or
 `analysis.json` when the session analyses traces without an LLM) verbatim with
-the snapshot; Orchestration reads that report through the `show_analysis_md`
-context tool.
+the snapshot. Orchestration's prompt carries a digest of the snapshot
+(`profiler_digest`) and names the report's file on its `analysis_md=` line.
 
 `model_class` is supplied by the launcher or derived once from model
 metadata at boot. There is no separate live `classify` action.
@@ -713,17 +713,17 @@ what an earlier turn happened to remember.
 - **Context tools**: A read-only MCP surface lets the agent pull what the
   projection leaves out — finished outcomes (`get_recent_outcomes`),
   a mid-turn re-read of in-flight work (`get_running_tasks`), failure packets (`get_failure` /
-  `get_variant_failures`), reference docs (`read_reference`) and the raw
-  `analysis.md` (`show_analysis_md`).
+  `get_variant_failures`) and reference docs (`read_reference`).
   Transports without MCP tools get the projection only.
 - **Resume**: On resume the projection is rebuilt from
   `orchestration_memory` plus the authoritative `SharedState` facts —
   not by replaying a non-deterministic transcript.
 - **Write path**: All write actions flow through `emit_intent` → the
-  Coordinator's intent handler, so the accuracy gate and PolicyGate's
-  invariants (path sandbox, resource leases, data dependencies,
-  single-writer rules) apply to every turn. An admitted `propose_action`
-  or `delegate` is queued in the same step.
+  Coordinator's intent handler, so the accuracy gate, PolicyGate's
+  invariants (path sandbox, data dependencies, single-writer rules) and the
+  admission rules that read the session's resources (the bring-up round, the
+  GPU pools, the time budget) apply to every turn. `delegate` is the one intent
+  that queues an action, and an admitted one is queued in the same step.
   Repetition is checked against state — the tested-variant ledger and
   the action-failure log — not against agent recall.
 
@@ -746,8 +746,8 @@ The loop adapts through facts, not through retired score tables:
   for every patch and framework candidate.
 - PolicyGate blocks unsafe paths, invalid envelopes, and actions whose
   structural requirements are not met before they mutate runtime state.
-  Phase fit is enforced at admission: a proposal or delegate whose action
-  the current phase does not offer is refused (`phase_incompatible`)
+  Phase fit is enforced at admission: a delegate whose action the current
+  phase does not offer is refused (`phase_incompatible`)
   before a task exists, and the phase transition drops incompatible tasks
   still queued from the previous phase.
 - The baseline anchor every gain is measured against moves only to a

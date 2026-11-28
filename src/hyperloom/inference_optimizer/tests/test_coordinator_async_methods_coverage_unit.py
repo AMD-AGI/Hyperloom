@@ -277,46 +277,41 @@ async def test_promote_profile_does_not_reuse_unready_merged_trace(coord: Coordi
 
 
 @pytest.mark.asyncio
-async def test_promote_roofline_succeeded_and_skipped_and_failed(coord: Coordinator) -> None:
+async def test_promote_roofline_clears_the_failure_streak(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 800.0
-    await coord.writeback.promote_to_shared_state("roofline", {"status": "succeeded"})
-    await coord.writeback.promote_to_shared_state("roofline", {"status": "skipped"})
-    await coord.writeback.promote_to_shared_state(
-        "roofline",
-        {
-            "status": "failed",
-            "error_class": "boom",
-            "phase": "trace",
-        },
-    )
-    assert getattr(coord.shared_state, "roofline_failure_streak", 0) >= 1
+    coord.shared_state.roofline_failure_streak = 2
+    for status in ("succeeded", "recovered"):
+        await coord.writeback.promote_to_shared_state("roofline", {"status": status})
+        assert coord.shared_state.roofline_failure_streak == 0
 
 
 @pytest.mark.asyncio
 async def test_compose_prompt_tells_orchestration_its_session_dir(coord: Coordinator) -> None:
     """The orchestration system prompt's SESSION_DIR contract: artefact paths it emits are rooted here."""
-    prompt = await coord.conversation.compose_prompt("orchestration")
+    prompt = await coord.conversation.compose_prompt()
     assert f"SESSION_DIR={coord.session_dir}" in prompt.text.splitlines()
 
 
 @pytest.mark.asyncio
 async def test_compose_prompt_orchestration_with_time_budget(coord: Coordinator) -> None:
     """The per-tick Time budget block the orchestration system prompt promises, carrying ``remaining=``."""
-    coord._run_started_monotonic = time.monotonic() - 60.0
     coord._run_deadline = Deadline.after(600.0)
     coord.shared_state.max_minutes = 60
-    lines = (await coord.conversation.compose_prompt("orchestration")).text.splitlines()
+    # Twenty minutes charged by earlier legs and five by this one: the block reports the session's total.
+    coord.shared_state.elapsed_charged_sec = 1200.0
+    coord.shared_state.begin_leg(now_unix=time.time() - 300.0)
+    lines = (await coord.conversation.compose_prompt()).text.splitlines()
     assert "=== Time budget ===" in lines
-    assert "remaining=" in lines[lines.index("=== Time budget ===") + 1]
+    budget = lines[lines.index("=== Time budget ===") + 1]
+    assert budget.startswith("elapsed=25.0min  remaining=10.0min  budget=60min")
 
 
 @pytest.mark.asyncio
 async def test_compose_prompt_orchestration_deadline_imminent_warning(coord: Coordinator) -> None:
-    coord._run_started_monotonic = time.monotonic() - 60.0
     coord._run_deadline = Deadline.after(60.0)
     coord.shared_state.max_minutes = 60
     coord.shared_state.closing_phase = False
-    out = (await coord.conversation.compose_prompt("orchestration")).text
+    out = (await coord.conversation.compose_prompt()).text
     assert "< 5 min remaining" in out
 
 
@@ -334,7 +329,6 @@ _ORCHESTRATION_ADVISORIES = (
     ("=== Intervention mix (telemetry) ===", "shared_state", "to_intervention_mix_summary"),
     ("=== Bottleneck redirect (advisory) ===", "conversation", "_bottleneck_redirect_advisory_block"),
     ("=== Acceptance threshold (advisory) ===", "conversation", "_acceptance_threshold_advisory_block"),
-    ("=== Discarded escalation hint (advisory) ===", "conversation", "_discarded_escalate_hint_advisory_block"),
     ("=== Plateau advisory ===", "conversation", "plateau_advisory_block"),
 )
 
@@ -354,7 +348,7 @@ def _stub_advisories(coord: Coordinator, monkeypatch) -> list[str]:
 async def test_compose_prompt_keeps_the_orchestration_advisory_order(coord: Coordinator, monkeypatch) -> None:
     markers = _stub_advisories(coord, monkeypatch)
 
-    prompt = (await coord.conversation.compose_prompt("orchestration")).text
+    prompt = (await coord.conversation.compose_prompt()).text
 
     for (heading, _owner, _producer), marker in zip(_ORCHESTRATION_ADVISORIES, markers):
         assert (marker if heading is None else f"{heading}\n{marker}") in prompt
@@ -370,7 +364,7 @@ async def test_compose_prompt_drops_the_heading_of_an_advisory_that_produced_not
     _stub_advisories(coord, monkeypatch)
     monkeypatch.setattr(coord.conversation, "plateau_advisory_block", lambda: "")
 
-    prompt = (await coord.conversation.compose_prompt("orchestration")).text
+    prompt = (await coord.conversation.compose_prompt()).text
 
     assert "=== Plateau advisory ===" not in prompt
     # The trajectory digest is shown only on a plateau, so it goes with it.
@@ -388,7 +382,7 @@ async def test_compose_prompt_puts_the_trajectory_review_under_the_plateau_advis
     _stub_advisories(coord, monkeypatch)
     monkeypatch.setattr(trajectory_reviewer, "build_trajectory_digest", lambda *_a, **_k: "<trajectory>")
 
-    prompt = (await coord.conversation.compose_prompt("orchestration")).text
+    prompt = (await coord.conversation.compose_prompt()).text
 
     assert (
         "=== Plateau advisory ===\n<plateau_advisory_block>\n=== Trajectory review (advisory) ===\n<trajectory>"
@@ -509,8 +503,10 @@ def _escalate(hint: str) -> Intent:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("hint", ["bogus", "skip_to_close"])
+@pytest.mark.parametrize("hint", ["bogus", "skip_to_close", "skip_to_sweep"])
 async def test_escalate_hint_outside_the_vocab_is_denied(coord: Coordinator, hint: str) -> None:
+    """``skip_to_kernel`` is the model's one hint; ``skip_to_sweep`` is the Coordinator's own and not the model's to send."""
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
     await coord.router._handle_escalate_strategy_change("orchestration", _escalate(hint))
     assert coord.shared_state.pending_escalate_hint == ""
     denied = [
@@ -806,7 +802,7 @@ def test_is_promotable_result_unchanged_for_reverted_integrate_patch(coord: Coor
 async def test_compose_prompt_renders_the_gap_to_the_gain_objective(coord: Coordinator) -> None:
     coord._current_objective = TargetGainObjective(target_gain_pct=20.0)
     coord.shared_state.cumulative_gain_validated = 5.0
-    text = (await coord.conversation.compose_prompt("orchestration")).text
+    text = (await coord.conversation.compose_prompt()).text
     assert "target_gap_pct=15.00" in text
 
 
@@ -814,7 +810,7 @@ async def test_compose_prompt_renders_the_gap_to_the_gain_objective(coord: Coord
 async def test_compose_prompt_time_only_objective_leaves_no_gap(coord: Coordinator) -> None:
     coord._current_objective = TimeOnlyObjective()
     coord.shared_state.cumulative_gain_validated = 5.0
-    text = (await coord.conversation.compose_prompt("orchestration")).text
+    text = (await coord.conversation.compose_prompt()).text
     assert "target_gap_pct=0.00" in text
 
 
@@ -918,27 +914,6 @@ async def test_auto_retry_caps_attempts(coord: Coordinator, monkeypatch) -> None
     res = _result(result={"runner_status": "stale"}, error="timeout")
     task = _spec_task(_auto_retry_attempt=1)
     assert await coord.specialist_dispatch.maybe_auto_retry_specialist(task, res) is False
-
-
-# -- fan_out_specialist_wave (invalid entries) ---------------------------
-@pytest.mark.asyncio
-async def test_fan_out_wave_rejects_invalid_entries(coord: Coordinator, monkeypatch) -> None:
-    called = []
-    monkeypatch.setattr(
-        coord.router,
-        "handle_delegate",
-        lambda *a, **k: called.append(a),
-    )
-    intent = Intent(type=IntentType.DELEGATE, payload={"idempotency_key": "w", "action_name": "specialist"})
-    from hyperloom.orchestrator.policy.denial import PolicyDenied
-
-    with pytest.raises(PolicyDenied):
-        await coord.specialist_dispatch.fan_out_specialist_wave(
-            "orchestration",
-            intent,
-            {"tasks": ["not-a-dict", {}, {"task_description": "   "}]},
-        )
-    assert called == []
 
 
 # -- warm_specialist_params -----------------------------------------------

@@ -13,9 +13,12 @@ from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.state.task_registry import (
     _MAX_PROGRESS_NOTES,
     Task,
+    TaskOutcome,
     TaskRegistry,
     TaskSpec,
+    confirmed_result,
     create_in_cursor,
+    recorded_outcome,
     task_dispatch_class,
     task_dispatch_evidence,
     task_dispatch_record,
@@ -156,7 +159,7 @@ async def test_unknown_dispatch_class_fails_before_insert(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_idempotent_reuse_requires_the_same_dispatch_class(tmp_path):
+async def test_idempotent_reuse_returns_the_row_with_the_class_it_was_created_under(tmp_path):
     registry = TaskRegistry(SqliteConnection(tmp_path / "dispatch-reuse.db"))
     try:
         created, existing = await registry.create_or_return_existing(
@@ -176,25 +179,27 @@ async def test_idempotent_reuse_requires_the_same_dispatch_class(tmp_path):
                 dispatch_class="llm",
             ),
         )
-        with pytest.raises(ValueError, match="dispatch_class mismatch"):
-            await registry.create_or_return_existing(
-                TaskSpec(
-                    kind="baseline",
-                    params={},
-                    idempotency_key="same-key",
-                    dispatch_class="coordinator",
-                ),
-            )
+        other_class, other_was_existing = await registry.create_or_return_existing(
+            TaskSpec(
+                kind="baseline",
+                params={},
+                idempotency_key="same-key",
+                dispatch_class="coordinator",
+            ),
+        )
     finally:
         registry.db.close()
 
     assert existing is False
     assert was_existing is True
     assert reused.task_id == created.task_id
+    assert other_was_existing is True
+    assert other_class.task_id == created.task_id
+    assert task_dispatch_class(other_class) == "llm"
 
 
 @pytest.mark.asyncio
-async def test_cursor_reuse_validates_dispatch_class(tmp_path):
+async def test_cursor_reuse_returns_the_row_with_the_class_it_was_created_under(tmp_path):
     db = SqliteConnection(tmp_path / "cursor-dispatch-reuse.db")
     try:
         async with db.transaction() as cur:
@@ -212,17 +217,19 @@ async def test_cursor_reuse_validates_dispatch_class(tmp_path):
             reused, was_existing = create_in_cursor(
                 cur, TaskSpec(kind="specialist", params={}, idempotency_key="cursor-key", dispatch_class="coordinator")
             )
-        with pytest.raises(ValueError, match="dispatch_class mismatch"):
-            async with db.transaction() as cur:
-                create_in_cursor(
-                    cur, TaskSpec(kind="specialist", params={}, idempotency_key="cursor-key", dispatch_class="inline")
-                )
+        async with db.transaction() as cur:
+            other_class, other_was_existing = create_in_cursor(
+                cur, TaskSpec(kind="specialist", params={}, idempotency_key="cursor-key", dispatch_class="inline")
+            )
     finally:
         db.close()
 
     assert existing is False
     assert was_existing is True
     assert reused.task_id == created.task_id
+    assert other_was_existing is True
+    assert other_class.task_id == created.task_id
+    assert task_dispatch_class(other_class) == "coordinator"
 
 
 @pytest.mark.asyncio
@@ -253,6 +260,26 @@ async def test_with_key_prefix_matches_the_prefix_literally(tmp_path, sync):
         assert await with_key_prefix("integrate_patch", "a%b-reconcile") == []
         assert await with_key_prefix("integrate_patch", "AAB-reconcile") == []
         assert await with_key_prefix("explore", "aab-reconcile") == []
+    finally:
+        registry.db.close()
+
+
+@pytest.mark.asyncio
+async def test_outcomes_reads_what_the_executor_recorded_whoever_ended_the_row(tmp_path):
+    """A row another writer ended first still gets the executor's outcome appended; until then it has none."""
+    registry, reclaimed = await _running_task(tmp_path, "outcomes")
+    try:
+        await registry.transition(reclaimed, "failed", evidence={"reason": "dead_holder"})
+        assert await registry.outcomes([reclaimed]) == {}
+
+        returned = {"task_id": reclaimed, "state": "succeeded", "result": {"status": "ok"}, "error": None}
+        await registry.append_completion_evidence(reclaimed, {"outcome": returned, "cleanup_confirmed": False})
+
+        outcome = TaskOutcome(result={"status": "ok"}, error=None, cleanup_confirmed=False)
+        assert await registry.outcomes([reclaimed]) == {reclaimed: outcome}
+        row = await registry.get(reclaimed)
+        assert (row.state, recorded_outcome(row)) == ("failed", outcome)
+        assert confirmed_result(row) is None, "an unconfirmed cleanup makes the result diagnostic only"
     finally:
         registry.db.close()
 

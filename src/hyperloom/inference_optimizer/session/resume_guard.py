@@ -95,18 +95,10 @@ class _Diagnostics:
         return self.lines
 
 
-def _scan_leases(db: sqlite3.Connection, owner_scope: str, found: _Diagnostics) -> tuple[set[str], list[sqlite3.Row]]:
-    """Judge the execution leases; return the locally owned tasks and the round leases.
-
-    A round lease is held by a bring-up round rather than an execution, so it
-    is judged later, against the rounds that are actually open.
-    """
+def _scan_leases(db: sqlite3.Connection, owner_scope: str, found: _Diagnostics) -> set[str]:
+    """Judge the execution leases; return the locally owned tasks."""
     local_tasks: set[str] = set()
-    round_leases: list[sqlite3.Row] = []
     for row in db.execute("SELECT lane, holder_id, task_id, pid, owner_scope FROM leases"):
-        if row["lane"] == "bringup_round":
-            round_leases.append(row)
-            continue
         try:
             pid = int(row["pid"] or 0)
         except (TypeError, ValueError):
@@ -115,7 +107,7 @@ def _scan_leases(db: sqlite3.Connection, owner_scope: str, found: _Diagnostics) 
             local_tasks.add(row["task_id"])
             continue
         found.blocked(row["task_id"], row["lane"], row["holder_id"], "execution owner scope or PID is unobservable")
-    return local_tasks, round_leases
+    return local_tasks
 
 
 def _scan_gpu_leases(db: sqlite3.Connection, found: _Diagnostics) -> None:
@@ -140,11 +132,9 @@ def _scan_tasks(db: sqlite3.Connection, local_tasks: set[str]) -> tuple[dict, di
     return tasks, uncertainties
 
 
-def _scan_open_rounds(db: sqlite3.Connection, tasks: dict, uncertainties: dict, found: _Diagnostics) -> dict:
-    """Judge each OPEN bring-up round against its holder; return round -> holder."""
-    open_rounds: dict = {}
+def _scan_open_rounds(db: sqlite3.Connection, tasks: dict, uncertainties: dict, found: _Diagnostics) -> None:
+    """Judge each OPEN bring-up round against its holder."""
     for row in db.execute("SELECT round_id, holder_task_id FROM bringup_rounds WHERE state='open'"):
-        open_rounds[row["round_id"]] = row["holder_task_id"]
         task_id = row["holder_task_id"]
         if task_id not in tasks:
             found.blocked(task_id, "bringup_round", row["round_id"], "OPEN round has no holder execution record")
@@ -153,7 +143,6 @@ def _scan_open_rounds(db: sqlite3.Connection, tasks: dict, uncertainties: dict, 
         reason = uncertainties.get(task_id) or _terminal_uncertainty(task["state"], task["history"])
         if reason:
             found.blocked(task_id, "bringup_round", row["round_id"], reason)
-    return open_rounds
 
 
 def _inspect(db: sqlite3.Connection, owner_scope: str) -> list[str]:
@@ -161,14 +150,10 @@ def _inspect(db: sqlite3.Connection, owner_scope: str) -> list[str]:
     if not _tables(db):
         return []
     found = _Diagnostics()
-    local_tasks, round_leases = _scan_leases(db, owner_scope, found)
+    local_tasks = _scan_leases(db, owner_scope, found)
     _scan_gpu_leases(db, found)
     tasks, uncertainties = _scan_tasks(db, local_tasks)
-    open_rounds = _scan_open_rounds(db, tasks, uncertainties, found)
-
-    for row in round_leases:
-        if open_rounds.get(row["holder_id"]) != row["task_id"]:
-            found.blocked(row["task_id"], row["lane"], row["holder_id"], "round ownership has no matching OPEN round")
+    _scan_open_rounds(db, tasks, uncertainties, found)
 
     for task_id, reason in uncertainties.items():
         lanes = json.loads(tasks[task_id]["requires_lanes"])
@@ -302,18 +287,16 @@ def ensure_resume_safe(session_dir: Path, *, owner_scope: str) -> None:
 def _task_leases(db: sqlite3.Connection, task_id: str, owner_scope: str) -> list[dict]:
     """Return the execution leases a confirmation releases; every one must carry ``owner_scope``.
 
-    The empty scope is the legacy unattributed ownership confirmed task by task. A
-    bring-up round's lane never records a scope and stays with the round reconciler.
+    The empty scope is the legacy unattributed ownership confirmed task by task.
     """
     rows = list(db.execute("SELECT lane, holder_id, owner_scope FROM leases WHERE task_id=?", (task_id,)))
-    scoped = [row for row in rows if not owner_scope or row["lane"] != "bringup_round"]
-    if any(row["owner_scope"] != owner_scope for row in scoped):
+    if any(row["owner_scope"] != owner_scope for row in rows):
         raise CleanupConfirmationError(
             "confirmation is limited to strictly empty owner scope on every target lease"
             if not owner_scope
             else f"task={_label(task_id)} holds a lease outside the confirmed owner scope"
         )
-    return [{"lane": row["lane"], "holder_id": row["holder_id"]} for row in rows if row["lane"] != "bringup_round"]
+    return [{"lane": row["lane"], "holder_id": row["holder_id"]} for row in rows]
 
 
 # The states a task cannot leave. A confirmation acts on one of these, or on a
@@ -479,7 +462,7 @@ def _write_confirmation(db: sqlite3.Connection, target: _ConfirmTarget, *, confi
             (json.dumps(history), confirmed_at, task_id),
         )
     if target.leases:
-        db.execute("DELETE FROM leases WHERE task_id=? AND lane IS NOT 'bringup_round'", (task_id,))
+        db.execute("DELETE FROM leases WHERE task_id=?", (task_id,))
     if target.gpu_leases:
         db.execute("DELETE FROM gpu_leases WHERE task_id=?", (task_id,))
 
@@ -542,8 +525,6 @@ def _confirm_scope_gone_in_transaction(
     now = datetime.fromisoformat(confirmation.confirmed_at)
     target_tasks: set[str] = set()
     for row in db.execute("SELECT lane, holder_id, task_id, pid, owner_scope, acquired_at, expires_at FROM leases"):
-        if row["lane"] == "bringup_round":
-            continue
         if row["owner_scope"] == owner_scope:
             if check_holders and _holder_runs_here(row["pid"], row["acquired_at"]):
                 raise CleanupConfirmationError(

@@ -514,7 +514,7 @@ async def test_retry_returns_non_dict_fails_and_keeps_the_previous_analysis(tmp_
 
     state = _state()
     state.last_profile_trace = "/prev/trace.gz"
-    state.last_trace_analyze = {"trace_input": "/prev/trace.gz", "analysis_md_text": "prev", "roofline_snapshot_id": 9}
+    state.last_trace_analyze = {"trace_input": "/prev/trace.gz", "has_analysis_md": True, "roofline_snapshot_id": 9}
     executor = RooflineExecutor(shared_state=state)
     with (
         patch(
@@ -537,7 +537,7 @@ async def test_retry_returns_non_dict_fails_and_keeps_the_previous_analysis(tmp_
     assert state.last_profile_trace == "/prev/trace.gz"
     assert state.last_trace_analyze == {
         "trace_input": "/prev/trace.gz",
-        "analysis_md_text": "prev",
+        "has_analysis_md": True,
         "roofline_snapshot_id": 9,
     }
 

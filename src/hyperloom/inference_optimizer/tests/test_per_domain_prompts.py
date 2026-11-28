@@ -284,7 +284,6 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import (
     PolicyGate,
@@ -293,7 +292,6 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.specialists.domains import (
     SPECIALIST_DOMAINS,
     SPECIALIST_DOMAIN_KEYS,
-    SPECIALIST_MAX_TURNS_HARD_CAP,
     get_domain,
 )
 from hyperloom.orchestrator.specialists.runner import (
@@ -310,7 +308,7 @@ from .conftest import init_git_repo, make_fake_claude
 # Test fixtures
 @pytest.fixture
 def gate() -> PolicyGate:
-    return PolicyGate(role_registry=default_role_registry())
+    return PolicyGate()
 
 
 @dataclass
@@ -398,10 +396,8 @@ def test_R2_unknown_domain_allowed(gate):
 
 def test_R2_missing_gap_denied_and_params_left_untouched():
     state = SharedState()
-    state.upsert_gap(
-        {"canonical_id": "gap.framework.scheduler", "domain_hint": "serving_specialist", "severity": "high"}
-    )
-    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
+    state.upsert_gap({"canonical_id": "gap.framework.scheduler", "domain_hint": "serving_specialist"})
+    gate = PolicyGate()
     params = {"domain": "serving_specialist"}
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
@@ -411,26 +407,6 @@ def test_R2_missing_gap_denied_and_params_left_untouched():
     assert exc.value.rule == "specialist_dispatch_source"
     assert "gap" in str(exc.value)
     assert params == {"domain": "serving_specialist"}
-
-
-def test_R2_max_turns_excess_denied(gate):
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.DELEGATE,
-                payload={
-                    "action_name": "specialist",
-                    "params": {
-                        "domain": "serving_specialist",
-                        "gap_canonical_id": "gap.x",
-                        "max_turns": SPECIALIST_MAX_TURNS_HARD_CAP + 1,
-                    },
-                },
-            ),
-        )
-    assert exc.value.rule == "specialist_dispatch_source"
-    assert "max_turns" in str(exc.value)
 
 
 def test_R2_max_turns_zero_allowed_unbounded(gate):

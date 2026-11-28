@@ -9,23 +9,15 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.protocol.intent import IntentType
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
-from hyperloom.orchestrator.roles.mcp_context_tools import CONTEXT_TOOL_SPECS
+from hyperloom.orchestrator.roles.mcp_context_tools import CONTEXT_TOOLS
 from hyperloom.orchestrator.roles.mcp_emit_intent import EMIT_INTENT_TOOL_NAME, build_emit_intent_tool_input_schema
 
 
 @pytest.mark.parametrize(
     "schema",
     [
-        *(
-            pytest.param(
-                build_emit_intent_tool_input_schema(role.allowed_intents), id=f"{EMIT_INTENT_TOOL_NAME}-{name}"
-            )
-            for name, role in default_role_registry().items()
-        ),
-        pytest.param(build_emit_intent_tool_input_schema(IntentType), id=f"{EMIT_INTENT_TOOL_NAME}-every-intent"),
-        *(pytest.param(schema, id=name) for name, _description, schema, _method in CONTEXT_TOOL_SPECS),
+        pytest.param(build_emit_intent_tool_input_schema(), id=EMIT_INTENT_TOOL_NAME),
+        *(pytest.param(tool.input_schema, id=name) for name, tool in CONTEXT_TOOLS.items()),
     ],
 )
 def test_tool_schema_has_no_top_level_combinator(schema: dict[str, Any]) -> None:

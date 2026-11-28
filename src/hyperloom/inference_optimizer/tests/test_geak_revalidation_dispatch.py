@@ -55,7 +55,7 @@ def _arm_kernel_to_sweep(st) -> None:
     st.kernel_optimizer = "geak"
     st.geak_result = {"status": "ok", "accepted_config": {"flags": "--foo", "env": ""}}
     st.geak_pending = {}
-    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
+    st.pending_escalate_hint = ESCALATE_HINT_SKIP_TO_SWEEP
 
 
 def _record_revalidations(coordinator) -> list[str]:

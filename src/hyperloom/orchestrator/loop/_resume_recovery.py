@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Settling the windows a crash left open: integrations, builds, revalidations, orphaned KEEPs."""
+"""Settling the windows a crash left open: integrations, builds, revalidations."""
 
 from __future__ import annotations
 
@@ -23,8 +23,7 @@ from ..state.task_registry import (
     create_on_free_key,
     task_dispatch_class,
 )
-from ._current_best_lift import _StackKey, _orphan_stack_key, _stacked_keep_keys
-from ._integrate_promotion import _IntegrateMarker, _KeptResultScan, _integrate_marker_of, _task_recorded_a_result
+from ._integrate_promotion import _IntegrateMarker, _integrate_marker_of, _task_recorded_a_result
 
 log = logging.getLogger(__name__)
 
@@ -121,35 +120,13 @@ class ResumeRecoveryMixin:
         self._clear_pending_integrate(pending, gc_runtime=True)
         return True
 
-    async def _scan_for_published_integrate_keep(self, task_id: str) -> _KeptResultScan:
-        try:
-            for msg in await self.bus.tail(topic="delegated_result", n=-1):
-                payload = msg.payload or {}
-                if str(payload.get("task_id") or "") != task_id:
-                    continue
-                res = payload.get("result") or {}
-                # Require an explicit integrate_patch kind: an empty-kind wildcard
-                # could misclassify a non-integrate event that happens to share
-                # this task_id as a kept integrate result, skipping rollback of a
-                # half-applied patch.
-                if (
-                    isinstance(res, dict)
-                    and str(res.get("kind") or payload.get("kind") or "") == "integrate_patch"
-                    and str(res.get("status") or "").lower() == "kept"
-                ):
-                    return _KeptResultScan(scanned=True, kept=res)
-        except (sqlite3.Error, ValueError):
-            log.exception("Coordinator: pending_integrate kept-result scan failed")
-            return _KeptResultScan(scanned=False, kept=None)
-        return _KeptResultScan(scanned=True, kept=None)
-
     async def _recover_pending_integrate_from_task(
         self,
         pending: dict[str, Any],
         task: Task | None,
         report: dict[str, Any],
     ) -> bool:
-        """Settle an integrate window from durable records rather than the bus.
+        """Settle an integrate window from the sentinel, the stack and the task row.
 
         Args:
             pending: The ``pending_integrate`` sentinel dict.
@@ -163,9 +140,9 @@ class ResumeRecoveryMixin:
         """
         state = self.shared_state
         task_id = str(pending.get("task_id") or "")
-        # Event retention can erase a KEEP. A promoted stack row is
-        # independent positive evidence; a terminal/missing task without
-        # its result is not evidence that a candidate was rejected.
+        # A promoted stack row is independent positive evidence; a
+        # terminal/missing task without its result is not evidence that a
+        # candidate was rejected.
         stack = state.optimization_stack or []
         if any(isinstance(row, dict) and row.get("task_id") == task_id for row in stack):
             state.pending_integrate = {}
@@ -174,7 +151,7 @@ class ResumeRecoveryMixin:
             return True
         marker = _integrate_marker_of(pending, task)
         if marker.verdict == "retained":
-            appended = self._replay_keep_from_result("integrate_patch", marker.outcome or {})
+            appended = self._replay_keep_from_result(marker.outcome or {})
             report["fixes"].append(
                 {"kind": "replayed_pending_integrate", "task_id": task_id, "appended": bool(appended)}
             )
@@ -212,13 +189,10 @@ class ResumeRecoveryMixin:
     async def _resume_recover_pending_integrate(self, report: dict[str, Any]) -> None:
         """Recover a crashed integrate_patch window from the sentinel.
 
-        The verdict is taken from the first source that still carries one: a
-        published KEEP on the bus, then the task row's own completion evidence,
-        which the runner writes before it publishes. Whatever is found is
-        classified by the same ``(status, phase)`` table the live promotion path
-        reads, then replayed, cleared, or rolled back accordingly. A scan that
-        could not read the event log establishes nothing, so it must neither
-        roll back nor clear the sentinel.
+        The verdict is the task row's own completion evidence, which the runner
+        writes before the result is announced. It is classified by the same
+        ``(status, phase)`` table the live promotion path reads, then replayed,
+        cleared, or rolled back accordingly.
 
         Args:
             report: The resume report dict to append fixes/warnings to.
@@ -230,17 +204,6 @@ class ResumeRecoveryMixin:
         task_id = str(pending.get("task_id") or "")
         if not task_id:
             report["warnings"].append({"kind": "pending_integrate_task_missing"})
-            return
-        scan = await self._scan_for_published_integrate_keep(task_id)
-        if not scan.scanned:
-            report["warnings"].append({"kind": "pending_integrate_scan_failed", "task_id": task_id})
-            return
-        if scan.kept is not None:
-            appended = self._replay_keep_from_result("integrate_patch", scan.kept)
-            report["fixes"].append(
-                {"kind": "replayed_pending_integrate", "task_id": task_id, "appended": bool(appended)}
-            )
-            self._clear_pending_integrate(pending, gc_runtime=False)
             return
         task = await self.tasks.find(task_id, kind="integrate_patch") or _covered_step_task(pending)
         if await self._recover_pending_integrate_from_task(pending, task, report):
@@ -484,76 +447,3 @@ class ResumeRecoveryMixin:
             "resume: cleared stale enablement_validation_pending for terminal revalidation task %s",
             tracked_tid,
         )
-
-    async def _surface_orphaned_keep(self, report: dict[str, Any], kind: str, variant: str, task_id: Any) -> None:
-        report["warnings"].append(
-            {"kind": "orphaned_keep", "orphan_kind": kind, "variant": variant, "task_id": task_id}
-        )
-        await self.bus.record_observation(
-            "coordinator",
-            "observation",
-            {"kind": "orphaned_keep", "severity": "medium", "orphan_kind": kind, "variant": variant},
-        )
-
-    async def _recover_orphaned_integrate_keep(
-        self,
-        result: dict[str, Any],
-        report: dict[str, Any],
-        variant: str,
-        task_id: Any,
-    ) -> bool:
-        kind = "integrate_patch"
-        workspace = str(result.get("workspace") or "").strip()
-        if workspace and not Path(workspace).exists():
-            report["warnings"].append(
-                {
-                    "kind": "orphaned_keep_discarded",
-                    "orphan_kind": kind,
-                    "variant": variant,
-                    "task_id": task_id,
-                    "reason": "workspace_missing",
-                }
-            )
-            await self.bus.record_observation(
-                "coordinator",
-                "observation",
-                {"kind": "orphaned_keep_discarded", "severity": "medium", "orphan_kind": kind, "variant": variant},
-            )
-            return False
-        if self._replay_keep_from_result(kind, result):
-            report["fixes"].append({"kind": "replayed_orphaned_keep", "orphan_kind": kind, "variant": variant})
-            return True
-        report["warnings"].append({"kind": "orphaned_keep_replay_noop", "orphan_kind": kind, "variant": variant})
-        return False
-
-    async def _resume_recover_orphaned_keeps(self, report: dict[str, Any]) -> None:
-        """Recover / surface KEEPs present in the event log but absent from the stack (Gap B).
-
-        ``integrate_patch`` KEEPs are well-defined (a ``kept`` status means the
-        single-variant bench + accuracy gate passed and the patch was committed),
-        so a kept-but-absent one is a crash before the append landed → replay it
-        (idempotent), unless its run workspace is gone → discard + alert. ``explore``
-        / ``framework`` KEEPs are ambiguous (the stack they landed on is only
-        known to the round that ran), so they are surfaced as a ``medium``
-        alert rather than resurrected. Whatever the stack ends up as
-        is re-validated by the Gap A full-stack rebench.
-
-        Args:
-            report: The resume report dict to append fixes/warnings to.
-        """
-        stack_keys = _stacked_keep_keys(self.shared_state.optimization_stack)
-        seen: set[_StackKey] = set()
-        for msg in await self.bus.tail(topic="delegated_result", n=10_000):
-            payload = msg.payload or {}
-            res = payload.get("result") or {}
-            if not isinstance(res, dict) or str(res.get("status") or "").lower() != "kept":
-                continue
-            kind = str(payload.get("kind") or "")
-            key = _orphan_stack_key(kind, res)
-            if key is None or not key.variant or key in stack_keys or key in seen:
-                continue
-            seen.add(key)
-            if kind != "integrate_patch":
-                await self._surface_orphaned_keep(report, kind, key.variant, payload.get("task_id"))
-            elif await self._recover_orphaned_integrate_keep(res, report, key.variant, payload.get("task_id")):
-                stack_keys.add(key)

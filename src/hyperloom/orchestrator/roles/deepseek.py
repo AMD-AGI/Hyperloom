@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from hyperloom_common.llm.deepseek_session import (
     DEEPSEEK_RUNTIME_MAPPING,
@@ -52,21 +52,15 @@ _ENVELOPE_REMINDER = (
 )
 
 
-def build_output_instructions(allowed_intents: Iterable[IntentType]) -> str:
-    """Render the reply contract for one role's intent set.
+def build_output_instructions() -> str:
+    """Render the reply contract.
 
     The Codex contract serializes ``payload`` into a string because its
     enforced schema cannot express a free-form object. Nothing enforces a
     schema here, so the payload is written inline rather than hand-escaped.
     """
-    contract = payload_contract(allowed_intents)
-    constraints = constraints_sentence(allowed_intents)
-    constraints_line = f"\n-{constraints}" if constraints else ""
-    always_emit_line = (
-        "- ALWAYS emit at least one intent."
-        if IntentType.SEND_MESSAGE in set(allowed_intents)
-        else "- ALWAYS emit exactly one intent."
-    )
+    contract = payload_contract()
+    constraints_line = f"\n-{constraints_sentence()}"
     return f"""
 ==== OUTPUT FORMAT (REQUIRED) ====
 Your final message MUST be exactly one JSON object -- no prose, no code fences,
@@ -80,7 +74,7 @@ nothing around it:
 - Put only NEW information in payload bodies; do not restate context already
   in SharedState, your inbox, or analysis.md. Keep length proportional to
   substance.
-{always_emit_line}
+- ALWAYS emit at least one intent.
 ==== END OUTPUT FORMAT ====
 """.strip()
 
@@ -193,7 +187,6 @@ def decode_intent_envelope(text: str) -> dict[str, Any]:
 class DeepSeekBackend:
     """Production DeepSeek Harness reactor backend. Implements :class:`Backend`."""
 
-    allowed_intents: frozenset[IntentType]
     model: str = DEFAULT_DEEPSEEK_HARNESS_MODEL
     cwd: Path = field(default_factory=Path.cwd)
     reasoning_effort: str = ""
@@ -220,8 +213,6 @@ class DeepSeekBackend:
 
     def __post_init__(self) -> None:
         """Normalize and secure the session-private runtime root."""
-        if not self.allowed_intents:
-            raise BackendError("DeepSeekBackend requires the emitting role's allowed_intents")
         self.cwd = Path(self.cwd).expanduser().resolve()
         try:
             self.cwd.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -236,11 +227,10 @@ class DeepSeekBackend:
         *,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
-        max_turns: int = 1,
     ) -> BackendTurnResult:
         """Run one DeepSeek Harness turn and parse the intent envelope it replied with."""
-        # The harness owns its tool set and its own turn loop.
-        del tools, max_turns
+        # The harness owns its tool set.
+        del tools
         turn_prompt = f"{prompt}\n\n{_ENVELOPE_REMINDER} {self._legal_intent_types()}"
         # Each round's prompt carries the whole run state. The harness resends the full conversation on every
         # model step and compacts only near the model's window, so a conversation kept across rounds only grows
@@ -330,7 +320,7 @@ class DeepSeekBackend:
         and a live run read that notation as licence to qualify the name
         (``send_message:kernel``), so the legal values are spelled out.
         """
-        legal = ", ".join(sorted(intent.value for intent in self.allowed_intents))
+        legal = ", ".join(sorted(intent.value for intent in IntentType))
         return f"`intent_type` MUST be exactly one of: {legal}. Never add a suffix or qualifier to it."
 
     def _instructions_for(self, system_prompt: str | None) -> str:
@@ -340,7 +330,7 @@ class DeepSeekBackend:
             for part in (
                 DEEPSEEK_RUNTIME_MAPPING.strip(),
                 (system_prompt or "").strip(),
-                build_output_instructions(self.allowed_intents),
+                build_output_instructions(),
                 self._legal_intent_types(),
             )
             if part

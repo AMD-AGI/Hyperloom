@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Dispatch-time PolicyGate replay for queued task rows (F013 plan B)."""
+"""A baseline against an open bring-up round, where an agent delegates one and where a queued one is dispatched."""
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -15,120 +16,73 @@ from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
-from hyperloom.orchestrator.policy.denial import PolicyDenied
-from hyperloom.orchestrator.policy.gate import PolicyGate
-from hyperloom.orchestrator.policy.projection import ResourceFacts
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
+from hyperloom.orchestrator.state.round_store import BOOTED, RoundStore
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
-from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
-
-def _warm_replay_dispatch_params(
-    session_dir: Path,
-    framework_root: Path,
-    *,
-    patch_target: str = "vllm/v1/attention/ops/prefix_prefill.py",
-    patch_path: Path | None = None,
-) -> tuple[dict, Path, Path]:
-    target = framework_root / "vllm/v1/attention/ops/prefix_prefill.py"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("original\n", encoding="utf-8")
-    if patch_path is None:
-        patch_path = session_dir / "runtime/remote_recipe/files/kernel/rewrite/patches/warm.patch"
-    patch_path.parent.mkdir(parents=True, exist_ok=True)
-    patch_path.write_text(
-        "\n".join(
-            [
-                f"diff --git a/{patch_target} b/{patch_target}",
-                f"--- a/{patch_target}",
-                f"+++ b/{patch_target}",
-                "@@ -1 +1 @@",
-                "-original",
-                "+patched",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    return (
-        {
-            "warm_kernel_plan": [
-                {
-                    "resolved_patch_targets": [str(target)],
-                    "patch_path": str(patch_path),
-                }
-            ],
-            "warm_kernel_apply_results": [{"target_file": str(target)}],
-        },
-        target,
-        patch_path,
-    )
-
-
-def _gate(tmp_path: Path, monkeypatch) -> tuple[PolicyGate, Path]:
-    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
-    sd = paths.make_session_dir()
-    state = SharedState.load_or_init(sd)
-    gate = PolicyGate(
-        role_registry=default_role_registry(),
-        session_dir=sd,
-        shared_state=state,
-        resources=ResourceFacts(),
-    )
-    return gate, sd
-
-
-def _project(gate: PolicyGate, **fields) -> None:
-    """Re-read the gate's resource facts, as a coordinator tick would.
-
-    Args:
-        gate: The gate whose facts are re-read.
-        fields: Facts no SharedState holds -- a bring-up round is the round
-            store's, not the session's.
-    """
-    gate.resources.update(gate.shared_state)
-    for name, value in fields.items():
-        setattr(gate.resources, name, value)
-
+from .conftest import silent_backends
 
 _ORIGIN = {"phase": "EXPLORE", "macro_cycle": 0, "tick": 0}
+_ROUND_RULE = "enablement_round_in_flight"
 
 
-def _runner_with_policy(tmp_path: Path, monkeypatch, *, shared_state: object | None = None) -> SubAgentRunner:
+def _runner(tmp_path: Path, monkeypatch) -> SubAgentRunner:
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
     db = SqliteConnection(tmp_path / "coord.db")
-    locks = SqliteLeaseBackend(db)
-    tasks = TaskRegistry(db, dispatch_origin_provider=lambda: _ORIGIN)
-    state = shared_state if shared_state is not None else SharedState.load_or_init(sd)
-    gate = PolicyGate(
-        role_registry=default_role_registry(),
+    sub = SubAgentRunner(
+        SqliteLeaseBackend(db),
+        TaskRegistry(db, dispatch_origin_provider=lambda: _ORIGIN),
+        RoundStore(db),
         session_dir=sd,
-        shared_state=state,
-        resources=ResourceFacts(),
     )
-    sub = SubAgentRunner(locks, tasks, session_dir=sd)
-    sub.shared_state = state
-    sub.policy = gate
+    sub.shared_state = SharedState.load_or_init(sd)
     return sub
 
 
-@pytest.mark.asyncio
-async def test_a_queued_row_the_gate_refuses_at_dispatch_is_cancelled_and_never_runs(tmp_path, monkeypatch):
-    """A queued row is replayed through the gate before it runs: a baseline another round's machine denies is cancelled."""
-    sub = _runner_with_policy(tmp_path, monkeypatch)
+def _record_runs(sub: SubAgentRunner, kind: str) -> dict:
     executed = {"ran": False}
 
     async def _stub(_ctx) -> dict:
         executed["ran"] = True
         return {"status": "ok"}
 
-    sub.register_executor("baseline", _stub)
+    sub.register_executor(kind, _stub)
+    return executed
+
+
+async def _open_round(rounds, *, holder_task_id: str, round_id: str = "round-7") -> None:
+    opened = await rounds.open(round_id, holder_task_id=holder_task_id, now_unix=1.0, lease_sec=600.0)
+    assert opened.ok
+
+
+@pytest.fixture
+async def coord(session_dir):
+    c = Coordinator(session_dir, backends=silent_backends())
+    c.shared_state.phase = "PRELUDE"
+    yield c
+    await c.stop()
+
+
+def _baseline_delegate() -> Intent:
+    return Intent(type=IntentType.DELEGATE, payload={"action_name": "baseline", "params": {}})
+
+
+async def _denied_rules(c: Coordinator) -> list[str]:
+    observed = await c.bus.tail(topic="observation", n=50)
+    return [m.payload["rule"] for m in observed if m.payload.get("kind") == "policy_denied"]
+
+
+# -- At dispatch ------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_a_baseline_queued_before_the_round_opened_is_cancelled_at_dispatch_and_never_runs(tmp_path, monkeypatch):
+    """The round holds no lane a baseline needs, so the dispatch is where a baseline already queued is stopped."""
+    sub = _runner(tmp_path, monkeypatch)
+    executed = _record_runs(sub, "baseline")
     task, _ = await sub.tasks.create_or_return_existing(
         TaskSpec(kind="baseline", params={}, idempotency_key="second-bring-up"),
     )
-    _project(sub.policy, excluding_round_id="round-7", excluding_round_holder="spec-abc")
+    await _open_round(sub.rounds, holder_task_id="spec-abc")
 
     res = await sub.run_task(task)
 
@@ -139,28 +93,38 @@ async def test_a_queued_row_the_gate_refuses_at_dispatch_is_cancelled_and_never_
     updated = await sub.tasks.get(task.task_id)
     assert updated.state == "cancelled"
     terminal = updated.history[-1]["evidence"]
-    assert terminal["rule"] == "enablement_round_in_flight"
+    assert terminal["reason"] == "policy_denied"
+    assert terminal["rule"] == _ROUND_RULE
     assert terminal["outcome"]["error_class"] == "policy_enablement_round_in_flight"
 
 
 @pytest.mark.asyncio
-async def test_dispatch_denied_baseline_is_not_charged_to_baseline_failures(session_dir, monkeypatch):
+async def test_a_baseline_runs_once_the_round_that_refused_it_has_settled(tmp_path, monkeypatch):
+    """The store is read at the dispatch, not carried from an earlier pass."""
+    sub = _runner(tmp_path, monkeypatch)
+    executed = _record_runs(sub, "baseline")
+    await _open_round(sub.rounds, holder_task_id="spec-abc")
+    refused, _ = await sub.tasks.create_or_return_existing(TaskSpec(kind="baseline", params={}, idempotency_key="a"))
+    assert (await sub.run_task(refused)).state == "cancelled"
+
+    settled = await sub.rounds.settle(await sub.rounds.get("round-7"), outcome=BOOTED, now_unix=2.0)
+    assert settled.ok
+    admitted, _ = await sub.tasks.create_or_return_existing(TaskSpec(kind="baseline", params={}, idempotency_key="b"))
+    res = await sub.run_task(admitted)
+
+    assert res.state == "succeeded"
+    assert executed["ran"] is True
+
+
+@pytest.mark.asyncio
+async def test_dispatch_denied_baseline_is_not_charged_to_baseline_failures(coord):
     """A baseline refused at dispatch measured nothing, so repeated refusals cannot stop the run as baseline_failed."""
-    silent = ScriptedPlan(
-        turns=[], default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
-    )
-    coord = Coordinator(session_dir, backends={"orchestration": MockBackend(silent, name="orchestration")})
-    coord.shared_state.phase = "PRELUDE"
-
-    def _deny(kind, params, *, task_id=""):
-        raise PolicyDenied("bring-up round holds the machine", rule="enablement_round_in_flight")
-
-    monkeypatch.setattr(coord.policy, "validate_dispatched_task", _deny)
+    await _open_round(coord.rounds, holder_task_id="spec-abc")
     for i in range(3):
         task, _ = await coord.tasks.create_or_return_existing(
             TaskSpec(kind="baseline", params={}, idempotency_key=f"denied-baseline-{i}")
         )
-        result = await coord.sub.run_task(task)
+        result = await coord.dispatcher.run_task_registered(task)
         await coord.dispatcher.reap_dispatched_task(task, result)
         assert result.state == "cancelled"
         assert result.error_class == "policy_enablement_round_in_flight"
@@ -174,247 +138,65 @@ async def test_dispatch_denied_baseline_is_not_charged_to_baseline_failures(sess
 
 
 @pytest.mark.asyncio
+async def test_a_refused_baseline_gives_back_the_lanes_it_took(coord):
+    """The refusal comes after the lanes are taken, so it is also what releases them."""
+    await _open_round(coord.rounds, holder_task_id="spec-abc")
+    lanes, ttl = coord.dispatcher.registry_lanes_ttl("baseline")
+    assert lanes
+    task, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="baseline", params={}, idempotency_key="held-lanes", requires_lanes=lanes, lease_ttl_sec=ttl)
+    )
+
+    result = await coord.dispatcher.run_task_registered(task)
+
+    assert result.state == "cancelled"
+    assert coord.locks.lanes_by_task_sync() == {}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("kind", "params", "state_fields"),
+    ("kind", "params"),
     [
-        pytest.param("roofline", {"reason": "prelude_bootstrap"}, {}, id="internal_roofline"),
+        pytest.param("roofline", {"reason": "prelude_bootstrap"}, id="internal_roofline"),
         pytest.param(
             "recover",
             {"reason": "gpu_memory_leaked", "evidence": {"per_gpu": [{"gpu_id": 0, "free_mb": 0.0}]}},
-            {},
-            id="recover_admitted_at_ingress",
+            id="recover",
         ),
-        pytest.param(
-            "framework_agent", {"candidate": {"repo": "x/y", "pr_number": 1}}, {}, id="internal_framework_agent"
-        ),
-        pytest.param(
-            "integrate_patch", {"specialist_task_id": "spec-ok", "apply_only": True}, {}, id="integrate_patch"
-        ),
+        pytest.param("framework_agent", {"candidate": {"repo": "x/y", "pr_number": 1}}, id="internal_framework_agent"),
+        pytest.param("integrate_patch", {"specialist_task_id": "spec-ok", "apply_only": True}, id="integrate_patch"),
+        pytest.param("specialist", {"enablement": True, "domain": "enablement_specialist"}, id="the_rounds_specialist"),
     ],
 )
-async def test_dispatched_admitted_row_passes_delegate_gates(tmp_path, monkeypatch, kind, params, state_fields):
-    """A queued row the Coordinator or ingress already admitted reaches its executor past the delegate gates."""
-    sub = _runner_with_policy(tmp_path, monkeypatch)
-    for name, value in state_fields.items():
-        setattr(sub.shared_state, name, value)
-    executed = {"ran": False}
-
-    async def _stub(_ctx) -> dict:
-        executed["ran"] = True
-        return {"status": "ok"}
-
-    sub.register_executor(kind, _stub)
+async def test_every_other_kind_runs_while_a_round_is_open(tmp_path, monkeypatch, kind, params):
+    """The round keeps a second bring-up off the machine and nothing else: its own legs are dispatched under it."""
+    sub = _runner(tmp_path, monkeypatch)
+    executed = _record_runs(sub, kind)
+    await _open_round(sub.rounds, holder_task_id="someone-else")
     task, _ = await sub.tasks.create_or_return_existing(
         TaskSpec(kind=kind, params=params, idempotency_key=f"queued-{kind}"),
     )
+
     res = await sub.run_task(task)
+
     assert res.state == "succeeded"
     assert executed["ran"] is True
-
-
-def test_validate_dispatched_task_internal_profile_skips_delegate_body(tmp_path, monkeypatch):
-    gate, _sd = _gate(tmp_path, monkeypatch)
-    gate.validate_dispatched_task("profile", {"reason": "watermark_refresh"})
-
-
-def test_dispatched_warm_replay_accepts_verified_framework_target(
-    tmp_path,
-    monkeypatch,
-):
-    gate, session_dir = _gate(tmp_path, monkeypatch)
-    framework_root = tmp_path.parent / f"{tmp_path.name}-framework"
-    params, _target, _patch = _warm_replay_dispatch_params(
-        session_dir,
-        framework_root,
-    )
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.policy.gate.resolve_session_framework_root",
-        lambda: str(framework_root),
-    )
-
-    gate.validate_dispatched_task("replay_warm_recipe", params)
-
-
-def test_warm_replay_target_exception_is_not_shared_with_other_actions(
-    tmp_path,
-    monkeypatch,
-):
-    gate, session_dir = _gate(tmp_path, monkeypatch)
-    framework_root = tmp_path.parent / f"{tmp_path.name}-framework"
-    params, _target, _patch = _warm_replay_dispatch_params(
-        session_dir,
-        framework_root,
-    )
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.policy.gate.resolve_session_framework_root",
-        lambda: str(framework_root),
-    )
-
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_dispatched_task("profile", params)
-    assert exc.value.rule == "path_outside_session_dir"
-
-
-def test_dispatched_warm_replay_rejects_patch_outside_kb_download(
-    tmp_path,
-    monkeypatch,
-):
-    gate, session_dir = _gate(tmp_path, monkeypatch)
-    framework_root = tmp_path.parent / f"{tmp_path.name}-framework"
-    outside_patch = tmp_path.parent / f"{tmp_path.name}-outside.patch"
-    params, _target, _patch = _warm_replay_dispatch_params(
-        session_dir,
-        framework_root,
-        patch_path=outside_patch,
-    )
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.policy.gate.resolve_session_framework_root",
-        lambda: str(framework_root),
-    )
-
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_dispatched_task("replay_warm_recipe", params)
-    assert exc.value.rule == "warm_replay_patch_outside_kb_download"
-
-
-def test_dispatched_warm_replay_rejects_patch_target_mismatch(
-    tmp_path,
-    monkeypatch,
-):
-    gate, session_dir = _gate(tmp_path, monkeypatch)
-    framework_root = tmp_path.parent / f"{tmp_path.name}-framework"
-    params, _target, _patch = _warm_replay_dispatch_params(
-        session_dir,
-        framework_root,
-        patch_target="vllm/v1/attention/ops/different.py",
-    )
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.policy.gate.resolve_session_framework_root",
-        lambda: str(framework_root),
-    )
-
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_dispatched_task("replay_warm_recipe", params)
-    assert exc.value.rule == "warm_replay_patch_target_mismatch"
-
-
-def test_dispatched_warm_replay_rejects_undeclared_extra_patch_target(
-    tmp_path,
-    monkeypatch,
-):
-    gate, session_dir = _gate(tmp_path, monkeypatch)
-    framework_root = tmp_path.parent / f"{tmp_path.name}-framework"
-    params, _target, patch_path = _warm_replay_dispatch_params(
-        session_dir,
-        framework_root,
-    )
-    with patch_path.open("a", encoding="utf-8") as handle:
-        handle.write(
-            "\n".join(
-                [
-                    "diff --git a/vllm/other.py b/vllm/other.py",
-                    "--- a/vllm/other.py",
-                    "+++ b/vllm/other.py",
-                    "@@ -1 +1 @@",
-                    "-old",
-                    "+new",
-                    "",
-                ]
-            )
-        )
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.policy.gate.resolve_session_framework_root",
-        lambda: str(framework_root),
-    )
-
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_dispatched_task("replay_warm_recipe", params)
-    assert exc.value.rule == "warm_replay_patch_target_mismatch"
-
-
-def test_dispatched_warm_replay_accepts_declared_multi_file_targets(
-    tmp_path,
-    monkeypatch,
-):
-    gate, session_dir = _gate(tmp_path, monkeypatch)
-    framework_root = tmp_path.parent / f"{tmp_path.name}-framework"
-    params, target, patch_path = _warm_replay_dispatch_params(
-        session_dir,
-        framework_root,
-    )
-    added = framework_root / "vllm/v1/attention/ops/new_fused_ops.py"
-    with patch_path.open("a", encoding="utf-8") as handle:
-        handle.write(
-            "\n".join(
-                [
-                    "diff --git a/vllm/v1/attention/ops/new_fused_ops.py b/vllm/v1/attention/ops/new_fused_ops.py",
-                    "--- /dev/null",
-                    "+++ b/vllm/v1/attention/ops/new_fused_ops.py",
-                    "@@ -0,0 +1 @@",
-                    "+new",
-                    "",
-                ]
-            )
-        )
-    params["warm_kernel_plan"][0]["resolved_patch_targets"] = [
-        str(target),
-        str(added),
-    ]
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.policy.gate.resolve_session_framework_root",
-        lambda: str(framework_root),
-    )
-
-    gate.validate_dispatched_task("replay_warm_recipe", params)
-
-
-def test_dispatched_warm_replay_rejects_framework_symlink_escape(
-    tmp_path,
-    monkeypatch,
-):
-    gate, session_dir = _gate(tmp_path, monkeypatch)
-    framework_root = tmp_path.parent / f"{tmp_path.name}-framework"
-    escaped_root = tmp_path.parent / f"{tmp_path.name}-escaped"
-    escaped_target = escaped_root / "v1/attention/ops/prefix_prefill.py"
-    escaped_target.parent.mkdir(parents=True, exist_ok=True)
-    escaped_target.write_text("original\n", encoding="utf-8")
-    framework_root.mkdir(parents=True, exist_ok=True)
-    (framework_root / "vllm").symlink_to(escaped_root, target_is_directory=True)
-    params, _target, _patch = _warm_replay_dispatch_params(
-        session_dir,
-        framework_root,
-    )
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.policy.gate.resolve_session_framework_root",
-        lambda: str(framework_root),
-    )
-
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_dispatched_task("replay_warm_recipe", params)
-    assert exc.value.rule == "warm_replay_target_outside_framework_roots"
 
 
 @pytest.mark.asyncio
 async def test_dispatched_revalidation_holding_its_own_round_runs(tmp_path, monkeypatch):
     """The revalidation baseline executes rather than being cancelled at dispatch.
 
-    A revalidation only exists once a KEEP measured throughput, so the anchor
-    arm fires on exactly the session state a revalidation runs in, and a
-    denial there cancels the row instead of deferring it. What admits it is the
-    round it opened: the store names this task the holder, and the holder is not
+    A revalidation only exists once a KEEP measured throughput, and a denial
+    there cancels the row instead of deferring it. What admits it is the round
+    it opened: the store names this task the holder, and the holder is not
     refused by its own acquire.
     """
-    sub = _runner_with_policy(tmp_path, monkeypatch)
+    sub = _runner(tmp_path, monkeypatch)
     state = sub.shared_state
     assert isinstance(state, SharedState)
     state.baseline_tput = 1000.0
-    executed = {"ran": False}
-
-    async def _stub(_ctx) -> dict:
-        executed["ran"] = True
-        return {"status": "ok"}
-
-    sub.register_executor("baseline", _stub)
+    executed = _record_runs(sub, "baseline")
     task, _ = await sub.tasks.create_or_return_existing(
         TaskSpec(
             kind="baseline",
@@ -422,7 +204,7 @@ async def test_dispatched_revalidation_holding_its_own_round_runs(tmp_path, monk
             idempotency_key="enablement-revalidation",
         ),
     )
-    _project(sub.policy, excluding_round_id="revalidation-1", excluding_round_holder=task.task_id)
+    await _open_round(sub.rounds, holder_task_id=task.task_id, round_id="revalidation-1")
 
     result = await sub.run_task(task)
 
@@ -431,36 +213,9 @@ async def test_dispatched_revalidation_holding_its_own_round_runs(tmp_path, monk
 
 
 @pytest.mark.asyncio
-async def test_runner_without_policy_skips_dispatch_validation(tmp_path, monkeypatch):
-    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
-    sd = paths.make_session_dir()
-    db = SqliteConnection(tmp_path / "coord.db")
-    locks = SqliteLeaseBackend(db)
-    tasks = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tasks, session_dir=sd)
-    executed = {"ran": False}
-
-    async def _stub(_ctx) -> dict:
-        executed["ran"] = True
-        return {"status": "ok"}
-
-    sub.register_executor("integrate_patch", _stub)
-    task, _ = await sub.tasks.create_or_return_existing(
-        TaskSpec(
-            kind="integrate_patch",
-            params={"specialist_task_id": "no-gate", "apply_only": True},
-            idempotency_key="no-policy-gate",
-        ),
-    )
-    res = await sub.run_task(task)
-    assert res.state == "succeeded"
-    assert executed["ran"] is True
-
-
-@pytest.mark.asyncio
 async def test_killed_running_task_keeps_its_result(tmp_path, monkeypatch):
     """A task cancelled mid-flight still returns its executor result."""
-    sub = _runner_with_policy(tmp_path, monkeypatch)
+    sub = _runner(tmp_path, monkeypatch)
     task, _ = await sub.tasks.create_or_return_existing(
         TaskSpec(
             kind="report",
@@ -483,45 +238,70 @@ async def test_killed_running_task_keeps_its_result(tmp_path, monkeypatch):
     assert updated.state == "cancelled"
 
 
-def test_a_round_holding_the_machine_denies_baseline(tmp_path, monkeypatch):
-    gate, _ = _gate(tmp_path, monkeypatch)
-    _project(gate, excluding_round_id="round-7", excluding_round_holder="spec-abc")
-    intent = Intent(
-        type=IntentType.DELEGATE,
-        payload={"action_name": "baseline", "params": {}},
-    )
-    with pytest.raises(PolicyDenied) as exc_info:
-        gate.validate_intent("orchestration", intent)
-    assert exc_info.value.rule == "enablement_round_in_flight"
-    assert "spec-abc" in str(exc_info.value)
+# -- At the intent ----------------------------------------------------------
+@pytest.mark.asyncio
+async def test_a_delegated_baseline_is_denied_while_a_round_holds_the_machine(coord):
+    """A second bring-up fights the first for the same cards and ports."""
+    await _open_round(coord.rounds, holder_task_id="spec-abc")
+
+    await coord.router.handle_intent("orchestration", _baseline_delegate())
+
+    assert await _denied_rules(coord) == [_ROUND_RULE]
+    assert await coord.tasks.by_state("queued") == []
+    (denial,) = [
+        m.payload for m in await coord.bus.tail(topic="observation", n=50) if m.payload.get("kind") == "policy_denied"
+    ]
+    assert "spec-abc" in denial["reason"]
 
 
-def test_no_round_in_flight_allows_baseline(tmp_path, monkeypatch):
-    """Nothing holds the machine, so the rule has nothing to refuse."""
-    gate, _ = _gate(tmp_path, monkeypatch)
-    _project(gate)
-    intent = Intent(
-        type=IntentType.DELEGATE,
-        payload={"action_name": "baseline", "params": {}},
-    )
-    gate.validate_intent("orchestration", intent)
+@pytest.mark.asyncio
+async def test_the_round_is_what_a_baseline_is_told_in_a_phase_that_offers_none(coord):
+    """ENABLEMENT offers no baseline, and the round is the refusal that holds wherever one is offered."""
+    coord.shared_state.phase = "ENABLEMENT"
+    await _open_round(coord.rounds, holder_task_id="spec-abc")
+
+    await coord.router.handle_intent("orchestration", _baseline_delegate())
+
+    assert await _denied_rules(coord) == [_ROUND_RULE]
 
 
-def test_an_established_anchor_alone_does_not_refuse_a_baseline(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_a_round_opened_after_the_ticks_repair_pass_denies_in_the_same_tick(coord):
+    """The pass at the top of the tick is not where the rule gets its answer: the round store is."""
+    await coord.reconciler.run(time.time())
+    await _open_round(coord.rounds, holder_task_id="spec-abc")
+
+    await coord.router.handle_intent("orchestration", _baseline_delegate())
+
+    assert await _denied_rules(coord) == [_ROUND_RULE]
+    assert await coord.tasks.by_state("queued") == []
+
+
+@pytest.mark.asyncio
+async def test_a_round_settled_after_the_ticks_repair_pass_denies_nothing_in_the_same_tick(coord):
+    """The other half of the same read: a baseline is not refused for a round that ended during the turn."""
+    await _open_round(coord.rounds, holder_task_id="spec-abc")
+    await coord.reconciler.run(time.time())
+    settled = await coord.rounds.settle(await coord.rounds.get("round-7"), outcome=BOOTED, now_unix=2.0)
+    assert settled.ok
+
+    await coord.router.handle_intent("orchestration", _baseline_delegate())
+
+    assert await _denied_rules(coord) == []
+    assert [task.kind for task in await coord.tasks.by_state("queued")] == ["baseline"]
+
+
+@pytest.mark.asyncio
+async def test_an_established_anchor_alone_does_not_refuse_a_baseline(coord):
     """Re-measuring a reference the run already has is a workflow opinion.
 
     The rule is about the cards and ports a live round is using, not about how
     many baselines a session may take, so a session that already has its figure
     can still take another one while nothing holds the machine.
     """
-    gate, _ = _gate(tmp_path, monkeypatch)
-    gate.shared_state.baseline_tput = 1000.0
-    _project(gate)
+    coord.shared_state.baseline_tput = 1000.0
 
-    gate.validate_intent(
-        "orchestration",
-        Intent(
-            type=IntentType.DELEGATE,
-            payload={"action_name": "baseline", "params": {}},
-        ),
-    )
+    await coord.router.handle_intent("orchestration", _baseline_delegate())
+
+    assert _ROUND_RULE not in await _denied_rules(coord)
+    assert [task.kind for task in await coord.tasks.by_state("queued")] == ["baseline"]

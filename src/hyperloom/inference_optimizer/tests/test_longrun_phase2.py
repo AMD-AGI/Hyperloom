@@ -154,10 +154,10 @@ def test_acceptance_threshold_advisory_lists_unblocked(cyclic_coordinator):
             "fp2": {"name": "v_lo", "outcome": "REVERT", "gain_pct": 0.2},
             "fp3": {"name": "v_keep", "outcome": "KEEP", "gain_pct": 3.0},
         },
-        "rejected": [],
     }
     block = c.conversation._acceptance_threshold_advisory_block()
     assert "KEEP>=0.40%" in block
+    assert [block.count(name) for name in ("v_hi", "v_lo", "v_keep")] == [1, 1, 1]
     # All entries with measured gains appear as evidence regardless of outcome.
     assert "v_hi" in block  # >= bar
     assert "v_lo" in block  # < bar
@@ -195,18 +195,12 @@ def test_mark_switch_falls_back_to_live_top_bottleneck():
 
 
 # rejected/tested fingerprints bucketed per cycle (no re-explore)
-def test_tested_and_rejected_stamped_with_macro_cycle():
+def test_tested_rows_are_stamped_with_macro_cycle():
     st = SharedState(session_id="t", macro_cycle=0)
-    st.apply_explore_search_update(
-        {
-            "tested": {"fp_a": {"name": "a", "fingerprint": "fp_a"}},
-            "rejected": [{"name": "a", "fingerprint": "fp_a"}],
-        }
-    )
+    st.apply_explore_search_update({"tested": {"fp_a": {"name": "a", "fingerprint": "fp_a"}}})
     assert st.explore_search["tested"]["fp_a"]["cycle"] == 0
-    assert st.explore_search["rejected"][0]["cycle"] == 0
 
-    # Next cycle: a new rejection is bucketed under cycle 1; the old one keeps its cycle-0 attribution.
+    # Next cycle: a new row is bucketed under cycle 1; the old one keeps its cycle-0 attribution.
     st.macro_cycle = 1
     st.apply_explore_search_update(
         {
@@ -214,14 +208,8 @@ def test_tested_and_rejected_stamped_with_macro_cycle():
                 "fp_a": {"name": "a", "fingerprint": "fp_a", "cycle": 0},
                 "fp_b": {"name": "b", "fingerprint": "fp_b"},
             },
-            "rejected": [
-                {"name": "a", "fingerprint": "fp_a", "cycle": 0},
-                {"name": "b", "fingerprint": "fp_b"},
-            ],
         }
     )
     tested = st.explore_search["tested"]
     assert tested["fp_a"]["cycle"] == 0
     assert tested["fp_b"]["cycle"] == 1
-    cycles = {r["fingerprint"]: r["cycle"] for r in st.explore_search["rejected"]}
-    assert cycles == {"fp_a": 0, "fp_b": 1}

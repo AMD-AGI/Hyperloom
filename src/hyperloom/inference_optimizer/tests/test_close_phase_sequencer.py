@@ -25,7 +25,6 @@ from hyperloom.inference_optimizer.breakdown.recorder.sections import PHASE_EVEN
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator, RunOptions
 from hyperloom.orchestrator.phases import machine_state
@@ -168,7 +167,6 @@ def coord(tmp_path: Path):
     c.sub = _StubSubAgentRunner()
     c.knowledge_plane = KnowledgePlane(recipe_kb=None)
     c.knowledge_plane = None
-    c.role_registry = {}
     return c
 
 
@@ -382,12 +380,13 @@ async def test_a_fresh_report_that_never_lands_is_not_awaited_forever(coord):
     from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
     from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
     from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
+    from hyperloom.orchestrator.state.round_store import RoundStore
     from hyperloom.orchestrator.state.task_registry import TaskRegistry
 
     db = SqliteConnection(coord.session_dir / "close-task.db")
     coord.tasks = TaskRegistry(db)
     coord.locks = SqliteLeaseBackend(db)
-    coord.sub = SubAgentRunner(coord.locks, coord.tasks)
+    coord.sub = SubAgentRunner(coord.locks, coord.tasks, RoundStore(db))
     coord.shared_state.max_minutes = 60
     coord.phase_close._close_step_wait_sec = lambda _task: 0.05  # type: ignore[method-assign]
     finish = asyncio.Event()
@@ -978,7 +977,6 @@ async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
     coord = Coordinator(
         session_dir=session_dir,
         backends=backends,
-        role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )
     # Seed state at CYCLE_END boundary.
@@ -1030,7 +1028,6 @@ class TestEveryTerminalReachesAWrittenReport:
         return Coordinator(
             session_dir=session_dir,
             backends={"orchestration": MockBackend(idle)},
-            role_registry=default_role_registry(),
             advisory=AdvisoryServices(knowledge_plane=None),
         )
 
@@ -1263,7 +1260,6 @@ async def test_the_sequencer_delivers_the_finished_close_section_in_the_package(
     coord = Coordinator(
         session_dir=session_dir,
         backends={"orchestration": MockBackend(idle_plan)},
-        role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )
     coord.shared_state.phase = "CYCLE_END"
@@ -1301,7 +1297,6 @@ async def test_recipe_kb_t4_hook_short_circuits_when_sequencer_done(tmp_path: Pa
     coord = Coordinator(
         session_dir=session_dir,
         backends=backends,
-        role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=KnowledgePlane(recipe_kb=_StubRecipeKB())),
     )
     coord.shared_state.recipe_kb_session_id = "sid-stop-skip"
@@ -1322,7 +1317,6 @@ async def test_recipe_kb_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Pa
     coord = Coordinator(
         session_dir=session_dir,
         backends=backends,
-        role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=KnowledgePlane(recipe_kb=_StubRecipeKB())),
     )
     coord.shared_state.recipe_kb_session_id = "sid-fallback"
@@ -1376,7 +1370,6 @@ def _remote_t4_coordinator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, save
     coord = Coordinator(
         session_dir=session_dir,
         backends=backends,
-        role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )
     coord.shared_state.recipe_kb_session_id = ""
@@ -1444,7 +1437,6 @@ def _remote_knowledge_plane_coordinator(tmp_path: Path) -> Coordinator:
     return Coordinator(
         session_dir=session_dir,
         backends=backends,
-        role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=KnowledgePlane(config=config)),
     )
 
@@ -1515,7 +1507,6 @@ async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb(
     coord = Coordinator(
         session_dir=session_dir,
         backends=backends,
-        role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=KnowledgePlane(config=config, recipe_kb=recipe_kb)),
     )
     coord.shared_state.recipe_kb_session_id = recipe_kb_session_id

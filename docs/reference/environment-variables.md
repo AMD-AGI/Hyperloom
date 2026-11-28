@@ -358,8 +358,8 @@ which of them apply.
 Globally, on every backend including the default `geak`:
 
 - **`kernel_opt` and `gemm_tuning` are no longer model-issued.** Orchestration
-  can neither propose either action nor request `run_optimization` /
-  `run_gemm_tuning` of the kernel agent: a proposal of either action is refused
+  can neither delegate either action nor request `run_optimization` /
+  `run_gemm_tuning` of the kernel agent: a delegate of either action is refused
   as `phase_incompatible`, a request for `run_gemm_tuning` as `request_kind`,
   and `run_optimization` has no handler, so a request for it is answered with a
   failed `unknown_kernel_kind` response. The Coordinator dispatches each lane
@@ -868,8 +868,15 @@ recorded do not contradict the candidate's.
 | Variable | Default | Description |
 |---|---|---|
 | `INFERENCE_OPTIMIZER_REACTOR_TURN_TIMEOUT_SEC` | `1800` | Total wall-clock limit for each reactor stage, including backend startup, streamed output, retries, backoff, and cleanup. This is independent of backend `*_CALL_TIMEOUT_SEC` settings: for streamed Claude turns those settings bound idle time between SDK messages, and activity resets that idle timer. Reaching this total limit cancels the stage and records a crash; a shorter remaining session bound still ends the stage without recording a crash. A malformed value raises `EnvValueError`; a non-positive or non-finite value falls back to the default. |
-| `INFERENCE_OPTIMIZER_CLAUDE_TURN_TIMEOUT_SEC` | `1500` | Total wall-clock limit for one Claude Agent SDK call made by the orchestration backend (reactor turns, including the CYCLE_END cycle-directive handoff), covering every retry and the backoff between them; tearing the CLI down afterwards adds at most 30 s. Unlike the idle bound of `INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC`, the CLI's own API-retry messages do not extend it. Past it the call is cancelled, the CLI and every process it started are killed, and the turn fails as a backend error the loop retries on its next tick. |
-| `INFERENCE_OPTIMIZER_DEEPSEEK_CALL_TIMEOUT_SEC` | `300` | Wall-clock limit for one DeepSeek Harness turn made by the orchestration backend. Past it the harness runtime is closed and the next turn starts a new runtime and a new conversation. |
+| `INFERENCE_OPTIMIZER_CLAUDE_TURN_TIMEOUT_SEC` | `1500` | Total wall-clock limit for one Claude Agent SDK call made by the orchestration backend (reactor turns, including the CYCLE_END cycle-directive handoff), covering every retry and the backoff between them; tearing the CLI down afterwards adds at most 30 s. Unlike the idle bound of `INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC`, the CLI's own API-retry messages do not extend it. Past it the call is cancelled, the CLI and every process it started are killed, and the turn fails as a backend error the loop retries on its next tick. A value that is not a positive finite number raises `EnvValueError` at start-up. |
+| `INFERENCE_OPTIMIZER_DEEPSEEK_CALL_TIMEOUT_SEC` | `300` | Wall-clock limit for one DeepSeek Harness turn made by the orchestration backend. Past it the harness runtime is closed and the next turn starts a new runtime and a new conversation. A value that is not a positive finite number raises `EnvValueError` at start-up. |
+| `INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC` | `120` | Idle limit for one Claude Agent SDK call made by the orchestration backend: the longest gap allowed between two streamed SDK messages. Past it the attempt is aborted and retried under the `INFERENCE_OPTIMIZER_LLM_RETRY_*` policy, each retry with twice the idle limit of the attempt before it. A value that is not a positive finite number raises `EnvValueError` at start-up. |
+| `INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC` | `300` | Wall-clock limit for one Codex turn made by the orchestration backend. Past it the turn fails as a backend error and is not retried within the call. A value that is not a positive finite number raises `EnvValueError` at start-up. |
+| `INFERENCE_OPTIMIZER_LLM_RETRY_ATTEMPTS` | `3` | Attempts the orchestration backend (Claude, Codex or DeepSeek) makes for one call that fails transiently, the first included. The value is truncated to a whole number, and `0` means one attempt. A value that is not a non-negative finite number raises `EnvValueError` at start-up; the same holds for the four `INFERENCE_OPTIMIZER_LLM_RETRY_*` variables below. |
+| `INFERENCE_OPTIMIZER_LLM_RETRY_BASE_S` | `1.0` | Delay in seconds before the first retry. |
+| `INFERENCE_OPTIMIZER_LLM_RETRY_MULT` | `2.0` | Factor the delay grows by with each further retry. |
+| `INFERENCE_OPTIMIZER_LLM_RETRY_MAX_S` | `30.0` | Ceiling in seconds of the delay between two attempts, before jitter. |
+| `INFERENCE_OPTIMIZER_LLM_RETRY_JITTER_S` | `0.5` | Upper bound in seconds of the random extra delay added before each retry; `0` adds none. |
 
 ## TraceLens analysis route
 
@@ -1273,7 +1280,11 @@ Primary switch (default **off**) for live Langfuse trace push.
   `complete` before treating a package as the whole selection; it is `false`
   whenever anything selected is absent, and the reason is itemized in
   `dropped_files` (the bundle caps at 5000 files / 256 MB and a very long
-  session can stop it short, alongside `truncated: true`), `failed_files`
+  session can stop it short, alongside `truncated: true`; the files in
+  `reserved_paths` are outside those caps and share a ceiling of 64 MB, and
+  one that does not fit is dropped with `reserved_overflow: true`, as
+  `storage/coordinator.db` is once a session of about three days has grown it
+  past that), `failed_files`
   (the write failed) or `refused_files` (the entry was not a regular file
   inside the session — see below). The zip and the loose tree are written
   independently and each carries a manifest describing its own contents.
@@ -1473,7 +1484,6 @@ See [Optimize an AgentX workload](../how-to/optimize.md#optimize-an-agentx-workl
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `INFERENCE_OPTIMIZER_CYCLE_HOURS` | Optional | `24.0` | Duration of one macro-cycle in hours. Multiplied by 60 to obtain `cycle_minutes` on the first session start. A malformed value raises `EnvValueError`. |
-| `INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD` | Optional | `5` | Consecutive backend errors per agent role before a `backend_unhealthy` event is recorded. A malformed value raises `EnvValueError`. |
 | `INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC` | Optional | `10800` | Absolute minimum remaining session seconds to justify opening a new macro-cycle. For bounded sessions the effective floor is `min(this, max_minutes * 60 * 0.15)` so shorter sessions are not unconditionally blocked. |
 | `INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS` | Optional | `3` | Consecutive no-work KERNEL_AGENT ticks before the phase winds down to CYCLE_END. Values below `1` are treated as `3`. A malformed value raises `EnvValueError`. |
 | `INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS` | Optional | `600` | Wall-clock seconds a KERNEL idle streak must last before winding down to CYCLE_END. Values at or below `0` are treated as `600`. A malformed value raises `EnvValueError`. |

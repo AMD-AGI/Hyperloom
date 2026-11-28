@@ -177,63 +177,6 @@ class PreludePhase(_WarmReplaySettleMixin, _WarmKernelPrepMixin, _WarmLaunchSkip
             out.append({"name": name, "source": str(row.get("source") or "").strip()})
         return out
 
-    def inject_warm_recipe_history_into_ledger(self) -> int:
-        """Pre-fill ``explore_search.rejected`` with the warm recipe's ``what_failed`` rows (fingerprinted so the dedup gate denies re-tests). Idempotent via warm_history_injected; returns rows added."""
-        state = self.shared_state
-        if state.warm_history_injected:
-            return 0
-        warm = state.warm_start_recipe
-        what_failed = _warm_recipe_history_rows(warm, "what_failed")
-        if not what_failed:
-            state.warm_history_injected = True
-            return 0
-
-        from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
-
-        es = dict(state.explore_search or {})
-        rejected = list(es.get("rejected") or [])
-        existing_fps = {str(r.get("fingerprint") or "") for r in rejected if isinstance(r, dict)}
-        existing_fps.discard("")
-        added = 0
-        tier = str(warm.get("tier") or "")
-        for row in what_failed:
-            if not isinstance(row, dict):
-                continue
-            args = str(row.get("extra_server_args") or "").strip()
-            envs = row.get("extra_envs")
-            if not isinstance(envs, dict):
-                envs = {}
-            if not args and not envs:
-                continue
-            fp = canonical_fingerprint(args, envs)
-            if fp in existing_fps:
-                continue
-            existing_fps.add(fp)
-            rejected.append(
-                {
-                    "name": str(row.get("name") or "")[:120],
-                    "fingerprint": fp,
-                    "reason": "warm_recipe_what_failed",
-                    "extra_server_args": args,
-                    "extra_envs": dict(envs),
-                    "source": "warm_start_recipe",
-                    "source_tier": tier,
-                    # Preserved for forensics; not used by the dedup gate.
-                    "gain_pct": row.get("gain_pct"),
-                    "error_class": row.get("error_class") or row.get("reason"),
-                }
-            )
-            added += 1
-
-        if added:
-            es["rejected"] = rejected
-            state.explore_search = es
-            log.info(
-                "warm-recipe history: injected %d what_failed rows into explore_search.rejected (tier=%s)", added, tier
-            )
-        state.warm_history_injected = True
-        return added
-
     @staticmethod
     def _is_current_remote_recipe(warm: Any) -> bool:
         from ..knowledge.remote_recipe import RECORD_KIND_HYPERLOOM_RECIPE

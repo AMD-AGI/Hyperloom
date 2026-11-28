@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB, RecipeUpsert
@@ -32,7 +31,6 @@ def _make_coordinator(tmp_path: Path) -> Coordinator:
     return Coordinator(
         session_dir=session_dir,
         backends=backends,
-        role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=SimpleNamespace(recipe_kb=kb)),
     )
 
@@ -42,15 +40,15 @@ def test_collect_attempt_provenance_maps_keep_and_revert(tmp_path):
     ss = coord.shared_state
     ss.upsert_gap(
         {
-            "canonical_id": "gap.research_hint.0",
+            "canonical_id": "gap.static_recon.0",
             "symptom": "enable MTP",
-            "layer": "research_hint",
-            "source": "research_scout",
+            "layer": "static_recon",
+            "source": "static_recon",
             "provenance": "https://pr/123",
         }
     )
     ss.append_gap_attempt(
-        "gap.research_hint.0",
+        "gap.static_recon.0",
         {
             "variant_name": "mtp_on",
             "outcome": "KEEP",
@@ -58,7 +56,7 @@ def test_collect_attempt_provenance_maps_keep_and_revert(tmp_path):
         },
     )
     ss.append_gap_attempt(
-        "gap.research_hint.0",
+        "gap.static_recon.0",
         {
             "variant_name": "bad_flag",
             "outcome": "REVERT",
@@ -68,7 +66,7 @@ def test_collect_attempt_provenance_maps_keep_and_revert(tmp_path):
 
     kept, kept_by_gap, reverted = attempt_provenance(coord.shared_state)
     assert kept == {"mtp_on": "https://pr/123"}
-    assert kept_by_gap == {"gap.research_hint.0": "https://pr/123"}
+    assert kept_by_gap == {"gap.static_recon.0": "https://pr/123"}
     assert len(reverted) == 1
     assert reverted[0]["name"] == "bad_flag"
     assert reverted[0]["source"] == "https://pr/123"
@@ -83,21 +81,21 @@ def test_provenance_resolves_by_gap_id_when_name_mismatches(tmp_path):
             "action": "integrate",
             "kernel_id": "k007",
             "extra_server_args": "--fused",
-            "gap_canonical_id": "gap.research_hint.0",
+            "gap_canonical_id": "gap.static_recon.0",
         }
     ]
     ss.gain_per_stack_entry = [3.1]
     ss.upsert_gap(
         {
-            "canonical_id": "gap.research_hint.0",
+            "canonical_id": "gap.static_recon.0",
             "symptom": "fuse rmsnorm",
-            "layer": "research_hint",
-            "source": "research_scout",
+            "layer": "static_recon",
+            "source": "static_recon",
             "provenance": "https://pr/777",
         }
     )
     ss.append_gap_attempt(
-        "gap.research_hint.0",
+        "gap.static_recon.0",
         {
             "variant_name": "rmsnorm_fuse",
             "outcome": "KEEP",
@@ -117,15 +115,15 @@ def test_build_recipe_attrs_sediments_source_and_revert(tmp_path):
     ss.gain_per_stack_entry = [4.2]
     ss.upsert_gap(
         {
-            "canonical_id": "gap.research_hint.0",
+            "canonical_id": "gap.static_recon.0",
             "symptom": "enable MTP",
-            "layer": "research_hint",
-            "source": "research_scout",
+            "layer": "static_recon",
+            "source": "static_recon",
             "provenance": "https://pr/123",
         }
     )
     ss.append_gap_attempt(
-        "gap.research_hint.0",
+        "gap.static_recon.0",
         {
             "variant_name": "mtp_on",
             "outcome": "KEEP",
@@ -133,7 +131,7 @@ def test_build_recipe_attrs_sediments_source_and_revert(tmp_path):
         },
     )
     ss.append_gap_attempt(
-        "gap.research_hint.0",
+        "gap.static_recon.0",
         {
             "variant_name": "bad_flag",
             "outcome": "REVERT",
@@ -158,14 +156,14 @@ def test_sediment_toggle_off_keeps_recipe_ephemeral(tmp_path):
     ss.gain_per_stack_entry = [4.2]
     ss.upsert_gap(
         {
-            "canonical_id": "gap.research_hint.0",
+            "canonical_id": "gap.static_recon.0",
             "symptom": "enable MTP",
-            "layer": "research_hint",
+            "layer": "static_recon",
             "provenance": "https://pr/123",
         }
     )
     ss.append_gap_attempt(
-        "gap.research_hint.0",
+        "gap.static_recon.0",
         {
             "variant_name": "mtp_on",
             "outcome": "KEEP",
@@ -386,7 +384,7 @@ def test_gap_provenance_round_trips_through_serialization(tmp_path):
     ss = SharedState(session_id="s", model_name="m")
     ss.upsert_gap(
         {
-            "canonical_id": "gap.research_hint.0",
+            "canonical_id": "gap.static_recon.0",
             "symptom": "x",
             "provenance": "https://pr/9",
         }

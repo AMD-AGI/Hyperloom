@@ -6,34 +6,28 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.inference_optimizer.session.session_paths import failure_evidence_path
 from hyperloom.orchestrator.roles import mcp_context_tools as mct
-from hyperloom.orchestrator.roles import mcp_sdk
+from hyperloom.orchestrator.state.failure_packets import write_failure
 
 
 def _shared_state():
-    """Build a fake SharedState exposing the to_*_summary projections."""
-    return SimpleNamespace(
-        to_mission_summary=lambda: "mission",
-        to_prompt_summary=lambda: "prompt",
-        to_gaps_summary=lambda max_attempts=0: "gaps",
-        to_warm_start_summary=lambda: "warm",
-        to_intervention_mix_summary=lambda: "mix",
-        failures=[],
-        find_failure=lambda fid: None,
-        failures_for_task=lambda tid: [],
-    )
+    """Build a fake SharedState exposing the gaps projection."""
+    return SimpleNamespace(to_gaps_summary=lambda max_attempts=0: f"gaps(max_attempts={max_attempts})")
 
 
-def _provider(shared_state, **readers):
+def _provider(shared_state, session_dir=Path("/nonexistent-session"), **readers):
     """Build a ContextProvider whose readers are empty stubs unless overridden."""
     stubs = {
+        "session_dir": session_dir,
         "inbox_reader": lambda since_seq: "",
-        "analysis_reader": lambda: "",
         "recent_outcomes_reader": lambda top_k: "",
         "running_tasks_reader": lambda: "",
         "reference_reader": lambda name: "",
@@ -57,9 +51,9 @@ def test_safe_handles_exception():
 
 
 def test_an_empty_projection_reads_as_empty():
-    p = _provider(shared_state=SimpleNamespace(to_mission_summary=lambda: ""), analysis_reader=lambda: None)
-    assert p.mission_status() == "(mission_status: empty)"
-    assert p.analysis_md() == "(analysis_md: empty)"
+    p = _provider(shared_state=SimpleNamespace(to_gaps_summary=lambda max_attempts=0: ""), inbox_reader=lambda s: None)
+    assert p.gaps() == "(gaps: empty)"
+    assert p.inbox() == "(inbox: empty)"
 
 
 def test_runtime_findings_reads_current_best_slot(tmp_path):
@@ -75,157 +69,172 @@ def test_runtime_findings_reads_current_best_slot(tmp_path):
     assert "get_runtime_findings" in mct.CONTEXT_TOOL_NAMES
 
 
-# ---- sdk resolution ----
-
-
-def test_resolve_sdk_import_error(monkeypatch):
-    def boom(_name):
-        raise ImportError("no sdk")
-
-    monkeypatch.setattr(mcp_sdk.importlib, "import_module", boom)
-    assert mcp_sdk._resolve_sdk(None) is None
-
-
 # ---- _make_handler ----
 
 
 async def test_make_handler_success():
     p = _provider(shared_state=_shared_state())
-    handler = mct._make_handler(p, "mission_status")
+    handler = mct._make_handler(p, "get_gaps")
     out = await handler({})
-    assert out["content"][0]["text"] == "mission"
+    assert out["content"][0]["text"] == "gaps(max_attempts=5)"
 
 
 @pytest.mark.parametrize(
-    ("method_name", "args", "expected"),
+    ("tool_name", "args", "expected"),
     [
-        ("recent_outcomes", {"top_k": 2}, "outcomes(2)"),
-        ("inbox", {"since_seq": 9}, "inbox(9)"),
+        ("get_recent_outcomes", {"top_k": 2}, "outcomes(2)"),
+        ("get_inbox", {"since_seq": 9}, "inbox(9)"),
+        ("read_reference", {"name": "failure_recovery"}, "reference(failure_recovery)"),
         ("get_failure", {"failure_id": "fail.t1.abc"}, "fail.t1.abc"),
     ],
-    ids=["top_k", "since_seq", "failure_id"],
+    ids=["top_k", "since_seq", "name", "failure_id"],
 )
-async def test_make_handler_forwards_kwargs(method_name, args, expected):
+async def test_make_handler_passes_the_validated_arguments_to_the_reader(tool_name, args, expected):
     p = _provider(
         shared_state=_shared_state(),
         inbox_reader=lambda s: f"inbox({s})",
         recent_outcomes_reader=lambda k: f"outcomes({k})",
+        reference_reader=lambda name: f"reference({name})",
     )
-    out = await mct._make_handler(p, method_name)(args)
+    out = await mct._make_handler(p, tool_name)(args)
     assert expected in out["content"][0]["text"]
 
 
-async def test_make_handler_non_str_result():
-    provider = SimpleNamespace(foo=lambda **k: {"a": 1})
-    handler = mct._make_handler(provider, "foo")
-    out = await handler({})
-    assert json.loads(out["content"][0]["text"]) == {"a": 1}
-
-
 async def test_make_handler_exception():
-    def boom(**k):
+    def boom(_since_seq):
         raise RuntimeError("nope")
 
-    provider = SimpleNamespace(foo=boom)
-    handler = mct._make_handler(provider, "foo")
+    handler = mct._make_handler(_provider(shared_state=_shared_state(), inbox_reader=boom), "get_inbox")
     out = await handler({})
     assert out["is_error"] is True
+    assert "nope" in out["content"][0]["text"]
 
 
 async def test_read_projection_stays_on_the_calling_thread():
     owner_thread = threading.get_ident()
     seen = []
 
-    def read():
+    def read(max_attempts=0):
         seen.append(threading.get_ident())
-        return "mission"
+        return "gaps"
 
-    p = _provider(shared_state=SimpleNamespace(to_mission_summary=read))
-    out = await mct._make_handler(p, "mission_status")({})
+    p = _provider(shared_state=SimpleNamespace(to_gaps_summary=read))
+    out = await mct._make_handler(p, "get_gaps")({})
     assert seen == [owner_thread]
-    assert out == {"content": [{"type": "text", "text": "mission"}]}
+    assert out == {"content": [{"type": "text", "text": "gaps"}]}
 
 
 # ---- build_context_tools_server ----
 
 
-def test_build_server_unavailable_without_factories():
-    p = _provider(shared_state=_shared_state())
-    assert mct.build_context_tools_server(p, sdk_module=object()) is None
-
-
-def test_build_server_with_fake_factories():
+def test_build_server_registers_every_context_tool_with_the_sdk():
     p = _provider(shared_state=_shared_state())
     created = {}
 
-    def tool_factory(name, desc, schema):
+    def tool(name, desc, schema):
         def decorator(handler):
             return (name, handler)
 
         return decorator
 
-    def server_factory(name, version, tools):
+    def create_sdk_mcp_server(name, version, tools):
         created["name"] = name
         created["tools"] = tools
         return "SERVER"
 
-    out = mct.build_context_tools_server(
-        p,
-        tool_factory=tool_factory,
-        server_factory=server_factory,
-    )
+    out = mct.build_context_tools_server(SimpleNamespace(tool=tool, create_sdk_mcp_server=create_sdk_mcp_server), p)
     assert out == "SERVER"
     assert created["name"] == mct.MCP_SERVER_NAME
-    assert len(created["tools"]) == len(mct.CONTEXT_TOOL_SPECS)
+    assert [name for name, _handler in created["tools"]] == list(mct.CONTEXT_TOOL_NAMES)
 
 
-@pytest.mark.parametrize(
-    ("tool_name", "text"),
-    [
-        ("get_mission_status", "mission"),
-        ("get_shared_state", "prompt"),
-        ("get_gaps", "gaps"),
-        ("get_warm_start", "warm"),
-        ("get_intervention_mix", "mix"),
-        ("show_analysis_md", "md"),
-    ],
-)
-async def test_a_mounted_tool_returns_the_projection_it_names(tool_name, text):
+def _mounted_handlers():
+    """The handlers ``build_context_tools_server`` registers with the SDK, by tool name."""
     handlers = {}
     mct.build_context_tools_server(
-        _provider(shared_state=_shared_state(), analysis_reader=lambda: "md"),
-        tool_factory=lambda name, _description, _schema: lambda handler: handlers.setdefault(name, handler),
-        server_factory=lambda _name, _version, tools: tools,
+        SimpleNamespace(
+            tool=lambda name, _description, _schema: lambda handler: handlers.setdefault(name, handler),
+            create_sdk_mcp_server=lambda _name, _version, tools: tools,
+        ),
+        _provider(shared_state=_shared_state()),
     )
-    out = await handlers[tool_name]({})
-    assert out["content"][0]["text"] == text
+    return handlers
 
 
-def test_spec_methods_all_exist_on_provider():
-    """Every CONTEXT_TOOL_SPECS entry must name a real ContextProvider method."""
-    for _, _, _, method_name in mct.CONTEXT_TOOL_SPECS:
-        assert callable(getattr(mct.ContextProvider, method_name, None)), (
-            f"ContextProvider missing method {method_name!r}"
-        )
+async def test_get_gaps_returns_the_gaps_ledger_with_attempt_rows():
+    """The pushed gaps block carries no attempt rows; the tool asks for five per gap."""
+    out = await _mounted_handlers()["get_gaps"]({})
+    assert out["content"][0]["text"] == "gaps(max_attempts=5)"
 
 
-def test_get_failure_not_found_points_at_the_disk_mirror():
-    """An evicted packet is still reachable, so the miss must say where."""
-    p = _provider(shared_state=_shared_state())
-    out = p.get_failure("fail.t1.abc")
-    assert "reports/failures/fail.t1.abc.json" in out
+def test_the_mounted_tools_are_the_ones_the_prompt_does_not_push():
+    """A block every turn already carries has no pull twin: the turn's prompt is its one copy."""
+    assert set(_mounted_handlers()) == {
+        "get_gaps",
+        "get_runtime_findings",
+        "get_inbox",
+        "get_recent_outcomes",
+        "get_running_tasks",
+        "read_reference",
+        "get_failure",
+        "get_variant_failures",
+    }
 
 
-def test_get_failure_returns_json():
-    import json
+def test_the_mounted_names_and_the_tool_rows_are_one_set():
+    """The server mounts ``CONTEXT_TOOL_NAMES``; a row no name mounts would be a tool nothing can call."""
+    assert set(mct.CONTEXT_TOOLS) == set(mct.CONTEXT_TOOL_NAMES)
 
-    fe = {"failure_id": "fail.t1.abc", "task_id": "t1", "error_class": "x"}
-    ss = _shared_state()
-    ss.find_failure = lambda fid: fe if fid == "fail.t1.abc" else None
-    p = _provider(shared_state=ss)
-    out = p.get_failure("fail.t1.abc")
-    data = json.loads(out)
-    assert data["failure_id"] == "fail.t1.abc"
+
+def test_a_mounted_name_without_a_tool_row_fails_the_server_build(monkeypatch):
+    monkeypatch.setattr(mct, "CONTEXT_TOOL_NAMES", (*mct.CONTEXT_TOOL_NAMES, "get_unlisted"))
+    with pytest.raises(KeyError, match="get_unlisted"):
+        _mounted_handlers()
+
+
+def _failed_variant(session_dir: Path, failure_id: str, task_id: str, **fields) -> None:
+    write_failure(session_dir, {"failure_id": failure_id, "task_id": task_id, **fields})
+    # Packets are listed by the time they were written; give each its own instant.
+    packet = failure_evidence_path(session_dir, failure_id)
+    stamp = len(list(packet.parent.iterdir()))
+    os.utime(packet, ns=(stamp, stamp))
+
+
+def test_get_failure_of_an_id_nothing_was_written_as_says_so(tmp_path):
+    out = _provider(shared_state=_shared_state(), session_dir=tmp_path).get_failure("fail.t1.abc")
+    assert out == "(get_failure: no failure evidence was written as 'fail.t1.abc')"
+
+
+def test_get_failure_returns_the_packet_the_session_wrote(tmp_path):
+    _failed_variant(tmp_path, "fail.t1.abc", "t1", error_class="x")
+    data = json.loads(_provider(shared_state=_shared_state(), session_dir=tmp_path).get_failure("fail.t1.abc"))
+    assert data == {"failure_id": "fail.t1.abc", "task_id": "t1", "error_class": "x"}
+    assert json.loads((tmp_path / "reports" / "failures" / "fail.t1.abc.json").read_text()) == data
+
+
+def test_get_failure_returns_the_last_packet_written_under_an_id(tmp_path):
+    _failed_variant(tmp_path, "fail.t1.abc", "t1", error_class="a")
+    _failed_variant(tmp_path, "fail.t1.abc", "t1", error_class="b")
+    provider = _provider(shared_state=_shared_state(), session_dir=tmp_path)
+    assert json.loads(provider.get_failure("fail.t1.abc"))["error_class"] == "b"
+    assert len(provider.get_variant_failures().splitlines()) == 1
+
+
+@pytest.mark.parametrize("named", ["../state", "../../outside", "{absolute}", "nested/fail.t1.abc"])
+def test_get_failure_reads_no_file_outside_the_failure_store(tmp_path, named):
+    """A ``failure_id`` is a file name in the store; one that names a path to a JSON file elsewhere reads nothing."""
+    session = tmp_path / "session"
+    store = session / "reports" / "failures"
+    absolute = tmp_path / "elsewhere"
+    for elsewhere in (session / "reports" / "state", session / "outside", absolute, store / "nested" / "fail.t1.abc"):
+        elsewhere.parent.mkdir(parents=True, exist_ok=True)
+        elsewhere.with_name(f"{elsewhere.name}.json").write_text('{"secret": true}')
+    failure_id = named.format(absolute=absolute)
+    assert (store / f"{failure_id}.json").is_file(), "the id does name a file"
+
+    out = _provider(shared_state=_shared_state(), session_dir=session).get_failure(failure_id)
+
+    assert out.startswith("(get_failure: no failure evidence was written as ")
 
 
 def test_get_failure_requires_failure_id():
@@ -234,23 +243,28 @@ def test_get_failure_requires_failure_id():
     assert "required" in out
 
 
-def test_get_variant_failures_empty():
-    p = _provider(shared_state=_shared_state())
-    out = p.get_variant_failures()
-    assert "no failure" in out
+def test_get_variant_failures_empty(tmp_path):
+    out = _provider(shared_state=_shared_state(), session_dir=tmp_path).get_variant_failures()
+    assert out == "(no failure entries)"
 
 
-def test_get_variant_failures_returns_entries():
-    import json
+def test_get_variant_failures_lists_the_newest_packets_first_and_filters_by_task(tmp_path):
+    for failure_id, task_id in (("fail.t1.a", "t1"), ("fail.t2.a", "t2"), ("fail.t1.b", "t1")):
+        _failed_variant(tmp_path, failure_id, task_id)
+    provider = _provider(shared_state=_shared_state(), session_dir=tmp_path)
 
-    fe1 = {"failure_id": "fail.t1.a", "task_id": "t1"}
-    fe2 = {"failure_id": "fail.t1.b", "task_id": "t1"}
-    ss = _shared_state()
-    ss.failures = [fe1, fe2]
-    ss.failures_for_task = lambda tid: [fe for fe in [fe1, fe2] if fe["task_id"] == tid]
-    p = _provider(shared_state=ss)
-    out = p.get_variant_failures(task_id="t1")
-    lines = [l for l in out.splitlines() if l.strip()]
-    assert len(lines) == 2
-    ids = {json.loads(l)["failure_id"] for l in lines}
-    assert ids == {"fail.t1.a", "fail.t1.b"}
+    def listed(**args) -> list[str]:
+        return [json.loads(line)["failure_id"] for line in provider.get_variant_failures(**args).splitlines()]
+
+    assert listed() == ["fail.t1.b", "fail.t2.a", "fail.t1.a"]
+    assert listed(task_id="t1") == ["fail.t1.b", "fail.t1.a"]
+    assert listed(top_k=1) == ["fail.t1.b"]
+    assert provider.get_variant_failures(task_id="t3") == "(no failure entries)"
+
+
+def test_get_variant_failures_reaches_a_packet_older_than_the_thirty_newest(tmp_path):
+    for index in range(35):
+        _failed_variant(tmp_path, f"fail.t1.{index:04d}", "t1")
+    provider = _provider(shared_state=_shared_state(), session_dir=tmp_path)
+    assert len(provider.get_variant_failures(top_k=50).splitlines()) == 35
+    assert json.loads(provider.get_failure("fail.t1.0000"))["failure_id"] == "fail.t1.0000"

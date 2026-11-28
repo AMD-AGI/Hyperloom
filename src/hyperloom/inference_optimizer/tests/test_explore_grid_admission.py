@@ -142,24 +142,13 @@ class TestTheSeedSourcesThatStandInForAGrid:
         assert _admission(coord, {}) is not None
 
 
-class TestBothWaysAnExploreReachesTheRegistry:
-    """Delegate and propose are admitted by the same gate, so neither queues a round that cannot start."""
+class TestAnExploreReachingTheRegistry:
+    """A delegated explore is admitted on what it will measure, so none queues a round that cannot start."""
 
     async def test_a_delegated_explore_with_no_grid_never_queues(self, coord: Coordinator):
         intent = Intent(type=IntentType.DELEGATE, payload={"action_name": "explore", "params": {}})
 
         await coord.router.handle_delegate("orchestration", intent)
-
-        assert [t for t in await coord.tasks.queued() if t.kind == "explore"] == []
-        assert await _denials(coord) == [EXPLORE_GRID_MISSING]
-
-    async def test_a_proposed_explore_with_no_grid_is_refused_like_a_delegated_one(self, coord: Coordinator):
-        intent = Intent(
-            type=IntentType.PROPOSE_ACTION,
-            payload={"action_name": "explore", "params": {}, "predicted_gain_pct": 5.0},
-        )
-
-        await coord.router._handle_propose_action("orchestration", intent)
 
         assert [t for t in await coord.tasks.queued() if t.kind == "explore"] == []
         assert await _denials(coord) == [EXPLORE_GRID_MISSING]
@@ -172,14 +161,11 @@ class TestBothWaysAnExploreReachesTheRegistry:
 
         assert [t for t in await coord.tasks.queued() if t.kind == "explore"]
 
-    async def test_a_proposed_explore_a_seed_source_covers_queues_without_a_grid(self, coord: Coordinator):
+    async def test_a_delegated_explore_a_seed_source_covers_queues_without_a_grid(self, coord: Coordinator):
         coord.shared_state.framework = "atom"
-        intent = Intent(
-            type=IntentType.PROPOSE_ACTION,
-            payload={"action_name": "explore", "params": {}, "predicted_gain_pct": 5.0},
-        )
+        intent = Intent(type=IntentType.DELEGATE, payload={"action_name": "explore", "params": {}})
 
-        await coord.router._handle_propose_action("orchestration", intent)
+        await coord.router.handle_delegate("orchestration", intent)
 
         assert [t for t in await coord.tasks.queued() if t.kind == "explore"]
         assert await _denials(coord) == []

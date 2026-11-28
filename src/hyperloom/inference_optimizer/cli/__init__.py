@@ -698,9 +698,8 @@ def _install_system_prompts(
         framework=state.framework,
         objective=objective,
         max_minutes=int(round(float(args.max_hours) * 60)),
-        # The role record always names Claude; the deployment's provider shape is what actually decides, so read the
-        # transport off the built backend.
-        transport=getattr(coordinator.backends.get("orchestration"), "transport", TRANSPORT_TOOLS),
+        # The deployment's provider shape decides the transport, so read it off the built backend.
+        transport=getattr(coordinator.backends["orchestration"], "transport", TRANSPORT_TOOLS),
         benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
         agentx_corpus_shape=state.agentx_corpus_shape,
         agentx_grading=state.grading,

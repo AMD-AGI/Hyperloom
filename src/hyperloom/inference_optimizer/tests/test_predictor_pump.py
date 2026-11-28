@@ -106,7 +106,7 @@ async def _auto_bench_grid(state: SharedState) -> list[dict[str, Any]]:
 async def test_an_active_answer_is_queued_ahead_of_specialists_and_benched_as_primatune(service):
     specialist = {"task_id": "s1", "domain": "serving_specialist", "gap_canonical_id": "g1", "cycle": 0,
                   "proposal_set": [{"name": "spec", "extra_args": "--enable-chunked-prefill"}]}  # fmt: skip
-    state = _state(specialist_rounds=[specialist], gaps=[{"canonical_id": "g1", "severity": "high"}])
+    state = _state(specialist_rounds=[specialist], gaps=[{"canonical_id": "g1"}])
     service.answer = _answer(
         Action(server_args={"--kv-cache-dtype": "fp8", "--max-num-seqs": 256}, envs={"VLLM_A": "1", "SGLANG_B": "1"})
     )
@@ -287,7 +287,7 @@ async def _delegate_explore(coord: Any, grid: list[dict[str, Any]]) -> None:
 
     intent = Intent(
         type=IntentType.DELEGATE,
-        payload={"action_name": "explore", "idempotency_key": "e1", "params": {"grid": grid}},
+        payload={"action_name": "explore", "params": {"grid": grid}},
     )
     await coord.router.handle_delegate("orchestration", intent)
 
@@ -311,10 +311,10 @@ async def test_an_explore_orchestration_copies_off_the_queue_is_credited_to_the_
 
 
 async def test_orchestrations_prompt_names_a_predictor_row_its_queued_grid_holds(coordinator):
-    assert "• primatune-c0-s0-r0-0 " in (await coordinator.conversation.compose_prompt("orchestration")).text
+    assert "• primatune-c0-s0-r0-0 " in (await coordinator.conversation.compose_prompt()).text
     await _delegate_explore(coordinator, [{"name": "kv-fp8", "extra_args": "--kv-cache-dtype fp8"}])
 
-    prompt = (await coordinator.conversation.compose_prompt("orchestration")).text
+    prompt = (await coordinator.conversation.compose_prompt()).text
     assert "• primatune-c0-s0-r0-0 " not in prompt
     assert "not to be copied again: primatune-c0-s0-r0-0" in prompt
 

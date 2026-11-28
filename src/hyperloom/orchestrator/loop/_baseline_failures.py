@@ -15,7 +15,9 @@ from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 from hyperloom.inference_optimizer.breakdown.stop_reasons import AGENTX_PREFLIGHT_STOP_REASON, HOST_GPUS_UNAVAILABLE
 
 from ..actions.executors._accuracy_gate import (
+    ACCURACY_DEFINITION_DIGEST_KEY,
     BASELINE_EVAL_ACCURACY_FLOOR_KEY,
+    BASELINE_EVAL_EVIDENCE_KEY,
     BASELINE_EVAL_FAILED_KEY,
     BASELINE_EVAL_FAILURE_KIND_KEY,
     BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
@@ -26,11 +28,9 @@ from ..actions.executors import failed_step_error_class
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
-from ..bus.message_bus import Message
 from ..phases.machine_state import PHASE_ENABLEMENT, PHASE_PRELUDE
-from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
 from ..state.failure_evidence import ROUND_NONZERO_INVALID_MEASUREMENT
-from ..state.shared_state import ActionAttempt
+from ..state.shared_state import BaselineAttempt
 from ..state.round_store import ABANDONED, FAILED
 from ..state.task_registry import Task
 from ._baseline_promotion import _adopt_eval_trigger, _preserves_measured_eval_trigger
@@ -127,37 +127,25 @@ class BaselineFailureMixin:
             state.enablement.accuracy_floor = float(floor)
         if preserve_measured_trigger:
             log.info(
-                "enablement: keeping measured trigger kind=%s (accuracy=%s task=%s); "
-                "an eval-less baseline reported accuracy_unavailable and must not "
-                "overwrite it",
+                "enablement: keeping measured trigger kind=%s; an eval-less baseline reported "
+                "accuracy_unavailable and must not overwrite it",
                 stored_kind,
-                state.enablement.observed_accuracy,
-                state.enablement.observed_task,
             )
         else:
             _adopt_eval_trigger(state, result_payload)
-        self._record_enablement_eval_trigger()
-
-    def _record_enablement_eval_trigger(self) -> None:
-        """Open the enablement lane's event on the eval failure that triggered it.
-
-        Recorded here rather than derived at export: ``origin`` is cleared when
-        the lane succeeds, so the fields it reads do not all survive the run.
-        Only the first trigger is kept, which is what stops an eval-less
-        re-baseline downgrading a measured trigger to an empty one.
-        """
-        state = self.shared_state
+        # Recorded here rather than derived at export: ``origin`` is cleared when the lane succeeds. The recorder
+        # keeps the first trigger, which is what stops an eval-less re-baseline downgrading a measured one.
         enablement_event.record_trigger(
             enablement_event.LaneTrigger(
                 origin=enablement_event.ORIGIN_EVAL,
                 mode=str(state.enablement_mode or ""),
-                kind=str(state.enablement.baseline_eval_kind or ""),
-                evidence=str(state.enablement.baseline_eval_evidence or ""),
-                observed_accuracy=state.enablement.observed_accuracy,
+                kind=result_payload.get(BASELINE_EVAL_FAILURE_KIND_KEY),
+                evidence=result_payload.get(BASELINE_EVAL_EVIDENCE_KEY),
+                observed_accuracy=result_payload.get(BASELINE_EVAL_OBSERVED_ACCURACY_KEY),
                 accuracy_floor=state.enablement.accuracy_floor,
-                observed_task=state.enablement.observed_task,
-                observed_metric=state.enablement.observed_metric,
-                eval_definition_digest=state.enablement.eval_definition_digest,
+                observed_task=result_payload.get("accuracy_task"),
+                observed_metric=result_payload.get("accuracy_metric"),
+                eval_definition_digest=result_payload.get(ACCURACY_DEFINITION_DIGEST_KEY),
                 probe_config_path=state.enablement.probe_config_path,
             ),
         )
@@ -180,7 +168,7 @@ class BaselineFailureMixin:
         state = self.shared_state
         state.enablement.revalidation_generation = int(state.enablement.revalidation_generation or 0) + 1
         state.enablement.revalidation_task_id = ""
-        await self._coord.enablement_lane.settle_enablement_round(ABANDONED, reason="revalidation_stopped_by_the_run")
+        await self._coord.enablement_lane.settle_enablement_round(ABANDONED)
 
     async def _record_revalidation_not_promoted(
         self,
@@ -212,7 +200,7 @@ class BaselineFailureMixin:
         else:
             state.enablement.revalidation_task_id = ""
             state.enablement.validation_pending = False
-            await self._coord.enablement_lane.settle_enablement_round(FAILED, reason=err_class or "revalidation_failed")
+            await self._coord.enablement_lane.settle_enablement_round(FAILED)
             enablement_event.record_revalidation_outcome(
                 enablement_event.RevalidationOutcome(
                     generation=generation,
@@ -265,7 +253,7 @@ class BaselineFailureMixin:
         task: Task,
         result: dict[str, Any] | None,
     ) -> None:
-        """Record a failed / unpromotable task result into SharedState: append to last_action_failures (+ a failed attempts row for _AUDIT_ACTIONS) and apply the baseline failure_streak/stop_reason gates.
+        """Record a failed / unpromotable task result into SharedState: append to last_action_failures (and, for a baseline, replace last_baseline) and apply the baseline failure_streak/stop_reason gates.
 
         Args:
             task: The failed/unpromotable task.
@@ -275,21 +263,15 @@ class BaselineFailureMixin:
         result_payload = dict(result or {})
         if task.kind == "explore" and bool((task.params or {}).get("geak_fallback")):
             self._close_failed_geak_revalidation(result_payload)
-        # Per-action audit (failed attempt) for the in-scope kinds.
-        if task.kind in _AUDIT_ACTIONS:
-            audit_extras: dict[str, Any] = {}
-            # Stamp baseline-params fingerprint for the self-loop denial helper.
-            if task.kind == "baseline":
-                audit_extras["fingerprint"] = self.baseline_params_fingerprint(task.params)
-            self.shared_state.record_action_attempt(
-                action=task.kind,
-                attempt=ActionAttempt(
+        if task.kind == "baseline":
+            self.shared_state.record_baseline_attempt(
+                BaselineAttempt(
                     task_id=task.task_id,
                     status="failed",
                     decision="no_promote",
                     result=result_payload,
-                    extras=audit_extras,
-                ),
+                    extras={"fingerprint": self.baseline_params_fingerprint(task.params)},
+                )
             )
         # Global rolling failure log (every kind, including kernel_agent-owned).
         self.shared_state.record_action_failure(
@@ -301,12 +283,11 @@ class BaselineFailureMixin:
         # the promote branch that writes the terminal progress row; stamp
         # no_result_failed so the pump does not re-select it every tick.
         self._coord.phase_framework.record_unpromoted_candidate(task, result_payload)
-        baseline_event_payload: dict[str, Any] | None = None
         err_class = result_payload.get("error_class", "")
         # Only arm the streaks and stop gates while no baseline has succeeded yet.
         if task.kind == "baseline" and self._arms_baseline_failure_gates(err_class):
-            baseline_event_payload = await self._charge_baseline_failure(task, result_payload, err_class)
-        # Mirror the promote-path roofline failure handling: bump streak, clear gate, warn.
+            await self._charge_baseline_failure(task, result_payload, err_class)
+        # A failed roofline is charged here and nowhere else: bump streak, clear gate, warn.
         if task.kind == "roofline":
             self.shared_state.roofline_failure_streak += 1
             if self.shared_state.auto_roofline_pending_task_id == task.task_id:
@@ -325,15 +306,6 @@ class BaselineFailureMixin:
             # With enable_roofline off the initial analysis is a profile; leaving its id set would hold PRELUDE.
             self.shared_state.auto_roofline_pending_task_id = ""
         self.shared_state.save(self.session_dir)
-        if baseline_event_payload is not None:
-            await self.bus.append_and_seq(
-                Message.new(
-                    "coordinator",
-                    "*",
-                    "event",
-                    baseline_event_payload,
-                )
-            )
 
     def _tracks_open_revalidation(self, task: Task) -> bool:
         enablement = self.shared_state.enablement
@@ -349,7 +321,7 @@ class BaselineFailureMixin:
         task: Task,
         result_payload: dict[str, Any],
         err_class: str,
-    ) -> dict[str, Any]:
+    ) -> None:
         from ..actions.executors._accuracy_gate import eval_enablement_allowed
         from ..actions.executors._multi_node_env import is_multi_node
 
@@ -388,18 +360,7 @@ class BaselineFailureMixin:
             and not retries_suppressed
         ):
             self.shared_state.set_stop_reason(_BASELINE_FAILED_STOP_REASON)
-        self._arm_eager_baseline_fallback(task, err_class)
         self._stash_enablement_launch_log(result_payload, err_class)
-        return {
-            "kind": "baseline_not_promoted",
-            "task_id": task.task_id,
-            "failure_streak": self.shared_state.baseline_failure_streak,
-            "arg_error_streak": self.shared_state.baseline_arg_error_streak,
-            "stop_reason": self.shared_state.stop_reason,
-            "result_status": result_payload.get("status"),
-            "error_class": err_class,
-            "baseline_eval_failed": eval_failed,
-        }
 
     def _stop_the_run_on_baseline_failure(
         self,
@@ -437,16 +398,6 @@ class BaselineFailureMixin:
             self.shared_state.set_stop_reason(AGENTX_PREFLIGHT_STOP_REASON)
         elif self._generic_baseline_failure_stops(retries_suppressed=retries_suppressed):
             self.shared_state.set_stop_reason(_BASELINE_FAILED_STOP_REASON)
-
-    def _arm_eager_baseline_fallback(self, task: Task, err_class: str) -> None:
-        if err_class != "cuda_graph_capture_failed" or self.shared_state.baseline_eager_fallback:
-            return
-        self.shared_state.baseline_eager_fallback = True
-        log.warning(
-            "baseline %s hit cuda-graph capture failure; arming "
-            "disable-cuda-graph fallback for the next baseline retry",
-            task.task_id,
-        )
 
     def _stash_enablement_launch_log(self, result_payload: dict[str, Any], err_class: str) -> None:
         launch_log = _authorable_launch_log(result_payload, err_class=err_class)

@@ -20,7 +20,6 @@ def summary_row(gap: dict[str, Any]) -> str:
     """One gap's identity, where it sits, what it looks like, and how often it has been attempted."""
     cid = str(gap.get("canonical_id") or "?")
     layer = str(gap.get("layer") or "?")
-    severity = str(gap.get("severity") or "?")
     symptom = str(gap.get("symptom") or "").replace("\n", " ").strip()
     if len(symptom) > _SYMPTOM_CHARS:
         symptom = symptom[: _SYMPTOM_CHARS - 3] + "..."
@@ -31,7 +30,7 @@ def summary_row(gap: dict[str, Any]) -> str:
         last = attempts[-1]
         if isinstance(last, dict):
             last_tag = f" last={last.get('action', '?')}:{last.get('outcome', '?')}"
-    return f"  - {cid} [{layer}/{severity}] {symptom}\n      attempts={attempt_n}{last_tag}"
+    return f"  - {cid} [{layer}] {symptom}\n      attempts={attempt_n}{last_tag}"
 
 
 def attempt_rows(gap: dict[str, Any], max_attempts: int) -> list[str]:

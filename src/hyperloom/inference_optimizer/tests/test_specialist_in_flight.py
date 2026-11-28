@@ -44,11 +44,6 @@ def _ledger_gap(c: Coordinator, *, domain_hint: str) -> None:
     c.shared_state.upsert_gap({"canonical_id": _IDLE_GAP, "symptom": "GPU 85% idle", "domain_hint": domain_hint})
 
 
-async def _propose(c: Coordinator, **params: Any) -> None:
-    payload = {"action_name": "specialist", "predicted_gain_pct": 0.0, "params": {"mode": "research", **params}}
-    await c.router.handle_intent("orchestration", Intent(type=IntentType.PROPOSE_ACTION, payload=payload))
-
-
 async def _queued_domains(c: Coordinator) -> list[str]:
     return [str(t.params.get("domain") or t.params.get("tags")) for t in await c.tasks.by_state("queued")]
 
@@ -135,15 +130,6 @@ async def test_a_scope_domain_dispatch_over_two_tags_holds_the_domain_it_is_anch
     await _delegate(coord, scope="domain", tags=["systems", "compiler"], gap_canonical_id="gap.b")
 
     assert len(await coord.tasks.by_state("queued")) == 1
-    assert await _in_flight_denials(coord) == 1
-
-
-async def test_a_proposed_specialist_is_judged_like_a_delegate(coord):
-    _ledger_gap(coord, domain_hint=_SYSTEM)
-    await _propose(coord, gap_canonical_id=_IDLE_GAP)
-    await _propose(coord, domain=_SYSTEM, gap_canonical_id="b")
-
-    assert await _queued_domains(coord) == [_SYSTEM]
     assert await _in_flight_denials(coord) == 1
 
 

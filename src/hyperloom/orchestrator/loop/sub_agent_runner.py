@@ -3,10 +3,10 @@
 
 """SubAgentRunner
 
-Runs one already-queued ``tasks`` row under the lease its caller won: replays
-PolicyGate at dispatch, invokes the deterministic Python ``ActionRunner``
-executor registered for ``task.kind`` in ``self.executor_registry``, and
-transitions the row to its terminal state.
+Runs one already-queued ``tasks`` row under the lease its caller won: refuses
+a baseline while another task's bring-up round is open, invokes the
+deterministic Python ``ActionRunner`` executor registered for ``task.kind`` in
+``self.executor_registry``, and transitions the row to its terminal state.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import sys
 from concurrent.futures import CancelledError as FuturesCancelledError
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 import logging
 
@@ -28,12 +28,10 @@ from ..bus.resource_lock import (
     Lease,
     SqliteLeaseBackend,
 )
-from ..policy.denial import PolicyDenied
+from ..policy.bringup_round import bringup_round_denial
+from ..state.round_store import RoundStore
 from ..state.task_registry import IllegalTransition, Task, TaskRegistry
 from hyperloom.inference_optimizer.trace.task_progress import ProgressReporter, progress_scope
-
-if TYPE_CHECKING:
-    from ..policy.gate import PolicyGate
 
 log = logging.getLogger(__name__)
 
@@ -73,9 +71,8 @@ class SubAgentResult:
             family here is discoverable only via its consumers, not via a
             central registry:
 
-            * ``"policy_{rule}"`` (e.g.
-              ``"policy_path_outside_session_dir"``): a
-              ``PolicyDenied`` dispatch rejection, keyed on
+            * ``"policy_enablement_round_in_flight"``: a baseline refused at
+              dispatch because another task's bring-up round is open, keyed on
               :attr:`PolicyDenied.rule <..policy.denial.PolicyDenied.rule>`.
               The task never ran, so the result is ``cancelled`` and the
               failure ledgers never see it; the rule stays readable on the
@@ -150,27 +147,30 @@ class SubAgentRunner:
         self,
         locks: SqliteLeaseBackend,
         tasks: TaskRegistry,
+        rounds: RoundStore,
         *,
         session_dir: Path | None = None,
     ):
-        """Initialise the runner with its lease store + task registry.
+        """Initialise the runner with the session's lease store, task registry and round store.
 
         Args:
             locks (SqliteLeaseBackend): Lane lease store used to gate
                 task execution.
             tasks (TaskRegistry): Registry the runner transitions task
                 state through.
+            rounds (RoundStore): The session's bring-up round store, asked
+                before a queued baseline is claimed.
             session_dir (Path | None): Session root used to pre-create
                 per-action workspaces; None disables workspace pre-mkdir.
         """
         self.locks = locks
         self.tasks = tasks
+        self.rounds = rounds
         self.executor_registry: dict[str, ExecutorFn] = {}
         self.session_dir = Path(session_dir) if session_dir else None
         # Live SharedState threaded into each executor's ctx.extra so gain-computing
         # executors can recover a baseline anchor when params['base_tput'] is absent.
         self.shared_state: object | None = None
-        self.policy: PolicyGate | None = None
 
     def register_executor(self, kind: str, fn: ExecutorFn) -> None:
         """Register (or replace) the executor for a task kind.
@@ -245,19 +245,17 @@ class SubAgentRunner:
         extra_context: dict | None,
     ) -> tuple[SubAgentResult, dict[str, Any]]:
         """Claim the row and run its executor, returning its outcome and the terminal row's evidence."""
-        if self.policy is not None:
-            # Replay the gate at dispatch time, defending against a forged queued task row.
-            try:
-                self.policy.validate_dispatched_task(task.kind, task.params, task_id=task.task_id)
-            except PolicyDenied as denied:
-                outcome = SubAgentResult(
-                    task_id=task.task_id,
-                    state="cancelled",
-                    result={},
-                    error=str(denied),
-                    error_class=f"policy_{denied.rule or 'denied'}",
-                )
-                return outcome, {"reason": "policy_denied", "rule": denied.rule, "error": str(denied)}
+        # A baseline queued before a bring-up round opened is stopped here: the round holds no lane it needs.
+        denied = await bringup_round_denial(task.kind, self.rounds, task_id=task.task_id)
+        if denied is not None:
+            outcome = SubAgentResult(
+                task_id=task.task_id,
+                state="cancelled",
+                result={},
+                error=str(denied),
+                error_class=f"policy_{denied.rule}",
+            )
+            return outcome, {"reason": "policy_denied", "rule": denied.rule, "error": str(denied)}
 
         # Running an action whose lanes nobody holds would run it
         # unserialised, so a missing lease is a caller bug, not a fallback.

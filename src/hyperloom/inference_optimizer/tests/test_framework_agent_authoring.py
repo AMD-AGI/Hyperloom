@@ -458,24 +458,32 @@ async def test_enqueue_authoring_stamps_recovery_failed_when_unrecoverable(tmp_p
     assert "cand-x" in stub.phase_framework._framework_processed_candidate_keys()
 
 
+def _ended_task(task_id: str, params: dict[str, Any], result: dict[str, Any]) -> Any:
+    """A terminal task whose runner recorded ``result`` on the row."""
+    history = [{"evidence": {"outcome": {"result": result, "error": None}, "cleanup_confirmed": True}}]
+    return SimpleNamespace(task_id=task_id, params=params, history=history)
+
+
+def _booked(task_id: str, kind: str) -> Any:
+    """The event that says ``task_id``'s result was booked."""
+    return SimpleNamespace(topic="delegated_result", payload={"task_id": task_id, "kind": kind, "state": "succeeded"})
+
+
+_LOCAL_AUTHORING = {"framework_agent_authoring": True, "framework_agent_candidate_id": "local_explore:2"}
+_LOCAL_DELIVERABLE = {
+    "specialist_done": {"patches_written": ["patches/local.patch"], "proposal_set": [{"name": "local-source-change"}]}
+}
+
+
 @pytest.mark.asyncio
 async def test_recover_authored_outcome_uses_persisted_integrate_result(tmp_path: Path):
     stub = _stub(tmp_path)
     stub.shared_state.phase = "FRAMEWORK_AGENT"
-    specialist_task = SimpleNamespace(
-        task_id="specialist-local-2",
-        params={
-            "framework_agent_authoring": True,
-            "framework_agent_candidate_id": "local_explore:2",
-        },
-    )
-    integrate_task = SimpleNamespace(
-        task_id="integrate-local-2",
-        params={
-            "framework_agent_authoring": True,
-            "framework_agent_candidate_id": "local_explore:2",
-            "specialist_task_id": specialist_task.task_id,
-        },
+    specialist_task = _ended_task("specialist-local-2", _LOCAL_AUTHORING, _LOCAL_DELIVERABLE)
+    integrate_task = _ended_task(
+        "integrate-local-2",
+        {**_LOCAL_AUTHORING, "specialist_task_id": specialist_task.task_id},
+        {"status": "reverted", "delta_pct": -0.2},
     )
 
     async def _get(task_id: str) -> Any:
@@ -484,27 +492,8 @@ async def test_recover_authored_outcome_uses_persisted_integrate_result(tmp_path
 
     stub.tasks.get = _get
     stub.bus.messages = [
-        SimpleNamespace(
-            topic="delegated_result",
-            payload={
-                "task_id": specialist_task.task_id,
-                "kind": "specialist",
-                "result": {
-                    "specialist_done": {
-                        "patches_written": ["patches/local.patch"],
-                        "proposal_set": [{"name": "local-source-change"}],
-                    }
-                },
-            },
-        ),
-        SimpleNamespace(
-            topic="delegated_result",
-            payload={
-                "task_id": integrate_task.task_id,
-                "kind": "integrate_patch",
-                "result": {"status": "reverted", "delta_pct": -0.2},
-            },
-        ),
+        _booked(specialist_task.task_id, "specialist"),
+        _booked(integrate_task.task_id, "integrate_patch"),
     ]
 
     recovered = await stub.phase_framework._recover_framework_agent_authoring_outcome(
@@ -516,6 +505,21 @@ async def test_recover_authored_outcome_uses_persisted_integrate_result(tmp_path
     assert len(rows) == 1
     assert rows[0]["status"] == "reverted"
     assert rows[0]["provenance"] == "authored"
+
+
+@pytest.mark.asyncio
+async def test_recover_authored_outcome_ignores_an_attempt_whose_result_was_never_booked(tmp_path: Path):
+    """An attempt that was retried instead of booked has its run error on its row and settles nothing."""
+    stub = _stub(tmp_path)
+    stub.shared_state.phase = "FRAMEWORK_AGENT"
+    retried = _ended_task("specialist-retried", _LOCAL_AUTHORING, {})
+    retried.history[0]["evidence"]["outcome"]["error"] = "RuntimeError('subprocess died')"
+    stub.bus.messages = []
+
+    recovered = await stub.phase_framework._recover_framework_agent_authoring_outcome(specialist_task=retried)
+
+    assert recovered is False
+    assert stub.shared_state.framework_agent_phase_progress == []
 
 
 @pytest.mark.asyncio
@@ -552,7 +556,6 @@ async def test_dispatcher_records_authored_outcome_after_phase_transition(tmp_pa
     await stub.dispatcher.reap_dispatched_task(task, result)
 
     assert recorded == [("reverted", False)]
-    assert result.result["reauthor_attempt"] == 1
 
 
 def test_empty_outcome_fires_when_patch_dropped_by_vetting(tmp_path: Path):

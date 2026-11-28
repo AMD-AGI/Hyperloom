@@ -320,10 +320,10 @@ def _stage_reached(
 
 #: Each PRELUDE stage with the ``state.json`` fields that show a run reached it; the first stage with any set wins.
 _PRELUDE_STAGE_FIELDS = (
-    ("roofline", ("roofline_snapshots", "last_roofline", "roofline_attempts")),
-    ("profile", ("last_profile_trace", "last_profile", "profile_attempts")),
+    ("roofline", ("roofline_snapshots", "roofline_failure_streak")),
+    ("profile", ("last_profile_trace", "last_profile_status")),
     ("warm_replay", ("warm_replay_attempted", "warm_replay_outcome", "warm_replay_pending")),
-    ("baseline", ("baseline_tput", "last_baseline", "baseline_attempts", "baseline_failure_streak")),
+    ("baseline", ("baseline_tput", "last_baseline", "baseline_failure_streak")),
     (
         "warm_start",
         ("warm_start_ts", "warm_start_recipe", "warm_start_pitfalls", "warm_start_lessons", "warm_start_context"),

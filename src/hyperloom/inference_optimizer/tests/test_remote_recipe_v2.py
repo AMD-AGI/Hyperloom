@@ -55,7 +55,6 @@ from hyperloom.orchestrator.knowledge.remote_recipe.values import (
 from hyperloom.orchestrator.knowledge.recipe_journal import RecipeJournalCollaborator
 from hyperloom.orchestrator.tests._fixtures import MI325X_CARD, publish_card
 from hyperloom.orchestrator.knowledge.remote_publish import remote_result_type
-from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
 from hyperloom_common import kb_store
@@ -196,7 +195,6 @@ def _state(tmp_path: Path) -> SimpleNamespace:
                 "tput": 130.0,
             },
         ],
-        gemm_tuning_attempts=[{"status": "failed", "decision": "REVERT", "error": "must not be persisted"}],
         last_gemm_tuning={"status": "ok", "decision": "KEEP", "tuned_file": str(tuned)},
         last_fusion={
             "status": "ok",
@@ -246,7 +244,6 @@ def test_build_remote_knowledge_publishes_config_and_kernel_from_state(tmp_path:
     assert not any(item.path.startswith("files/") for item in bundle.artifacts)
     assert isinstance(value["kernel"]["gemm"], dict)
     assert len(value["kernel"]["gemm"]["optimizations"]) == 1
-    assert "must not be persisted" not in json.dumps(value["kernel"]["gemm"])
     assert isinstance(value["kernel"]["fusion"], dict)
     assert len(value["kernel"]["fusion"]["items"]) == 1
     assert isinstance(value["kernel"]["rewrite"], dict)
@@ -2312,19 +2309,6 @@ def test_non_overlay_owner_patch_ref_fails_before_publish(
             tmp_path / "files-invalid-owner-ref",
             sections=sections,
         )
-
-
-def test_missing_workspace_does_not_scan_current_directory(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    (tmp_path / "unrelated.diff").write_text("unrelated", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-
-    sources, missing = WritebackCollaborator._keep_patch_sources({}, None)
-
-    assert sources == []
-    assert missing == []
 
 
 def test_orphaned_required_staged_file_fails_close(tmp_path: Path) -> None:

@@ -18,9 +18,8 @@ from hyperloom.inference_optimizer.grid_server_args import (
     strip_benchmark_harness_flags,
 )
 from hyperloom.inference_optimizer.session.optimization_journal import classify_change_kind, operation_kind_for
-from hyperloom.orchestrator.lever import FRAMEWORK_STACK_ACTION, lever_kind_for_task
+from hyperloom.orchestrator.lever import lever_kind_for_task
 
-from ..framework.artifacts import candidate_key
 from ..launch_controls import LAUNCH_CONTROL_KEYS, kept_launch_controls
 from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 from ..source_snapshot import report_missing_source_snapshot
@@ -212,31 +211,6 @@ def _variant_source_layer(bv: Mapping[str, Any]) -> dict[str, Any]:
     if bv.get("source_layer_landed"):
         fields["source_layer_landed"] = True
     return fields
-
-
-class _StackKey(NamedTuple):
-    action: str
-    variant: str
-
-
-def _stacked_keep_keys(stack: Any) -> set[_StackKey]:
-    return {
-        _StackKey(str(entry.get("action") or ""), str(entry.get("variant_name") or ""))
-        for entry in (stack or [])
-        if isinstance(entry, dict)
-    }
-
-
-def _orphan_stack_key(kind: str, result: Mapping[str, Any]) -> _StackKey | None:
-    if kind == "integrate_patch":
-        return _StackKey(kind, str(result.get("specialist_task_id") or ""))
-    if kind == "framework_agent":
-        candidate = result.get("candidate")
-        return _StackKey(FRAMEWORK_STACK_ACTION, candidate_key(candidate if isinstance(candidate, dict) else None))
-    if kind == "explore":
-        best = result.get("best_variant") or {}
-        return _StackKey(kind, str((best.get("name") if isinstance(best, dict) else "") or ""))
-    return None
 
 
 class CurrentBestLiftMixin:
@@ -446,7 +420,6 @@ class CurrentBestLiftMixin:
             "extra_server_args": launch.full_args,
             "extra_envs": envs,
             "final_overlay": launch.overlay,
-            "optimization_stack": list(self.shared_state.optimization_stack),
             "ttft_mean_ms": bv.get("ttft_mean_ms"),
             **constraint_fields(bv),
             "tpot_mean_ms": bv.get("tpot_mean_ms"),

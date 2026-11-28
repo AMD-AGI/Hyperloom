@@ -21,6 +21,7 @@ import pytest
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from hyperloom.inference_optimizer.session.resume_guard import ResumeBlocked, ensure_resume_safe
 from hyperloom.orchestrator.state.task_registry import TaskSpec
+from ._lease_helpers import lane_holders
 
 
 def test_real_coordinator_database_path_is_checked_before_resume(tmp_path):
@@ -127,7 +128,6 @@ def test_unobserved_terminal_holder_keeps_open_round_blocked(tmp_path, with_leas
     path = _database(tmp_path)
     _task(path, state="cancelled", evidence={"reason": "cancelled_in_flight"})
     _execute(path, "INSERT INTO bringup_rounds VALUES ('round-1', 'open', 'task-1')")
-    _execute(path, "INSERT INTO leases VALUES ('bringup_round', 'round-1', 'task-1', 0, '')")
     if with_lease:
         _execute(path, "INSERT INTO leases VALUES ('benchmark_lane', 'holder-1', 'task-1', 123, 'local')")
     before = path.read_bytes()
@@ -145,7 +145,6 @@ def test_completed_or_unstarted_holder_without_resources_can_resume(tmp_path, st
     path = _database(tmp_path)
     _task(path, state=state, evidence={"reason": "completed"})
     _execute(path, "INSERT INTO bringup_rounds VALUES ('round-1', 'open', 'task-1')")
-    _execute(path, "INSERT INTO leases VALUES ('bringup_round', 'round-1', 'task-1', 0, '')")
 
     ensure_resume_safe(tmp_path, owner_scope="local")
 
@@ -168,7 +167,6 @@ def test_open_round_uses_latest_cleanup_outcome(tmp_path, state, appended, confi
             history.append({"progress": {"message": "completion recorded"}})
             db.execute("UPDATE tasks SET history=?", (json.dumps(history),))
     _execute(path, "INSERT INTO bringup_rounds VALUES ('round-1', 'open', 'task-1')")
-    _execute(path, "INSERT INTO leases VALUES ('bringup_round', 'round-1', 'task-1', 0, '')")
     before = path.read_bytes()
 
     if confirmed:
@@ -257,10 +255,6 @@ def test_current_schema_round_holder_without_unknown_execution_is_allowed(tmp_pa
             "INSERT INTO bringup_rounds (round_id, state, holder_task_id, opened_unix, renewed_unix, expires_unix) "
             "VALUES ('round-1', 'open', 'task-1', 1, 1, 2)"
         )
-        db.execute(
-            "INSERT INTO leases (lane, holder_id, task_id, action, pid, acquired_at, expires_at) "
-            "VALUES ('bringup_round', 'round-1', 'task-1', 'bringup_round', 0, 'old', 'old')"
-        )
     before = path.read_bytes()
     ensure_resume_safe(tmp_path, owner_scope="local")
     assert path.read_bytes() == before
@@ -294,7 +288,7 @@ async def test_matching_scope_dead_holder_reaches_existing_reaper(tmp_path, monk
         assert await tasks.reclaim_dead_running() == ["task-1"]
         assert await leases.reap_dead_holders()
         assert (await tasks.get("task-1")).state == "failed"
-        assert await leases.lane_holders() == {}
+        assert await lane_holders(leases) == {}
     finally:
         db.close()
 
@@ -303,7 +297,7 @@ async def test_matching_scope_dead_holder_reaches_existing_reaper(tmp_path, monk
 async def test_current_handoff_to_unstarted_holder_remains_resumable(tmp_path):
     from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
     from hyperloom.orchestrator.bus.storage.schema import ensure_schema
-    from hyperloom.orchestrator.state.round_store import RoundRequest, RoundStore
+    from hyperloom.orchestrator.state.round_store import RoundStore
     from hyperloom.orchestrator.state.task_registry import TaskRegistry
 
     path = db_path_for(tmp_path)
@@ -317,15 +311,13 @@ async def test_current_handoff_to_unstarted_holder_remains_resumable(tmp_path):
             await tasks.create_or_return_existing(
                 TaskSpec(kind="baseline", params={}, idempotency_key=task_id, task_id=task_id)
             )
-        opened = await rounds.open(
-            "round-1", RoundRequest(now_unix=1, request_id="open"), holder_task_id="first", lease_sec=1
-        )
+        opened = await rounds.open("round-1", now_unix=1, holder_task_id="first", lease_sec=1)
         assert opened.ok
         await tasks.transition("first", "running")
         await tasks.transition("first", "succeeded", evidence={"reason": "completed"})
         handed_off = await rounds.handoff(
             await rounds.get("round-1"),
-            RoundRequest(now_unix=2, request_id="handoff"),
+            now_unix=2,
             new_holder_task_id="next",
             lease_sec=1,
         )
@@ -592,7 +584,6 @@ def test_confirmation_clears_only_target_execution_with_durable_audit(tmp_path):
     _task(path, state="queued", task_id="other-task")
     for lane, holder, task in [
         ("benchmark_lane", "execution-1", "task-1"),
-        ("bringup_round", "round-1", "task-1"),
         ("other_lane", "execution-2", "other-task"),
     ]:
         _execute(path, "INSERT INTO leases VALUES (?, ?, ?, 123, '')", (lane, holder, task))
@@ -600,7 +591,6 @@ def test_confirmation_clears_only_target_execution_with_durable_audit(tmp_path):
     _execute(path, "INSERT INTO gpu_leases VALUES (0, 'worker-0', 'task-1')")
     _execute(path, "INSERT INTO gpu_leases VALUES (1, 'worker-1', 'other-task')")
     before_rounds = _rows(path, "bringup_rounds")
-    before_round_leases = [row for row in _rows(path, "leases") if row["lane"] == "bringup_round"]
     before_other = _rows(path, "tasks")[1]
     with pytest.raises(ResumeBlocked):
         ensure_resume_safe(tmp_path, owner_scope="local")
@@ -626,7 +616,6 @@ def test_confirmation_clears_only_target_execution_with_durable_audit(tmp_path):
     assert outcome["task_id"] == "task-1" and outcome["state"] == "cancelled" and outcome["result"] == {}
     assert outcome["error"] and outcome["error_class"] == "operator_confirmed_stopped"
     assert _rows(path, "bringup_rounds") == before_rounds
-    assert [row for row in _rows(path, "leases") if row["lane"] == "bringup_round"] == before_round_leases
     assert _rows(path, "gpu_leases") == [{"gpu_id": 1, "holder_id": "worker-1", "task_id": "other-task"}]
     with pytest.raises(ResumeBlocked, match="other-task"):
         ensure_resume_safe(tmp_path, owner_scope="local")
@@ -674,7 +663,6 @@ def test_confirmation_does_not_cancel_clean_or_unstarted_task(tmp_path, state, o
     _task(path, state=state, evidence={"reason": "completed"})
     if open_round:
         _execute(path, "INSERT INTO bringup_rounds VALUES ('round-1', 'open', 'task-1')")
-        _execute(path, "INSERT INTO leases VALUES ('bringup_round', 'round-1', 'task-1', 0, '')")
     before = path.read_bytes()
     result = _confirm_in_sqlite(path)
     assert result == dict(status="nothing_to_confirm", task_id="task-1", released_leases=0, released_gpu_leases=0)
@@ -682,14 +670,13 @@ def test_confirmation_does_not_cancel_clean_or_unstarted_task(tmp_path, state, o
 
 
 @pytest.mark.parametrize("scope", ["local", "foreign", " ", 0])
-@pytest.mark.parametrize("lane", ["benchmark_lane", "bringup_round"])
-def test_confirmation_rejects_any_nonempty_or_invalid_target_scope(tmp_path, scope, lane):
+def test_confirmation_rejects_any_nonempty_or_invalid_target_scope(tmp_path, scope):
     from hyperloom.inference_optimizer.session.resume_guard import CleanupConfirmationError
 
     path = _database(tmp_path)
     _task(path)
     _execute(path, "INSERT INTO leases VALUES ('other_lane', 'empty-owner', 'task-1', 123, '')")
-    _execute(path, "INSERT INTO leases VALUES (?, 'owner', 'task-1', 123, ?)", (lane, scope))
+    _execute(path, "INSERT INTO leases VALUES ('benchmark_lane', 'owner', 'task-1', 123, ?)", (scope,))
     _execute(path, "INSERT INTO gpu_leases VALUES (0, 'worker-0', 'task-1')")
     before = path.read_bytes()
     with pytest.raises(CleanupConfirmationError, match="scope"):
@@ -858,8 +845,7 @@ async def test_confirmation_leaves_round_fence_and_events_for_existing_reconcile
     from hyperloom.orchestrator.bringup.reconcile import ReconcileLinks, Reconciler, ReconcileStores
     from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
     from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
-    from hyperloom.orchestrator.state.round_store import EXPIRED_REAPED, RoundRequest, RoundStore
-    from hyperloom.orchestrator.policy.projection import ResourceFacts
+    from hyperloom.orchestrator.state.round_store import EXPIRED_REAPED, RoundStore
     from hyperloom.orchestrator.state.shared_state import SharedState
     from hyperloom.orchestrator.state.task_registry import TaskRegistry
 
@@ -874,22 +860,19 @@ async def test_confirmation_leaves_round_fence_and_events_for_existing_reconcile
         )
         await tasks.transition("task-1", "running")
         await tasks.transition("task-1", "cancelled", evidence={"reason": "cancelled_in_flight"})
-        opened = await rounds.open(
-            "round-1", RoundRequest(now_unix=1, request_id="open"), holder_task_id="task-1", lease_sec=1
-        )
+        opened = await rounds.open("round-1", now_unix=1, holder_task_id="task-1", lease_sec=1)
         assert opened.ok
         reconciler = Reconciler(
             ReconcileStores(rounds=rounds, tasks=tasks, locks=SqliteLeaseBackend(db)),
             SharedState(),
             links=ReconcileLinks(
-                resources=ResourceFacts(),
                 session_dir=tmp_path,
                 result_pending=lambda _task_id: False,
             ),
         )
         report = await reconciler.run(2_000_000_000)
         assert not report.settled and not report.failures
-        before = {table: _rows(path, table) for table in ("bringup_rounds", "leases", "events", "round_events")}
+        before = {table: _rows(path, table) for table in ("bringup_rounds", "leases", "events")}
         old_updated_at = (await tasks.get("task-1")).updated_at
 
         result = _confirm_in_sqlite(path)

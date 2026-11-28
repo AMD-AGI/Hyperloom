@@ -16,6 +16,7 @@ import pytest
 from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction
 from hyperloom.orchestrator.loop.build_lifecycle import _driver_command
 from hyperloom.orchestrator.state.task_registry import TaskSpec
+from ._lease_helpers import lane_holders
 
 
 def _action(**kw):
@@ -55,7 +56,7 @@ async def _enqueue_and_run(build_coord, executor, *, action, session_dir) -> tup
 
     tid = await build_coord.build_lifecycle.enqueue_targeted_build(action)
     task_obj = await build_coord.tasks.get(tid)
-    runner = SubAgentRunner(locks=build_coord.locks, tasks=build_coord.tasks, session_dir=Path(session_dir))
+    runner = SubAgentRunner(build_coord.locks, build_coord.tasks, build_coord.rounds, session_dir=Path(session_dir))
     runner.shared_state = build_coord.shared_state
     runner.register_executor("targeted_build", executor)
     lease = await build_coord.locks.acquire_many(
@@ -156,7 +157,7 @@ async def test_build_succeeds(build_coord, executor, tmp_path, monkeypatch):
     assert task.state == "succeeded"
     assert build_coord.shared_state.enablement.build_manifest
     assert build_coord.shared_state.pending_targeted_build == {}
-    holders = await build_coord.locks.lane_holders()
+    holders = await lane_holders(build_coord.locks)
     assert holders.get("build_lane", 0) == 0 or "build_lane" not in holders
 
 
@@ -177,7 +178,7 @@ async def test_timeout_kills_and_records_timeout(build_coord, tmp_path, monkeypa
     task, _ = await _enqueue_and_run(build_coord, tbe.TargetedBuildExecutor(), action=_action(), session_dir=tmp_path)
     assert task.state == "failed"
     assert build_coord.shared_state.enablement.last_build_failure["failure_class"] == "timeout"
-    holders = await build_coord.locks.lane_holders()
+    holders = await lane_holders(build_coord.locks)
     assert holders.get("build_lane", 0) == 0 or "build_lane" not in holders
 
 
@@ -463,37 +464,6 @@ async def test_real_component_writes_plan_json_before_spawn(build_coord, tmp_pat
     assert "targeted_build" in " ".join(cmd)
 
 
-# Policy gate
-
-
-def test_targeted_build_params_pass_policy_gate(tmp_path):
-    """Build params must not be misidentified as path-like fields."""
-    from hyperloom.orchestrator.policy.gate import PolicyGate
-    from hyperloom.orchestrator.roles.agent_role import AgentRole
-    from hyperloom.inference_optimizer.protocol.intent import IntentType
-
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    orch_role = AgentRole(
-        name="orchestration",
-        allowed_intents=frozenset(IntentType),
-    )
-    gate = PolicyGate(
-        role_registry={"orchestration": orch_role},
-        session_dir=session_dir,
-    )
-    action = TargetedBuildAction(
-        gap_id="gap.enablement.fp4_moe",
-        framework="vllm",
-        component="aiter",
-        capability="fp4_moe",
-        repo_url="https://github.com/ROCm/aiter",
-        ref="v0.1.0",
-        gpu_arch="gfx950",
-    )
-    gate.validate_dispatched_task("targeted_build", action.to_state())
-
-
 # P1-12 regression: spawn failure lands row in failed state
 
 
@@ -507,7 +477,7 @@ async def test_spawn_failure_marks_row_failed(build_coord, tmp_path, monkeypatch
     action = _action()
     tid = await build_coord.build_lifecycle.enqueue_targeted_build(action)
     task_obj = await build_coord.tasks.get(tid)
-    runner = SubAgentRunner(locks=build_coord.locks, tasks=build_coord.tasks, session_dir=tmp_path)
+    runner = SubAgentRunner(build_coord.locks, build_coord.tasks, build_coord.rounds, session_dir=tmp_path)
     runner.shared_state = build_coord.shared_state
     runner.register_executor("targeted_build", TargetedBuildExecutor())
     lease = await build_coord.locks.acquire_many(
@@ -520,7 +490,7 @@ async def test_spawn_failure_marks_row_failed(build_coord, tmp_path, monkeypatch
     await runner.run_task(task_obj, prebound_lease=lease)
     t = await build_coord.tasks.get(tid)
     assert t.state == "failed"
-    holders = await build_coord.locks.lane_holders()
+    holders = await lane_holders(build_coord.locks)
     assert holders.get("build_lane", 0) == 0 or "build_lane" not in holders
 
 
@@ -630,18 +600,19 @@ def _revalidation_row_unreadable(coord, monkeypatch, tmp_path):
     return coord.writeback._resume_recover_pending_revalidation, sqlite3.OperationalError, "database is locked"
 
 
-def _keep_log_unreadable(coord, monkeypatch, tmp_path):
+def _integrate_row_unreadable(coord, monkeypatch, tmp_path):
     import sqlite3
 
-    async def _locked(**_kwargs):
+    async def _locked(_task_id, **_kwargs):
         raise sqlite3.OperationalError("database is locked")
 
-    monkeypatch.setattr(coord.bus, "tail", _locked)
-    return coord.writeback._resume_recover_orphaned_keeps, sqlite3.OperationalError, "database is locked"
+    monkeypatch.setattr(coord.tasks, "find", _locked)
+    coord.shared_state.pending_integrate = {"task_id": "t-integrate"}
+    return coord.writeback._resume_recover_pending_integrate, sqlite3.OperationalError, "database is locked"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("broken", [_jit_sweep_bug, _revalidation_row_unreadable, _keep_log_unreadable])
+@pytest.mark.parametrize("broken", [_jit_sweep_bug, _revalidation_row_unreadable, _integrate_row_unreadable])
 async def test_a_failed_resume_recovery_step_is_not_skipped_silently(resume_coord, monkeypatch, tmp_path, broken):
     recover, error_type, message = broken(resume_coord, monkeypatch, tmp_path)
     with pytest.raises(error_type, match=message):

@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from hyperloom.common.codex_session import (
     CodexSession,
@@ -20,7 +20,6 @@ from hyperloom.common.codex_session import (
 )
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.inference_optimizer.protocol.intent import (
-    IntentType,
     IntentValidationError,
     NoIntentEmitted,
     validate_envelope,
@@ -45,18 +44,10 @@ from .mcp_emit_intent import (
 )
 
 
-def build_output_instructions(allowed_intents: Iterable[IntentType]) -> str:
-    """Render the transport contract for one role's intent set."""
-    from hyperloom.inference_optimizer.protocol.intent import IntentType as _IT
-
-    contract = payload_contract(allowed_intents)
-    constraints = constraints_sentence(allowed_intents)
-    constraints_line = f"\n-{constraints}" if constraints else ""
-    always_emit_line = (
-        "- ALWAYS emit at least one intent."
-        if _IT.SEND_MESSAGE in set(allowed_intents)
-        else "- ALWAYS emit exactly one intent; the schema requires it."
-    )
+def build_output_instructions() -> str:
+    """Render the transport contract."""
+    contract = payload_contract()
+    constraints_line = f"\n-{constraints_sentence()}"
     return f"""
 ==== OUTPUT FORMAT (REQUIRED) ====
 Your final message MUST be exactly one JSON object matching the enforced
@@ -71,7 +62,7 @@ output schema — no prose, no code fences, nothing around it:
 - Put only NEW information in payload bodies; do not restate context already
   in SharedState, your inbox, or analysis.md. Keep length proportional to
   substance.
-{always_emit_line}
+- ALWAYS emit at least one intent.
 ==== END OUTPUT FORMAT ====
 """.strip()
 
@@ -106,7 +97,6 @@ def decode_intent_envelope(text: str) -> dict[str, Any]:
 class CodexBackend:
     """Production Codex reactor backend. Implements :class:`Backend`."""
 
-    allowed_intents: frozenset[IntentType]
     model: str = DEFAULT_CODEX_MODEL
     cwd: Path = field(default_factory=Path.cwd)
     # An agent turn carries a tool loop, so it needs the orchestration budget,
@@ -134,8 +124,6 @@ class CodexBackend:
 
     def __post_init__(self) -> None:
         """Normalize and secure the session-private runtime root."""
-        if not self.allowed_intents:
-            raise BackendError("CodexBackend requires the emitting role's allowed_intents")
         self.cwd = Path(self.cwd).expanduser().resolve()
         try:
             self.cwd.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -150,10 +138,9 @@ class CodexBackend:
         *,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
-        max_turns: int = 1,
     ) -> BackendTurnResult:
         """Run one Codex Agent SDK turn and parse its enforced intent envelope."""
-        output_schema = build_intent_envelope_schema(self.allowed_intents)
+        output_schema = build_intent_envelope_schema()
 
         async def _one_attempt() -> Any:
             """Acquire the session and run one turn under the retry policy."""
@@ -208,9 +195,7 @@ class CodexBackend:
 
     def _instructions_for(self, system_prompt: str | None) -> str:
         """Thread-level instructions implied by one system prompt."""
-        return "\n\n".join(
-            part for part in ((system_prompt or "").strip(), build_output_instructions(self.allowed_intents)) if part
-        )
+        return "\n\n".join(part for part in ((system_prompt or "").strip(), build_output_instructions()) if part)
 
     async def aclose(self) -> None:
         """Release the held session: SDK client, child process, ``CODEX_HOME``."""

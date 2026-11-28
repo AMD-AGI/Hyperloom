@@ -100,10 +100,9 @@ def _pick_failure_headline(text: str) -> str:
 
 def _last_failed_baseline_attempt(state: SharedState) -> dict[str, Any] | None:
     """Return the most recent *failed* baseline attempt record, or ``None``."""
-    attempts = getattr(state, "baseline_attempts", None) or []
-    failed = [a for a in attempts if isinstance(a, dict) and str(a.get("status")) == "failed"]
-    if failed:
-        return failed[-1]
+    latest = state.last_baseline
+    if latest.get("status") == "failed":
+        return latest
     failures = getattr(state, "last_action_failures", None) or []
     baseline_failures = [f for f in failures if isinstance(f, dict) and str(f.get("action")) == "baseline"]
     return baseline_failures[-1] if baseline_failures else None
@@ -851,9 +850,7 @@ def _highlight(payload: dict, topic: str, from_agent: str) -> dict[str, Any]:
     """Pick the most useful 1-line summary out of an event's payload."""
     summary = ""
     if topic == "delegated_result":
-        out_tput = (payload.get("result") or {}).get("output_throughput")
-        decision = (payload.get("result") or {}).get("decision")
-        summary = f"kind={payload.get('kind')} state={payload.get('state')} tput={out_tput} decision={decision}"
+        summary = f"kind={payload.get('kind')} state={payload.get('state')}"
     elif topic == "response":
         summary = f"kind={payload.get('kind')} status={payload.get('status')}"
     elif topic == "alert":
@@ -928,7 +925,6 @@ class ReportExecutor:
     """ActionRunner for the ``report`` action."""
 
     DEFAULT_HIGHLIGHT_TOPICS = (
-        "decision",
         "delegated_result",
         "response",
         "alert",

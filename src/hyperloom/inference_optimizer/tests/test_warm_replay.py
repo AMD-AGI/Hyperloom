@@ -73,6 +73,9 @@ class _StubTaskRegistry:
     def __init__(self):
         self.calls: list[dict] = []
 
+    async def find_by_idempotency_key(self, _idempotency_key: str) -> None:
+        return None
+
     async def create_or_return_existing(self, spec):
         self.calls.append(
             {
@@ -1429,6 +1432,10 @@ def test_multi_file_kernel_targets_share_one_framework_root(
         "+new\n",
         encoding="utf-8",
     )
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.framework_paths.resolve_session_framework_root",
+        lambda: str(framework_root),
+    )
 
     targets = coord.phase_prelude._resolve_kernel_target_paths(
         {
@@ -1440,27 +1447,37 @@ def test_multi_file_kernel_targets_share_one_framework_root(
     assert targets == [str(existing), str(added)]
 
 
-def test_kernel_target_uses_the_recorded_root_not_the_session_one(tmp_path, monkeypatch):
-    """The recorded checkout is where the gain was measured, so it outranks the session's."""
-    coord = _make_coord(tmp_path)
-    active_root = tmp_path / "active"
-    recorded_root = tmp_path / "recorded"
-    recorded_target = recorded_root / "src/kernel.py"
-    active_root.mkdir()
-    recorded_target.parent.mkdir(parents=True)
-    recorded_target.write_text("old\n", encoding="utf-8")
+_KERNEL_PATCH = (
+    "diff --git a/src/kernel.py b/src/kernel.py\n--- a/src/kernel.py\n+++ b/src/kernel.py\n@@ -1 +1 @@\n-old\n+new\n"
+)
+
+
+def _recorded_kernel(tmp_path, recorded_root):
+    """A one-file kernel patch and the file it rewrites under ``recorded_root``."""
+    target = recorded_root / "src/kernel.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("old\n", encoding="utf-8")
     patch = tmp_path / "kernel.patch"
-    patch.write_text(
-        "diff --git a/src/kernel.py b/src/kernel.py\n"
-        "--- a/src/kernel.py\n"
-        "+++ b/src/kernel.py\n"
-        "@@ -1 +1 @@\n-old\n+new\n",
-        encoding="utf-8",
-    )
+    patch.write_text(_KERNEL_PATCH, encoding="utf-8")
+    return patch, target
+
+
+def _session_framework_root(monkeypatch, root) -> None:
     monkeypatch.setattr(
         "hyperloom.inference_optimizer.framework_paths.resolve_session_framework_root",
-        lambda: str(active_root),
+        lambda: str(root) if root else "",
     )
+
+
+def test_kernel_target_is_placed_under_the_recorded_root_not_the_session_one(tmp_path, monkeypatch):
+    """The recorded checkout is where the gain was measured: inside the session's tree it decides the file."""
+    coord = _make_coord(tmp_path)
+    active_root = tmp_path / "active"
+    recorded_root = active_root / "third_party/kernels"
+    patch, recorded_target = _recorded_kernel(tmp_path, recorded_root)
+    (active_root / "src").mkdir()
+    (active_root / "src/kernel.py").write_text("old\n", encoding="utf-8")
+    _session_framework_root(monkeypatch, active_root)
 
     entry = {
         "patch_path": str(patch),
@@ -1472,6 +1489,66 @@ def test_kernel_target_uses_the_recorded_root_not_the_session_one(tmp_path, monk
     assert coord.phase_prelude._resolve_kernel_target_paths(entry) == [str(recorded_target)]
     assert "resolution_error" not in entry
     assert "resolution_reason" not in entry
+
+
+@pytest.mark.parametrize("session_names_a_root", [True, False], ids=["another-checkout", "no-session-root"])
+def test_kernel_target_outside_the_session_framework_root_is_refused(tmp_path, monkeypatch, session_names_a_root):
+    """The recorded root is a path another session published; a target outside this session's tree is not taken."""
+    coord = _make_coord(tmp_path)
+    active_root = tmp_path / "active"
+    active_root.mkdir()
+    patch, _target = _recorded_kernel(tmp_path, tmp_path / "recorded")
+    _session_framework_root(monkeypatch, active_root if session_names_a_root else None)
+    # A root that names nothing resolves to the working directory, which here holds the recorded checkout.
+    monkeypatch.chdir(tmp_path)
+
+    entry = {"patch_path": str(patch), "apply_root": str(tmp_path / "recorded")}
+
+    assert coord.phase_prelude._resolve_kernel_target_paths(entry) == []
+    assert "outside the Session framework root" in entry["resolution_error"]
+
+
+def test_kernel_target_reached_through_a_symlink_out_of_the_recorded_root_is_refused(tmp_path, monkeypatch):
+    """A link inside the checkout does not carry the patch to a file outside it."""
+    coord = _make_coord(tmp_path)
+    recorded_root = tmp_path / "framework"
+    recorded_root.mkdir()
+    patch, _escaped_target = _recorded_kernel(tmp_path, tmp_path / "escaped")
+    (recorded_root / "src").symlink_to(tmp_path / "escaped/src", target_is_directory=True)
+    _session_framework_root(monkeypatch, recorded_root)
+
+    entry = {"patch_path": str(patch), "apply_root": str(recorded_root)}
+
+    assert coord.phase_prelude._resolve_kernel_target_paths(entry) == []
+    assert "escapes" in entry["resolution_error"]
+
+
+def test_a_kernel_item_outside_the_session_framework_root_is_deferred_before_anything_is_patched(tmp_path, monkeypatch):
+    """The check runs ahead of the snapshot and the apply, so a refused item leaves its file and the plan clean."""
+    coord = _make_coord(tmp_path)
+    active_root = tmp_path / "active"
+    active_root.mkdir()
+    patch, target = _recorded_kernel(tmp_path, tmp_path / "recorded")
+    _session_framework_root(monkeypatch, active_root)
+    plan = [
+        {
+            "column": "rewrite",
+            "meta": {"kernel_name": "k1"},
+            "recipe_row": {},
+            "patch_path": str(patch),
+            "apply_root": str(tmp_path / "recorded"),
+        }
+    ]
+
+    outcome = coord.phase_prelude._apply_warm_kernel_plan(plan)
+
+    assert target.read_text(encoding="utf-8") == "old\n"
+    assert plan[0]["decision"] == "DEFERRED"
+    assert plan[0]["apply_result"]["status"] == "skipped"
+    assert "outside the Session framework root" in plan[0]["apply_result"]["reason"]
+    assert (outcome["status"], outcome["deferred"]) == ("loaded", 1)
+    assert outcome["pending"] == outcome["applied"] == outcome["snapshots"] == []
+    assert not (coord.session_dir / "runtime" / "warm_kernel_snapshots").exists()
 
 
 def test_kernel_item_recording_no_root_is_refused(tmp_path):
@@ -1751,173 +1828,27 @@ async def test_prelude_initial_analysis_runs_when_the_budget_covers_it(tmp_path)
     assert coord.shared_state.auto_roofline_pending_task_id
 
 
-def test_prelude_bootstrap_runs_on_positive_baseline(tmp_path):
+def test_prelude_bootstrap_runs_after_a_promoted_baseline(tmp_path):
     coord = _make_coord(tmp_path)
-    assert coord.writeback._should_run_prelude_bootstrap(600.0) is True
+    assert coord.writeback._should_run_prelude_bootstrap() is True
 
 
 @pytest.mark.parametrize(
-    ("state", "tput"),
+    "state",
     [
-        pytest.param({}, 0.0, id="zero-throughput"),
-        pytest.param({}, None, id="no-throughput"),
-        pytest.param({"auto_roofline_pending_task_id": "task-roofline"}, 600.0, id="roofline-pending"),
-        pytest.param({"stop_reason": "baseline_accuracy_failed"}, 600.0, id="stop-pending"),
+        pytest.param({"auto_roofline_pending_task_id": "task-roofline"}, id="roofline-pending"),
+        pytest.param({"stop_reason": "baseline_accuracy_failed"}, id="stop-pending"),
     ],
 )
-def test_prelude_bootstrap_skipped(tmp_path, state, tput):
-    """No bootstrap without a positive throughput, while a roofline is pending, or once a stop is pending.
+def test_prelude_bootstrap_skipped(tmp_path, state):
+    """No bootstrap while a roofline is pending, or once a stop is pending.
 
     A baseline that halted the run must not enqueue/dispatch any post-baseline bootstrap work before the halt fires.
     """
     coord = _make_coord(tmp_path)
     for name, value in state.items():
         setattr(coord.shared_state, name, value)
-    assert coord.writeback._should_run_prelude_bootstrap(tput) is False
-
-
-def test_inject_warm_recipe_history_skips_when_no_recipe(tmp_path):
-    """No warm_start_recipe → nothing to inject; flag still flipped to prevent retries."""
-    coord = _make_coord(tmp_path, warm_start_recipe={})
-    coord.shared_state.explore_search = {}
-    added = coord.phase_prelude.inject_warm_recipe_history_into_ledger()
-    assert added == 0
-    assert coord.shared_state.warm_history_injected is True
-    assert coord.shared_state.explore_search.get("rejected", []) == []
-
-
-def test_inject_warm_recipe_history_adds_what_failed_rows(tmp_path):
-    """Every what_failed row carries a canonical fingerprint into the rejected ledger, with ``source=warm_start_recipe``."""
-    recipe = _warm_recipe_t1(
-        what_failed=[
-            {
-                "name": "fp4_kv_cache",
-                "extra_server_args": "--kv-cache-dtype fp4",
-                "extra_envs": {},
-                "gain_pct": -8.0,
-                "error_class": "regress",
-            },
-            {
-                "name": "tilelang_mla",
-                "extra_server_args": "",
-                "extra_envs": {"SGLANG_HACK_FLASHMLA_BACKEND": "tilelang"},
-                "gain_pct": None,
-                "error_class": "crash",
-            },
-        ],
-    )
-    coord = _make_coord(tmp_path, warm_start_recipe=recipe)
-    coord.shared_state.explore_search = {}
-    added = coord.phase_prelude.inject_warm_recipe_history_into_ledger()
-    assert added == 2
-    rejected = coord.shared_state.explore_search["rejected"]
-    assert len(rejected) == 2
-    for row in rejected:
-        assert isinstance(row.get("fingerprint"), str) and len(row["fingerprint"]) == 16
-        assert row["reason"] == "warm_recipe_what_failed"
-        assert row["source"] == "warm_start_recipe"
-        assert row["source_tier"] == "exact"
-    assert any(r["error_class"] == "regress" for r in rejected)
-    assert any(r["error_class"] == "crash" for r in rejected)
-    assert coord.shared_state.warm_history_injected is True
-
-
-def test_inject_warm_recipe_history_v2_arbor_top_level(tmp_path):
-    """Regression: the injector must read v2 ``what_failed`` at the TOP LEVEL, else negative-history injection no-ops."""
-    recipe = {
-        "tier": "exact",
-        "confidence": 1.0,
-        "recipe": {
-            "canonical_id": "inference:deepseek-r1:mi300x:sglang:0.4.5:fp8",
-            "model": "deepseek-r1",
-            "what_failed": [
-                {
-                    "name": "fp4_kv_cache",
-                    "extra_server_args": "--kv-cache-dtype fp4",
-                    "extra_envs": {},
-                    "gain_pct": -8.0,
-                    "error_class": "regress",
-                },
-            ],
-        },
-    }
-    coord = _make_coord(tmp_path, warm_start_recipe=recipe)
-    coord.shared_state.explore_search = {}
-    added = coord.phase_prelude.inject_warm_recipe_history_into_ledger()
-    assert added == 1, "v2 arbor top-level what_failed not read"
-    rejected = coord.shared_state.explore_search["rejected"]
-    assert len(rejected) == 1
-    assert rejected[0]["source"] == "warm_start_recipe"
-
-
-def test_inject_warm_recipe_history_is_idempotent(tmp_path):
-    """Resume safety: re-invoking the injector after the one-shot flag is set must not re-append rows."""
-    recipe = _warm_recipe_t1(
-        what_failed=[
-            {
-                "name": "x",
-                "extra_server_args": "--bad-flag",
-                "extra_envs": {},
-                "gain_pct": -10.0,
-            }
-        ],
-    )
-    coord = _make_coord(tmp_path, warm_start_recipe=recipe)
-    coord.shared_state.explore_search = {}
-    coord.phase_prelude.inject_warm_recipe_history_into_ledger()
-    first = list(coord.shared_state.explore_search["rejected"])
-    added = coord.phase_prelude.inject_warm_recipe_history_into_ledger()
-    assert added == 0
-    assert coord.shared_state.explore_search["rejected"] == first
-
-
-def test_inject_warm_recipe_history_dedupes_with_existing_ledger(tmp_path):
-    """A ledger row with the same fingerprint is not duplicated."""
-    from hyperloom.inference_optimizer.canonical_fingerprint import (
-        canonical_fingerprint,
-    )
-
-    failed_args = "--kv-cache-dtype fp4"
-    pre_existing_fp = canonical_fingerprint(failed_args, {})
-    recipe = _warm_recipe_t1(
-        what_failed=[
-            {
-                "name": "fp4",
-                "extra_server_args": failed_args,
-                "extra_envs": {},
-                "gain_pct": -8.0,
-            }
-        ],
-    )
-    coord = _make_coord(tmp_path, warm_start_recipe=recipe)
-    coord.shared_state.explore_search = {
-        "rejected": [
-            {
-                "name": "explore_round_1_X",
-                "fingerprint": pre_existing_fp,
-                "reason": "stack_unstable",
-            }
-        ],
-    }
-    added = coord.phase_prelude.inject_warm_recipe_history_into_ledger()
-    assert added == 0
-    assert len(coord.shared_state.explore_search["rejected"]) == 1
-    assert coord.shared_state.explore_search["rejected"][0]["reason"] == "stack_unstable"
-
-
-def test_inject_warm_recipe_history_skips_empty_rows(tmp_path):
-    """A what_failed row with neither args nor envs is unreplayable; skip silently."""
-    recipe = _warm_recipe_t1(
-        what_failed=[
-            {"name": "bogus", "extra_server_args": "", "extra_envs": {}},
-            {"name": "real", "extra_server_args": "--actual-flag", "extra_envs": {}},
-        ],
-    )
-    coord = _make_coord(tmp_path, warm_start_recipe=recipe)
-    coord.shared_state.explore_search = {}
-    added = coord.phase_prelude.inject_warm_recipe_history_into_ledger()
-    assert added == 1
-    assert coord.shared_state.explore_search["rejected"][0]["name"] == "real"
+    assert coord.writeback._should_run_prelude_bootstrap() is False
 
 
 @pytest.mark.asyncio

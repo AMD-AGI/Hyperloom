@@ -5,12 +5,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from hyperloom.inference_optimizer.session.paths import asset_prompt_references_dir
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.phases import machine_state as _ps
-from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.prompts.prompt_builder import (
     _section_reference_index,
     build_orchestration_prompt,
@@ -19,7 +20,6 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     PromptCycle,
     SessionContext,
 )
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mcp_context_tools import (
     CONTEXT_TOOL_NAMES,
     ContextProvider,
@@ -51,8 +51,8 @@ def file_reader(refs_dir):
 
     return ContextProvider(
         shared_state=None,
+        session_dir=Path("/nonexistent-session"),
         inbox_reader=lambda since_seq: "",
-        analysis_reader=lambda: "",
         recent_outcomes_reader=lambda top_k: "",
         running_tasks_reader=lambda: "",
         reference_reader=_read,
@@ -150,12 +150,12 @@ def test_read_reference_in_context_tool_names():
 
 
 def test_read_reference_granted_to_orchestration():
-    """PolicyGate must list read_reference in orchestration's allowed tools."""
+    """Orchestration's tool grant lists read_reference."""
+    from hyperloom.orchestrator.mcp_tool_names import ORCHESTRATION_TOOL_GRANT
     from hyperloom.orchestrator.roles.mcp_context_tools import qualified_context_tool_name
 
-    gate = PolicyGate(role_registry=default_role_registry())
     # Under the registered name: that is what the SDK mounts and the prompt names.
-    assert qualified_context_tool_name("read_reference") in gate.allowed_tools_for_agent("orchestration")
+    assert qualified_context_tool_name("read_reference") in ORCHESTRATION_TOOL_GRANT
 
 
 def test_read_reference_returns_doc(refs_dir, file_reader):

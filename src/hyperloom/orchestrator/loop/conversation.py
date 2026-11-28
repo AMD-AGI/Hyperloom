@@ -16,24 +16,21 @@ from ..phases import dispatch_order
 from ..phases import machine_state as _phase_state
 from ..phases import phase_transitions
 from ..phases.proposal_bench import carried_fingerprints, explore_grid_fingerprints, waiting_proposal_rows
-from ..policy.custom_specialist import custom_only_framework
 from ..policy.projection import resource_pools_summary
 from ..specialists.in_flight import in_flight_domains
 from ..specialists.reap_watch import newest_activity, specialist_activity_paths
 from ..roles.base import BackendTurnResult
 from ..bus.message_bus import Message
-from hyperloom.inference_optimizer.tracelens_md import strip_base64_data_urls
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
 from ..state.shared_state import KbInjection
 from hyperloom_common.coerce import to_str_list, to_unix
 from hyperloom.common.env_safety import redact_secret_values
-from hyperloom.common.prompt_safety import defang_prompt_structure as _defang_prompt_structure
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
 
-from ..state.task_registry import Task
+from ..state.task_registry import Task, TaskOutcome
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
-from ..collaborator import CoordinatorCollaborator
+from ..collaborator import ORCHESTRATION_AGENT, CoordinatorCollaborator
 import logging as _logging
 
 if TYPE_CHECKING:
@@ -48,19 +45,8 @@ _RECENT_OUTCOMES_VARIANT_ROWS = 12
 _RECENT_OUTCOMES_LINE_CAP = 120
 
 # Result keys surfaced in delegated_result inbox line; first match wins per group.
-_OUTCOME_GAIN_KEYS: tuple[str, ...] = (
-    "validated_gain_pct",
-    "gain_pct",
-    "predicted_gain_pct",
-    "delta_pct",
-)
-_OUTCOME_TPUT_KEYS: tuple[str, ...] = (
-    "tokens_per_s",
-    "tput",
-    "throughput",
-    "tput_tok_s",
-)
-_OUTCOME_STATUS_KEYS: tuple[str, ...] = ("status", "verdict", "outcome", "runner_status")
+_OUTCOME_GAIN_KEYS: tuple[str, ...] = ("gain_pct", "delta_pct")
+_OUTCOME_STATUS_KEYS: tuple[str, ...] = ("status", "runner_status")
 # Notes rendered per inbox line.
 _OUTCOME_NOTES_MAX: int = 3
 # A skip detail names the twin or the dead variant first and its cause after; this keeps the head of the cause.
@@ -127,17 +113,6 @@ def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
     return None
 
 
-def _defang_alert_payload(value: Any) -> Any:
-    """Recursively defang string leaves of an alert payload (keys untouched)."""
-    if isinstance(value, str):
-        return _defang_prompt_structure(value)
-    if isinstance(value, dict):
-        return {k: _defang_alert_payload(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_defang_alert_payload(v) for v in value]
-    return value
-
-
 def _variant_failure_rows(result: dict[str, Any], max_variant_rows: int) -> list[str]:
     """Indented rows for the unmeasured per-variant outcomes of a delegated result."""
     pvos = result.get("per_variant_outcomes")
@@ -168,21 +143,28 @@ def _variant_skip_rows(result: dict[str, Any], max_variant_rows: int) -> list[st
     return rows
 
 
-def _format_delegated_result(head: str, payload: dict[str, Any], max_variant_rows: int) -> str:
-    """Render a delegated_result entry: one header line plus a row per unmeasured variant."""
-    raw_result = payload.get("result")
-    result: dict[str, Any] = raw_result if isinstance(raw_result, dict) else {}
+def _announced_task_ids(messages: list["Message"]) -> list[str]:
+    """The tasks whose results ``messages`` announce."""
+    return [str(m.payload.get("task_id") or "") for m in messages if m.topic == "delegated_result"]
+
+
+def _format_delegated_result(
+    head: str, payload: dict[str, Any], outcome: TaskOutcome | None, max_variant_rows: int
+) -> str:
+    """Render a delegated_result entry: one header line plus a row per unmeasured variant.
+
+    The event names the task; what the task returned is ``outcome``, read from its row.
+    """
+    result: dict[str, Any] = outcome.result if outcome is not None else {}
     # Only a specialist result carries this key, so its presence is the test.
     done: dict[str, Any] = result.get("specialist_done") or {}
     parts = [head, f"kind={payload.get('kind')!r}", f"state={payload.get('state')!r}"]
-    for label, value, quoted in (
-        ("status", _first_present(result, _OUTCOME_STATUS_KEYS), True),
-        ("kept", result.get("kept"), True),
-        ("gain", _first_present(result, _OUTCOME_GAIN_KEYS), False),
-        ("tput", _first_present(result, _OUTCOME_TPUT_KEYS), False),
-    ):
-        if value is not None:
-            parts.append(f"{label}={value!r}" if quoted else f"{label}={value}")
+    status = _first_present(result, _OUTCOME_STATUS_KEYS)
+    if status is not None:
+        parts.append(f"status={status!r}")
+    gain = _first_present(result, _OUTCOME_GAIN_KEYS)
+    if gain is not None:
+        parts.append(f"gain={gain}")
     summary = str(done.get("summary") or "").strip()
     if summary:
         parts.append(f"summary={summary[:400]!r}")
@@ -194,7 +176,7 @@ def _format_delegated_result(head: str, payload: dict[str, Any], max_variant_row
         if items:
             parts.append(f"{label}={len(items)}")
     # Executors that never raise report the failure inside the result envelope, leaving the top-level error None.
-    error = payload.get("error") or result.get("error")
+    error = (outcome.error if outcome is not None else None) or result.get("error")
     if error:
         parts.append(f"error={str(error)[:200]!r}")
     notes = [str(n) for n in result.get("notes") or () if n]
@@ -209,23 +191,20 @@ def _format_delegated_result(head: str, payload: dict[str, Any], max_variant_row
     )
 
 
-def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
-    """Render one inbox ``Message`` as a compact, high-signal line."""
+def _format_inbox_event(m: "Message", outcomes: dict[str, TaskOutcome], *, max_variant_rows: int = 3) -> str:
+    """Render one inbox ``Message`` as a compact, high-signal line.
+
+    ``outcomes`` holds what each task the messages announce returned, by task id.
+    """
     topic = (m.topic or "").strip()
     payload = m.payload if isinstance(m.payload, dict) else {}
-    # Canonical inbox header ordering that downstream parsers anchor on.
-    msg_id = f"msg_id={m.msg_id} " if getattr(m, "msg_id", None) else ""
-    head = f"seq={m.seq} {msg_id}from={m.from_agent} topic={topic}"
+    head = f"seq={m.seq} from={m.from_agent} topic={topic}"
 
     if topic == "delegated_result":
-        return _format_delegated_result(head, payload, max_variant_rows)
+        outcome = outcomes.get(str(payload.get("task_id") or ""))
+        return _format_delegated_result(head, payload, outcome, max_variant_rows)
     if topic == "observation" and payload.get("kind") is not None:
         return f"{head} kind={payload.get('kind')!r} payload={payload}"
-    if topic == "alert":
-        # Alert payloads can embed attacker-influenceable server.log excerpts; defang string leaves so a log line
-        # can't inject prompt structure.
-        return f"{head} payload={_defang_alert_payload(payload)}"
-
     return f"{head} payload={payload}"
 
 
@@ -243,7 +222,6 @@ _ADVISORY_BLOCKS: tuple[_AdvisoryRow, ...] = (
     ("=== Intervention mix (telemetry) ===", lambda c: c.shared_state.to_intervention_mix_summary()),
     ("=== Bottleneck redirect (advisory) ===", lambda c: c._bottleneck_redirect_advisory_block()),
     ("=== Acceptance threshold (advisory) ===", lambda c: c._acceptance_threshold_advisory_block()),
-    ("=== Discarded escalation hint (advisory) ===", lambda c: c._discarded_escalate_hint_advisory_block()),
 )
 
 
@@ -309,8 +287,8 @@ class ConversationCollaborator(CoordinatorCollaborator):
         super().__init__(coordinator)
         # The Experience KB read rendered into the latest orchestration prompt; proposals emitted on that tick cite it.
         self.kb_last_read: ExperienceKBEvidence | None = None
-        # Per-agent seq of the last message its prompt rendered.
-        self._rendered_cursor: dict[str, int] = {}
+        # Seq of the last message the latest prompt rendered; None until one renders a message.
+        self._rendered_cursor: int | None = None
         # The phase and the queued and running task ids Orchestration's last settled turn left, and when it settled.
         self._settled_view: tuple[str, frozenset[str]] | None = None
         self._settled_at = 0.0
@@ -352,7 +330,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
 
     def attach_orchestration_context_tools(self) -> None:
         """Bind a read-only ContextProvider to the orchestration backend (no-op without setter)."""
-        backend = self.backends.get("orchestration")
+        backend = self.backends[ORCHESTRATION_AGENT]
         setter = getattr(backend, "set_context_provider", None)
         if setter is None:
             return
@@ -360,8 +338,8 @@ class ConversationCollaborator(CoordinatorCollaborator):
 
         provider = ContextProvider(
             shared_state=self.shared_state,
+            session_dir=self.session_dir,
             inbox_reader=self._context_inbox_reader,
-            analysis_reader=self._context_analysis_reader,
             recent_outcomes_reader=self._context_recent_outcomes_reader,
             running_tasks_reader=self._context_running_tasks_reader,
             reference_reader=self._context_reference_reader,
@@ -387,12 +365,12 @@ class ConversationCollaborator(CoordinatorCollaborator):
 
     def _context_inbox_reader(self, since_seq: int = 0) -> str:
         """Synchronous projection of the orchestration inbox tail (sync SQLite path)."""
-        msgs = self.bus.inbox_context_sync("orchestration", after_seq=int(since_seq or 0))
+        msgs = self.bus.inbox_context_sync(ORCHESTRATION_AGENT, after_seq=int(since_seq or 0))
         if not msgs:
             return "(no inbox events)"
 
-        lines = [_format_inbox_event(m) for m in msgs]
-        return "\n".join(lines)
+        outcomes = self.tasks.outcomes_sync(_announced_task_ids(msgs))
+        return "\n".join(_format_inbox_event(m, outcomes) for m in msgs)
 
     def _context_recent_outcomes_reader(self, top_k: int = 8) -> str:
         """Synchronous projection of recent action outcomes."""
@@ -404,8 +382,8 @@ class ConversationCollaborator(CoordinatorCollaborator):
         msgs = newest_first[::-1]
 
         header = "=== Recent action outcomes (newest last) ==="
-        body_lines: list[str] = []
-        body_lines.extend(_format_inbox_event(m, max_variant_rows=_RECENT_OUTCOMES_VARIANT_ROWS) for m in msgs)
+        outcomes = self.tasks.outcomes_sync(_announced_task_ids(msgs))
+        body_lines = [_format_inbox_event(m, outcomes, max_variant_rows=_RECENT_OUTCOMES_VARIANT_ROWS) for m in msgs]
         rendered = "\n".join(body_lines).splitlines()
         if len(rendered) > _RECENT_OUTCOMES_LINE_CAP:
             rendered = rendered[-_RECENT_OUTCOMES_LINE_CAP:]
@@ -506,29 +484,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
             return None
         return max(0.0, now_unix - newest)
 
-    def _context_analysis_reader(self) -> str:
-        """Return the latest TraceLens analysis.md snapshot text."""
-        lta = self.shared_state.last_trace_analyze or {}
-        text = lta.get("analysis_md_text") or ""
-        if text:
-            return strip_base64_data_urls(text)
-        path = str(lta.get("analysis_md_path") or "")
-        if path:
-            try:
-                from pathlib import Path as _Path
-
-                return strip_base64_data_urls(_Path(path).read_text(encoding="utf-8"))
-            except OSError as exc:
-                return f"(analysis.md unreadable at {path}: {exc!r})"
-        return "(no analysis.md snapshot yet)"
-
-    def record_reactor_conversation(
-        self,
-        agent_name: str,
-        result: BackendTurnResult,
-        *,
-        context: str = "",
-    ) -> None:
+    def record_reactor_conversation(self, result: BackendTurnResult, *, context: str = "") -> None:
         """Append one ``conversations.jsonl`` row for a reactor turn, with ``context`` ahead of the backend's prompt."""
         metadata = result.metadata or {}
         prompt = metadata.get("prompt")
@@ -537,11 +493,11 @@ class ConversationCollaborator(CoordinatorCollaborator):
             return
         record = ConversationRecord(
             session_id=self.session_dir.name,
-            component=agent_name,
+            component=ORCHESTRATION_AGENT,
             # Same turn metadata the token row is built from, so both halves carry the backend's call_id when it
             # stamped one.
             call_id=metadata.get("call_id"),
-            role=agent_name,
+            role=ORCHESTRATION_AGENT,
             tick=int(self.shared_state.tick or 0),
             phase=(self.shared_state.phase or "") or None,
             model=metadata.get("model"),
@@ -600,30 +556,31 @@ class ConversationCollaborator(CoordinatorCollaborator):
                 sections.append(trajectory_block)
         return sections
 
-    async def _render_inbox_sections(self, agent_name: str) -> list[str]:
-        """Render the inbox tail since this agent's cursor, oldest first, and note what it showed.
+    async def _render_inbox_sections(self) -> list[str]:
+        """Render the inbox tail since the read cursor, oldest first, and note what it showed.
 
         What the character budget leaves out waits for the next turn.
         """
-        cursor = await self.cursors.load(agent_name)
-        unread = await self.bus.replay_for(agent_name, after_seq=cursor.last_processed_seq)
-        inbox_lines = _fit_to_budget([f"  {_format_inbox_event(m)}" for m in unread], _INBOX_PROMPT_CHARS)
+        cursor = await self.cursors.load(ORCHESTRATION_AGENT)
+        unread = await self.bus.replay_for(ORCHESTRATION_AGENT, after_seq=cursor.last_processed_seq)
+        outcomes = await self.tasks.outcomes(_announced_task_ids(unread))
+        inbox_lines = _fit_to_budget([f"  {_format_inbox_event(m, outcomes)}" for m in unread], _INBOX_PROMPT_CHARS)
         read = unread[: len(inbox_lines)]
         last_seq = cursor.last_processed_seq
         if read:
             last_seq = int(read[-1].seq)
-            self._rendered_cursor[agent_name] = last_seq
+            self._rendered_cursor = last_seq
         if not inbox_lines:
-            return [f"=== Inbox for {agent_name} ===", "(no new messages)"]
-        sections = [f"=== Inbox for {agent_name} (newest last) ===", *inbox_lines]
+            return [f"=== Inbox for {ORCHESTRATION_AGENT} ===", "(no new messages)"]
+        sections = [f"=== Inbox for {ORCHESTRATION_AGENT} (newest last) ===", *inbox_lines]
         if len(read) < len(unread):
             sections.append(
                 f"  (+{len(unread) - len(read)} newer messages after seq={last_seq} held for the next turn)"
             )
         return sections
 
-    async def compose_prompt(self, agent_name: str) -> ComposedPrompt:
-        """Compose the prompt for *agent_name*: the session context, and the per-tick blocks ending with the inbox tail."""
+    async def compose_prompt(self) -> ComposedPrompt:
+        """Compose Orchestration's prompt: the session context, and the per-tick blocks ending with the inbox tail."""
         context: list[str] = [f"SESSION_DIR={self.session_dir}"]
         turn: list[str] = []
 
@@ -632,28 +589,26 @@ class ConversationCollaborator(CoordinatorCollaborator):
             turn.append("=== Phase ===")
             turn.append(phase_block)
 
-        if agent_name == "orchestration":
-            turn.append("=== Mission progress ===")
-            turn.append(self.shared_state.to_mission_summary())
-            deadline = self._coord.run_deadline
-            started = self._coord.run_started_monotonic
-            if deadline is not None and started is not None:
-                remaining_min = max(0.0, deadline.remaining() / 60.0)
-                turn.append("=== Time budget ===")
+        turn.append("=== Mission progress ===")
+        turn.append(self.shared_state.to_mission_summary())
+        deadline = self._coord.run_deadline
+        if deadline is not None:
+            remaining_min = max(0.0, deadline.remaining() / 60.0)
+            turn.append("=== Time budget ===")
+            turn.append(
+                f"elapsed={self.shared_state.elapsed_minutes():.1f}min  remaining={remaining_min:.1f}min  "
+                f"budget={self.shared_state.max_minutes or 0}min  "
+                f"closing_phase={self.shared_state.closing_phase}"
+            )
+            if remaining_min <= 5.0 and not self.shared_state.closing_phase:
                 turn.append(
-                    f"elapsed={(time.monotonic() - started) / 60.0:.1f}min  remaining={remaining_min:.1f}min  "
-                    f"budget={self.shared_state.max_minutes or 0}min  "
-                    f"closing_phase={self.shared_state.closing_phase}"
+                    "WARNING: < 5 min remaining. Avoid new `explore` rounds "
+                    "(which bench every variant on the stack) — they will "
+                    "likely be cut by the deadline. The Coordinator will "
+                    "auto-enqueue `report` when the session closes."
                 )
-                if remaining_min <= 5.0 and not self.shared_state.closing_phase:
-                    turn.append(
-                        "WARNING: < 5 min remaining. Avoid new `explore` rounds "
-                        "(which bench every variant on the stack) — they will "
-                        "likely be cut by the deadline. The Coordinator will "
-                        "auto-enqueue `report` when the session closes."
-                    )
         turn.append("=== Tick ===")
-        turn.append(self.shared_state.to_tick_summary())
+        turn.append(f"tick={int(self.shared_state.tick or 0)}")
         # The session ledger moves with every action that lands, so it belongs to
         # the turn: carried in ``context`` it would rewrite the cached prefix the
         # stable blocks below sit in, on nearly every tick.
@@ -666,66 +621,57 @@ class ConversationCollaborator(CoordinatorCollaborator):
         # if the session were unconstrained. Pure string assembly, no I/O.
         context.extend(self.shared_state.to_constraint_sections())
         context.append("=== Resource pools ===")
-        context.append(resource_pools_summary(self.shared_state))
-        if agent_name == "orchestration":
-            context.extend(self._orchestration_context_sections())
-            # A task finishing or a plateau count lands between
-            # two ticks, so these blocks follow the ledger into the turn: the cached
-            # prefix ends above them and holds for the session.
-            turn.extend(await self._orchestration_turn_sections())
+        context.append(
+            resource_pools_summary(
+                self.shared_state,
+                serving_disjoint_pool=self.gpu_specialist_pool,
+                whole_machine_pool=self.framework_gpu_pool,
+            )
+        )
+        context.extend(self._orchestration_context_sections())
+        # A task finishing or a plateau count lands between
+        # two ticks, so these blocks follow the ledger into the turn: the cached
+        # prefix ends above them and holds for the session.
+        turn.extend(await self._orchestration_turn_sections())
 
-        turn.extend(await self._render_inbox_sections(agent_name))
+        turn.extend(await self._render_inbox_sections())
 
         return ComposedPrompt(context="\n".join(context), turn="\n".join(turn))
 
-    async def admit_turn(self, agent_name: str, now_unix: float) -> bool:
-        """Whether ``agent_name`` takes a turn this tick.
+    async def admit_turn(self, now_unix: float) -> bool:
+        """Whether Orchestration takes a turn this tick.
 
-        Orchestration sits out custom-only FRAMEWORK_AGENT, where all it may emit is denied. Elsewhere it takes a turn
-        when the phase or the queued and running tasks differ from what its last settled turn left, when its inbox holds
-        a message that asks something of it, or once the heartbeat elapses.
+        It sits out custom-only FRAMEWORK_AGENT, which the Coordinator runs on the custom specialist alone. Elsewhere it
+        takes a turn when the phase or the queued and running tasks differ from what its last settled turn left, when
+        its inbox holds a message that asks something of it, or once the heartbeat elapses.
         """
-        if agent_name != "orchestration":
-            return True
-        if custom_only_framework(self.shared_state):
+        state = self.shared_state
+        if state.custom_specialist_only and (state.phase or "").upper() == _phase_state.PHASE_FRAMEWORK_AGENT:
             return False
         if now_unix - self._settled_at >= _ORCHESTRATION_HEARTBEAT_SEC:
             return True
         if await self._orchestration_view() != self._settled_view:
             return True
-        cursor = await self.cursors.load(agent_name)
-        return await self.bus.has_actionable_inbox(agent_name, after_seq=cursor.last_processed_seq)
+        cursor = await self.cursors.load(ORCHESTRATION_AGENT)
+        return await self.bus.has_actionable_inbox(ORCHESTRATION_AGENT, after_seq=cursor.last_processed_seq)
 
     async def _orchestration_view(self) -> tuple[str, frozenset[str]]:
         return (self.shared_state.phase or "").upper(), await self.tasks.active_task_ids()
 
-    async def compose_turn(self, agent_name: str, backend: Any) -> TurnPrompt:
+    async def compose_turn(self, backend: Any) -> TurnPrompt:
         """The system prompt and prompt for one turn; a backend that caches its system prompt gets the session context in it."""
-        system_prompt = await self.load_system_prompt(agent_name)
-        composed = await self.compose_prompt(agent_name)
+        system_prompt = self.orch_prompt.get(ORCHESTRATION_AGENT)
+        composed = await self.compose_prompt()
         if getattr(backend, "system_prompt_cached", False):
             return TurnPrompt(f"{system_prompt}\n\n{composed.context}", composed.turn, composed.context)
         return TurnPrompt(system_prompt, composed.text, "")
 
-    async def settle_turn(self, agent_name: str) -> None:
-        """Advance the agent's read cursor to the last message its prompt rendered; for Orchestration, note what it left."""
-        seq = self._rendered_cursor.get(agent_name)
-        if seq is not None:
-            await self.cursors.advance(agent_name, seq=seq)
-        if agent_name == "orchestration":
-            self._settled_view = await self._orchestration_view()
-            self._settled_at = time.time()
-
-    async def load_system_prompt(self, agent_name: str) -> str:
-        """Load the system prompt for an agent, honoring overrides."""
-        override = self.orch_prompt.get(agent_name)
-        if override is not None:
-            return override
-        role = self.role_registry[agent_name]
-        try:
-            return role.load_system_prompt()
-        except FileNotFoundError:
-            return f"(no system prompt for {agent_name})"
+    async def settle_turn(self) -> None:
+        """Advance the read cursor to the last message the prompt rendered, and note what the turn left."""
+        if self._rendered_cursor is not None:
+            await self.cursors.advance(ORCHESTRATION_AGENT, seq=self._rendered_cursor)
+        self._settled_view = await self._orchestration_view()
+        self._settled_at = time.time()
 
     # Advisory prompt blocks (folded in from the former AdvisoryCollaborator).
     def plateau_advisory_block(self) -> str:
@@ -836,8 +782,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
         if cycle < 1:
             return ""
         stable = keep / 2.0
-        search = state.explore_search
-        entries = [*(search.get("tested") or {}).values(), *(search.get("rejected") or [])]
+        entries = list((state.explore_search.get("tested") or {}).values())
         above_bar: list[tuple[str, float]] = []
         below_bar: list[tuple[str, float]] = []
         for e in entries:
@@ -965,22 +910,4 @@ class ConversationCollaborator(CoordinatorCollaborator):
             variants,
             hints,
             primary_gap=primary_gap,
-        )
-
-    def _discarded_escalate_hint_advisory_block(self) -> str:
-        """Render the advisory for an escalate_strategy_change hint that was discarded.
-
-        A phase transition the hint did not drive drops it.
-
-        Returns:
-            The advisory string, or ``""`` when no discarded hint is recorded.
-        """
-        hint = str(self.shared_state.last_discarded_escalate_hint or "")
-        ts = str(self.shared_state.last_discarded_escalate_hint_ts or "")
-        if not hint:
-            return ""
-        return (
-            f"ADVISORY: your escalate_strategy_change hint '{hint}' (at {ts}) was discarded "
-            "because a phase transition it did not drive fired before "
-            "it could be consumed. Re-emit escalate_strategy_change if still needed."
         )

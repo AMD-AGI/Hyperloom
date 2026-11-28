@@ -17,7 +17,6 @@ from hyperloom.orchestrator.policy.gate import (
     research_lane_ceiling,
 )
 from hyperloom.orchestrator.policy.projection import gpu_specialist_ceiling
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
 
 
 # -- detect_gpu_count ------------------------------------------------------
@@ -84,7 +83,7 @@ def test_gpu_specialist_ceiling_shared_state_invalid() -> None:
 
 # -- PolicyGate path helpers ----------------------------------------------
 def _gate(session_dir: Path | None = None) -> PolicyGate:
-    return PolicyGate(role_registry=default_role_registry(), session_dir=session_dir)
+    return PolicyGate(session_dir=session_dir)
 
 
 def test_path_under_session_inside_and_escape(tmp_path: Path) -> None:

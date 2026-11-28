@@ -1,14 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Agent role + PolicyGate tests."""
+"""PolicyGate and orchestration tool-grant tests."""
 
 from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.mcp_tool_names import qualified_context_tool_name
-from hyperloom.orchestrator.roles.agent_role import AgentRole, default_role_registry
+from hyperloom.orchestrator.mcp_tool_names import ORCHESTRATION_TOOL_GRANT, qualified_context_tool_name
 from hyperloom.inference_optimizer.protocol.intent import (
     EXTEND_LEASE_MAX_SEC,
     Intent,
@@ -23,7 +22,7 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 # PolicyGate validation
 @pytest.fixture
 def gate() -> PolicyGate:
-    return PolicyGate(role_registry=default_role_registry())
+    return PolicyGate()
 
 
 def test_legacy_watchdog_options_do_not_change_resumed_measurements():
@@ -62,20 +61,9 @@ def test_legacy_watchdog_options_do_not_change_resumed_measurements():
     assert {name: restored[name] for name in persisted} == persisted
 
 
-def test_gate_unknown_agent_rejected(gate):
-    with pytest.raises(PolicyDenied, match="unknown agent"):
-        gate.validate_intent("ghost", Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat"}))
-
-
 @pytest.mark.parametrize(
     ("agent", "intent_type", "payload"),
     [
-        pytest.param(
-            "orchestration",
-            IntentType.PROPOSE_ACTION,
-            {"action_name": "baseline", "predicted_gain_pct": 0.0},
-            id="orchestration-propose_action",
-        ),
         pytest.param("orchestration", IntentType.DELEGATE, {"action_name": "baseline"}, id="orchestration-delegate"),
         pytest.param(
             "orchestration",
@@ -96,14 +84,9 @@ def test_gate_allows_an_intent_the_role_owns(gate, agent, intent_type, payload):
     gate.validate_intent(agent, Intent(type=intent_type, payload=payload))
 
 
-@pytest.mark.parametrize("precision", ["bf16", "fp8"])
-@pytest.mark.parametrize("kernel_optimizer", ["geak", "forge"])
-def test_gate_refuses_a_model_requested_gemm_tuning_run(precision, kernel_optimizer):
-    """Refused by channel, not by applicability."""
-    state = SharedState(
-        phase="KERNEL_AGENT", precision=precision, framework="sglang", kernel_optimizer=kernel_optimizer
-    )
-    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
+def test_gate_refuses_a_model_requested_gemm_tuning_run():
+    """Refused by channel: the gate reads nothing of the session, so no precision or optimizer admits it."""
+    gate = PolicyGate()
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
             "orchestration",
@@ -123,10 +106,9 @@ def test_a_model_requested_kernel_optimization_has_no_handler_to_reach():
     assert "run_optimization" not in COORDINATOR_OWNED_KERNEL_REQUEST_KINDS
 
 
-def test_gate_still_allows_the_model_to_drain_the_keep_queue(monkeypatch):
+def test_gate_still_allows_the_model_to_drain_the_keep_queue():
     """Closing the lanes must not close integrate; draining KEEPs stays its job."""
-    state = SharedState(phase="KERNEL_AGENT", precision="bf16", framework="sglang")
-    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
+    gate = PolicyGate()
     gate.validate_intent(
         "orchestration",
         Intent(
@@ -146,44 +128,6 @@ def test_gate_request_to_a_target_that_answers_no_requests_rejected(gate):
             ),
         )
     assert exc.value.rule == "request_target"
-
-
-_MESSAGING_INTENTS = frozenset({IntentType.SEND_MESSAGE, IntentType.ALERT})
-
-
-@pytest.fixture
-def messaging_only_gate() -> PolicyGate:
-    return PolicyGate(role_registry={"notifier": AgentRole(name="notifier", allowed_intents=_MESSAGING_INTENTS)})
-
-
-@pytest.mark.parametrize(
-    "intent_type",
-    [IntentType.DELEGATE, IntentType.REQUEST, IntentType.PROPOSE_ACTION],
-    ids=lambda intent_type: intent_type.value,
-)
-def test_gate_intent_outside_the_role_set_rejected_by_role(messaging_only_gate, intent_type):
-    with pytest.raises(PolicyDenied) as exc:
-        messaging_only_gate.validate_intent(
-            "notifier",
-            Intent(
-                type=intent_type,
-                payload={"action_name": "baseline"},
-            ),
-        )
-    assert exc.value.rule == "role"
-
-
-def test_gate_role_denial_names_the_intents_the_role_may_emit(messaging_only_gate):
-    with pytest.raises(PolicyDenied) as exc:
-        messaging_only_gate.validate_intent(
-            "notifier",
-            Intent(type=IntentType.DELEGATE, payload={"action_name": "baseline"}),
-        )
-    assert exc.value.rule == "role"
-    assert exc.value.hint
-    for intent_type in _MESSAGING_INTENTS:
-        assert intent_type.value in exc.value.hint
-    assert "delegate" not in exc.value.hint
 
 
 def test_gate_extend_lease_bounds_hint_states_the_step_cap(gate):
@@ -215,16 +159,14 @@ def test_gate_orchestration_prune_branch_requires_family(gate):
     assert exc.value.rule == "payload"
 
 
-# allowed_tools_for_agent
-def test_allowed_tools_claude_returns_emit_intent(gate):
-    assert gate.allowed_tools_for_agent("robustness") == []
+def test_orchestration_tool_grant_names_every_tool_as_the_runtime_registers_it():
     from hyperloom.orchestrator.roles.mcp_context_tools import (
         CONTEXT_TOOL_NAMES,
         CONTEXT_TOOL_QUALIFIED_NAMES,
     )
     from hyperloom.orchestrator.roles.mcp_emit_intent import EMIT_INTENT_TOOL_QUALIFIED
 
-    orch = gate.allowed_tools_for_agent("orchestration")
+    orch = ORCHESTRATION_TOOL_GRANT
     # The grant is both the SDK allow-list and what the prompt advertises, so
     # every MCP tool is named the way the runtime registers it.
     assert orch[0] == EMIT_INTENT_TOOL_QUALIFIED

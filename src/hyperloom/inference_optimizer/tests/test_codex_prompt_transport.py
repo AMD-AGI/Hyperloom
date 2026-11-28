@@ -17,7 +17,6 @@ from hyperloom.common.codex_session import (
     CodexSessionUnavailableError,
 )
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
-from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.prompts.transport import TRANSPORT_STRUCTURED_OUTPUT, TRANSPORT_TOOLS
 from hyperloom.orchestrator.prompts.prompt_builder import (
     build_orchestration_prompt,
@@ -26,7 +25,6 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     PromptCycle,
     SessionContext,
 )
-from hyperloom.orchestrator.roles.agent_role import _ORCHESTRATION_INTENTS, default_role_registry
 from hyperloom.orchestrator.roles.base import BackendError, LLMCallFailed, RetryPolicy
 from hyperloom.orchestrator.roles.codex import CodexBackend
 from hyperloom.orchestrator.mcp_tool_names import (
@@ -34,9 +32,10 @@ from hyperloom.orchestrator.mcp_tool_names import (
     CONTEXT_TOOL_QUALIFIED_NAMES,
     EMIT_INTENT_TOOL_NAME,
     EMIT_INTENT_TOOL_QUALIFIED,
+    ORCHESTRATION_TOOL_GRANT,
     qualified_context_tool_name,
 )
-from hyperloom.orchestrator.roles.mcp_context_tools import CONTEXT_TOOL_SPECS
+from hyperloom.orchestrator.roles.mcp_context_tools import CONTEXT_TOOLS
 from hyperloom.inference_optimizer.session.paths import asset_prompt_references_dir, asset_system_prompts_dir
 
 
@@ -94,9 +93,9 @@ def test_tool_prompt_keeps_the_claude_tool_surface() -> None:
         assert token in prompt, token
 
 
-def test_every_tool_the_prompt_names_is_one_policy_gate_grants() -> None:
-    """The prompt and PolicyGate must describe the same tool surface."""
-    granted = set(PolicyGate(role_registry=default_role_registry()).allowed_tools_for_agent("orchestration"))
+def test_every_tool_the_prompt_names_is_one_orchestration_is_granted() -> None:
+    """The prompt and the tool grant must describe the same tool surface."""
+    granted = set(ORCHESTRATION_TOOL_GRANT)
     prompt = _prompt(TRANSPORT_TOOLS)
     named = {token for token in _TOOL_SURFACE_TOKENS if token != "tool_use" and token in prompt}
     assert named <= granted
@@ -119,8 +118,8 @@ def test_tool_prompt_names_every_mcp_tool_under_its_registered_name() -> None:
 
 def test_tool_descriptions_name_every_mcp_tool_under_its_registered_name() -> None:
     """The SDK shows these beside the allow-list; a bare name there misroutes the call."""
-    for tool_name, description, _schema, _method in CONTEXT_TOOL_SPECS:
-        _assert_mcp_tools_named_as_registered(description, f"the {tool_name} description")
+    for tool_name, tool in CONTEXT_TOOLS.items():
+        _assert_mcp_tools_named_as_registered(tool.description, f"the {tool_name} description")
 
 
 def test_reference_docs_name_every_mcp_tool_under_its_registered_name() -> None:
@@ -145,7 +144,7 @@ def test_backends_declare_their_transport(tmp_path: Path) -> None:
     """The prompt builder picks its rendering from the backend, not the role."""
     from hyperloom.orchestrator.roles.claude import ClaudeBackend
 
-    codex = CodexBackend(allowed_intents=_ORCHESTRATION_INTENTS, cwd=tmp_path / "codex")
+    codex = CodexBackend(cwd=tmp_path / "codex")
     assert codex.transport == TRANSPORT_STRUCTURED_OUTPUT
     assert ClaudeBackend.transport == TRANSPORT_TOOLS
 
@@ -159,7 +158,6 @@ def test_backends_declare_their_transport(tmp_path: Path) -> None:
 
 def _retrying_backend(tmp_path: Path) -> CodexBackend:
     return CodexBackend(
-        allowed_intents=_ORCHESTRATION_INTENTS,
         cwd=tmp_path / "codex",
         retry_policy=RetryPolicy(max_attempts=3, base_delay_s=0.0, jitter_s=0.0),
     )
@@ -228,14 +226,15 @@ async def test_a_configuration_fault_is_not_retried(tmp_path: Path, monkeypatch:
     assert attempts["n"] == 1
 
 
+@pytest.mark.usefixtures("claude_sdk")
 def test_both_providers_read_the_same_retry_knobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Parity means one policy, not a second set of env vars to discover."""
     from hyperloom.orchestrator.roles.claude import ClaudeBackend
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LLM_RETRY_ATTEMPTS", "5")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LLM_RETRY_BASE_S", "0.25")
-    codex = CodexBackend(allowed_intents=_ORCHESTRATION_INTENTS, cwd=tmp_path / "codex")
-    claude = ClaudeBackend(sdk_query_factory=object(), sdk_options_cls=object, mcp_server_factory=lambda *a, **k: None)
+    codex = CodexBackend(cwd=tmp_path / "codex")
+    claude = ClaudeBackend()
 
     assert codex.retry_policy == claude.retry_policy
     assert codex.retry_policy.max_attempts == 5

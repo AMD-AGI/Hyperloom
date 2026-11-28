@@ -22,7 +22,6 @@ def _build_coord(
     tp: int = 0,
 ):
     """Build a minimal Coordinator with a deterministic GPU env."""
-    from hyperloom.orchestrator.roles.agent_role import default_role_registry
     from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
     from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
     from hyperloom.orchestrator.state.shared_state import SharedState
@@ -52,7 +51,6 @@ def _build_coord(
     return Coordinator(
         session_dir=tmp_path,
         backends=backends,
-        role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )
 
@@ -303,6 +301,51 @@ async def test_bench_specialist_leases_whole_machine_when_serving_owns_node(tmp_
     tid = probe.entries[0]
     assert probe.gpu_ids_by_task[tid] == [0, 1, 2, 3]
     assert not await coord.tasks.queued()
+
+
+@pytest.mark.asyncio
+async def test_a_delegated_bench_specialist_never_starts_beside_a_benchmark(tmp_path, monkeypatch):
+    """A specialist an agent queues holds the lanes its profile names, so a bench one waits for the benchmark lane."""
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+
+    coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=4, tp=4)
+    source_root = tmp_path / "framework"
+    (source_root / ".git").mkdir(parents=True)
+    state = coord.shared_state
+    state.phase, state.framework, state.framework_repo_path = "FRAMEWORK_AGENT", "sglang", str(source_root)
+    state.baseline_tput, state.max_minutes = 100.0, 600
+    probe = _GpuProbe()
+    coord.sub.register_executor("specialist", probe)
+    benchmark = await coord.locks.acquire_many(
+        ["benchmark_lane"], holder_id="explore-1", task_id="explore-1", action="explore", ttl_sec=600
+    )
+    assert benchmark is not None
+
+    await coord.router.handle_intent(
+        "orchestration",
+        Intent(
+            type=IntentType.DELEGATE,
+            payload={
+                "action_name": "specialist",
+                "params": {
+                    "scope": "freeform",
+                    "task_description": "start a TP-sharded server and rebench a patch",
+                    "mode": "patch",
+                    "bench": True,
+                },
+            },
+        ),
+    )
+
+    (task,) = await coord.tasks.queued()
+    assert sorted(task.requires_lanes) == ["benchmark_lane", "gpu_research_lane"]
+    await coord.dispatcher.pump_dispatcher_once()
+    assert probe.entries == []
+    assert [t.task_id for t in await coord.tasks.queued()] == [task.task_id]
+
+    await coord.locks.release(benchmark)
+    await pump_until_settled(coord.dispatcher)
+    assert probe.entries == [task.task_id]
 
 
 @pytest.mark.asyncio

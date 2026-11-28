@@ -25,9 +25,7 @@ from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.orchestrator.actions.executors.explore import STACK_REVALIDATE_SOURCE
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.loop.proposals import ProposedAction
 from hyperloom.orchestrator.loop.reactor_turn import trace_mcp_setup
-from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
 from hyperloom.orchestrator.loop._promote_outcome import IntegrateRecoveryIncomplete
 from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
@@ -36,6 +34,8 @@ from hyperloom.orchestrator.actions.executors.patching import _patch_artifacts a
 from hyperloom.orchestrator.actions.executors.patching import _patch_sources as patch_sources
 from hyperloom.orchestrator.phases import phase_transitions
 from hyperloom.orchestrator.phases.machine_state import resolve_keep_threshold
+
+from ._booked_results import book_result, record_outcome
 
 
 def _idle_intent() -> Intent:
@@ -167,14 +167,14 @@ def test_trace_mcp_setup_persists_diagnostics(coord: Coordinator) -> None:
         model="claude-test",
         get_mcp_setup_diagnostic=lambda: {
             "sdk_name": "claude_agent_sdk",
-            "emit_intent": {"registered": True},
+            "emit_intent": {"offered": True},
         },
     )
 
-    trace_mcp_setup(coord.session_dir, agent_name="orchestration", backend=backend)
+    trace_mcp_setup(coord.session_dir, backend)
 
     setup = json.loads((coord.session_dir / "agents" / "orchestration" / "mcp_setup.json").read_text())
-    assert setup["emit_intent"]["registered"] is True
+    assert setup["emit_intent"]["offered"] is True
 
 
 @pytest.mark.asyncio
@@ -187,41 +187,15 @@ async def test_context_inbox_reader_survives_scalar_specialist_findings(coord: C
     the character count of a string as a finding count.
     """
     for findings, questions in ((5, 3), ("one finding", "is the tokenizer the bound?")):
-        await coord.bus.append_and_seq(
-            Message.new(
-                "kernel_agent",
-                "orchestration",
-                "delegated_result",
-                {
-                    "kind": "specialist",
-                    "state": "done",
-                    "result": {
-                        "specialist_done": {
-                            "summary": "fp8 kv cache holds",
-                            "new_findings": findings,
-                            "residual_questions": questions,
-                        }
-                    },
-                },
-            )
-        )
+        done = {"summary": "fp8 kv cache holds", "new_findings": findings, "residual_questions": questions}
+        await book_result(coord, "specialist", {"specialist_done": done})
         out = coord.conversation._context_inbox_reader()
         assert "fp8 kv cache holds" in out
         assert "findings=1" in out
         assert "questions=1" in out
 
-    await coord.bus.append_and_seq(
-        Message.new(
-            "kernel_agent",
-            "orchestration",
-            "delegated_result",
-            {
-                "kind": "specialist",
-                "state": "done",
-                "result": {"specialist_done": {"new_findings": ["a", "b"], "residual_questions": ["q"]}},
-            },
-        )
-    )
+    done = {"new_findings": ["a", "b"], "residual_questions": ["q"]}
+    await book_result(coord, "specialist", {"specialist_done": done})
     out = coord.conversation._context_inbox_reader()
     assert "findings=2" in out
     assert "questions=1" in out
@@ -232,9 +206,9 @@ async def test_context_inbox_reader_survives_scalar_specialist_findings(coord: C
 @pytest.mark.parametrize(
     ("owner", "source", "tool"),
     [
-        ("bus", "inbox_context_sync", "inbox"),
-        ("bus", "recent_outcomes_context_sync", "recent_outcomes"),
-        ("tasks", "running_context_sync", "running_tasks"),
+        ("bus", "inbox_context_sync", "get_inbox"),
+        ("bus", "recent_outcomes_context_sync", "get_recent_outcomes"),
+        ("tasks", "running_context_sync", "get_running_tasks"),
     ],
 )
 async def test_context_reader_failure_carries_traceback_to_the_log(
@@ -251,8 +225,8 @@ async def test_context_reader_failure_carries_traceback_to_the_log(
     monkeypatch.setattr(getattr(coord, owner), source, _boom)
     provider = ContextProvider(
         shared_state=coord.shared_state,
+        session_dir=coord.session_dir,
         inbox_reader=coord.conversation._context_inbox_reader,
-        analysis_reader=coord.conversation._context_analysis_reader,
         recent_outcomes_reader=coord.conversation._context_recent_outcomes_reader,
         running_tasks_reader=coord.conversation._context_running_tasks_reader,
         reference_reader=coord.conversation._context_reference_reader,
@@ -810,52 +784,11 @@ async def test_pending_restore_failure_keeps_sentinel_backup_and_runtime(coord: 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("newer_results", [0, 10_001])
-async def test_pending_restore_never_undoes_kept_patch_outside_tail_window(
-    coord: Coordinator, pending_candidate, newer_results: int
-):
-    candidate = await pending_candidate(patches=True)
-    kept = Message.new(
-        "coordinator",
-        "*",
-        "delegated_result",
-        {
-            "task_id": candidate.task.task_id,
-            "kind": "integrate_patch",
-            "state": "succeeded",
-            "result": {
-                "status": "kept",
-                "specialist_task_id": "spec-restore",
-                "output_throughput": 125.0,
-                "patches_applied": candidate.result["patches_applied"],
-                "workspace": str(candidate.output),
-            },
-        },
-    )
-    await coord.bus.append_and_seq(kept)
-    if newer_results:
-        async with coord.db.transaction() as cur:
-            cur.executemany(
-                "INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, ts) VALUES (?,?,?,?,?,?,?)",
-                (
-                    Message.new("coordinator", "*", "delegated_result", {"task_id": f"unrelated-{index}"}).to_db_row()
-                    for index in range(newer_results)
-                ),
-            )
-    report = {"fixes": [], "warnings": []}
-
-    await coord.writeback._resume_recover_pending_integrate(report)
-
-    assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "C\n"
-    assert coord.shared_state.pending_integrate == {}
-    assert any(entry.get("kind") == "replayed_pending_integrate" for entry in report["fixes"])
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("evidence", ["task", "stack", "neither", "failed_with_keep_result"])
-async def test_pending_restore_never_treats_pruned_keep_as_rejection(coord, pending_candidate, evidence):
-    from hyperloom.orchestrator.bus.db_maintenance import prune_events, prune_tasks
-
+async def test_pending_restore_never_treats_a_keep_whose_records_are_missing_as_rejection(
+    coord, pending_candidate, evidence
+):
+    """No KEEP event was published, and the task row says nothing of the verdict or is absent."""
     candidate = await pending_candidate(patches=True)
     await coord.tasks.transition(candidate.task.task_id, "running")
     if evidence == "failed_with_keep_result":
@@ -865,22 +798,9 @@ async def test_pending_restore_never_treats_pruned_keep_as_rejection(coord, pend
         )
     else:
         await coord.tasks.transition(candidate.task.task_id, "succeeded", evidence={"result_keys": ["status"]})
-    await coord.bus.append_and_seq(
-        Message.new(
-            "coordinator",
-            "*",
-            "delegated_result",
-            {
-                "task_id": candidate.task.task_id,
-                "kind": "integrate_patch",
-                "result": {"status": "kept"},
-            },
-        )
-    )
-    await coord.bus.append_and_seq(Message.new("coordinator", "*", "event", {"newer": True}))
-    assert await prune_events(coord.db, keep_recent=1) > 0
     if evidence not in ("task", "failed_with_keep_result"):
-        await prune_tasks(coord.db, keep_done=0)
+        async with coord.db.transaction() as cur:
+            cur.execute("DELETE FROM tasks WHERE task_id = ?", (candidate.task.task_id,))
     if evidence == "stack":
         coord.shared_state.optimization_stack = [{"task_id": candidate.task.task_id}]
     report = {"fixes": [], "warnings": []}
@@ -1110,6 +1030,82 @@ async def test_resume_clears_a_restored_marker_whose_runner_never_finished(coord
     assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "A\n"
     assert not coord.shared_state.stop_reason
     assert any(isinstance(f, dict) and f.get("kind") == "cleared_stale_pending_integrate" for f in report["fixes"])
+
+
+class _CoordinatorDied(BaseException):
+    """Stands for the process ending inside the dispatcher's booking."""
+
+
+def _resumed_state(coord, candidate, report) -> dict:
+    """What a resume pass leaves: the tree, the sentinel, the stack, the current best and what the pass reported."""
+    return {
+        "tree": (candidate.root / "cfg.json").read_text(encoding="utf-8"),
+        "pending_integrate": coord.shared_state.pending_integrate,
+        "stack": [(row["action"], row["variant_name"], row["tput"]) for row in coord.shared_state.optimization_stack],
+        "current_best_tput": (coord.shared_state.current_best or {}).get("tput"),
+        "stop_reason": coord.shared_state.stop_reason,
+        "fixes": sorted(
+            (fix["kind"], fix.get("appended")) for fix in report["fixes"] if "pending_integrate" in fix["kind"]
+        ),
+        "warnings": sorted(warning["kind"] for warning in report["warnings"]),
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("booked", [False, True], ids=["before_the_result_was_booked", "after_it_was_booked"])
+async def test_resume_adopts_a_keep_whose_promotion_the_crash_cut_off(
+    coord, crashed_integrate_window, monkeypatch, booked
+):
+    """The KEEP is on the task row before the dispatcher books it, so resume adopts it from there either way."""
+    from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
+
+    candidate = await crashed_integrate_window(keep=True, outcome_status="kept")
+    coord.shared_state.baseline_tput = 100.0
+    if booked:
+        row = await coord.tasks.get(candidate.task.task_id)
+        kept = row.history[-1]["evidence"]["outcome"]
+
+        async def _dies(*_args, **_kwargs):
+            raise _CoordinatorDied
+
+        monkeypatch.setattr(coord.dispatcher, "_promote_settled_result", _dies)
+        with pytest.raises(_CoordinatorDied):
+            await coord.dispatcher.reap_dispatched_task(
+                row, SubAgentResult(task_id=row.task_id, state="succeeded", result=kept["result"])
+            )
+        assert [m.payload["task_id"] for m in await coord.bus.tail(topic="delegated_result")] == [row.task_id]
+
+    report = await coord.writeback._resume_consistency_pass()
+
+    assert _resumed_state(coord, candidate, report) == {
+        "tree": "C\n",
+        "pending_integrate": {},
+        "stack": [("integrate_patch", "spec-restore", 130.0)],
+        "current_best_tput": 130.0,
+        "stop_reason": "",
+        "fixes": [("replayed_pending_integrate", True)],
+        "warnings": ["resume_unvalidated_keeps", "source_layer_not_reproducible"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_resume_rolls_back_an_integrate_that_died_between_apply_and_bench(coord, pending_candidate):
+    """The candidate is on the tree, the row reads running and nothing was measured: resume takes the candidate out."""
+    candidate = await pending_candidate(patches=True)
+    await coord.tasks.transition(candidate.task.task_id, "running")
+    coord.writeback._resumed_from["is_resume"] = True
+
+    report = await coord.writeback._resume_consistency_pass()
+
+    assert _resumed_state(coord, candidate, report) == {
+        "tree": "A\n",
+        "pending_integrate": {},
+        "stack": [],
+        "current_best_tput": None,
+        "stop_reason": "",
+        "fixes": [("rolled_back_pending_integrate", None)],
+        "warnings": [],
+    }
 
 
 @pytest.fixture
@@ -1426,44 +1422,48 @@ async def test_ordinary_integrate_completion_does_not_clear_unidentified_or_othe
     assert candidate.backup.exists()
 
 
-@pytest.mark.asyncio
-async def test_resume_consistency_replays_orphaned_integrate_keep(coord: Coordinator) -> None:
+async def _accepted_integrate(coord: Coordinator, key: str, result: dict) -> Task:
+    """An integrate whose executor kept its candidate and whose runner recorded ``result``, with nothing promoted yet."""
+    task, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="integrate_patch", params={}, idempotency_key=key)
+    )
+    await record_outcome(coord, task.task_id, result)
+    coord.shared_state.pending_integrate = {
+        "task_id": task.task_id,
+        "specialist_task_id": result["specialist_task_id"],
+        "recovery": {"phase": "accepted"},
+    }
     coord.writeback._resumed_from["is_resume"] = True
-    await coord.bus.append_and_seq(
-        Message.new(
-            "coordinator",
-            "*",
-            "delegated_result",
-            {
-                "task_id": "ti-orphan",
-                "kind": "integrate_patch",
-                "state": "succeeded",
-                "result": {
-                    "status": "kept",
-                    "specialist_task_id": "spec-orphan",
-                    "output_throughput": 123.0,
-                    "source_phase": "FRAMEWORK_AGENT",
-                    "domain": "serving_specialist",
-                    "provenance": "specialist:serving_specialist",
-                    "framework_agent_authoring": True,
-                    "source_manifest": ("/session/optimization_stack/src/spec-orphan/manifest.json"),
-                    "target_files": ["vllm/model.py"],
-                },
-            },
-        )
+    return task
+
+
+@pytest.mark.asyncio
+async def test_resume_replay_carries_what_the_keep_recorded_about_its_patch(coord: Coordinator) -> None:
+    await _accepted_integrate(
+        coord,
+        "ti-owned",
+        {
+            "status": "kept",
+            "specialist_task_id": "spec-owned",
+            "output_throughput": 123.0,
+            "source_phase": "FRAMEWORK_AGENT",
+            "domain": "serving_specialist",
+            "provenance": "specialist:serving_specialist",
+            "framework_agent_authoring": True,
+            "source_manifest": ("/session/optimization_stack/src/spec-owned/manifest.json"),
+            "target_files": ["vllm/model.py"],
+        },
     )
 
     report = await coord.writeback._resume_consistency_pass()
 
-    replay = next(f for f in report["fixes"] if isinstance(f, dict) and f["kind"] == "replayed_orphaned_keep")
-    assert replay["orphan_kind"] == "integrate_patch"
-    assert replay["variant"] == "spec-orphan"
+    assert any(f["kind"] == "replayed_pending_integrate" and f["appended"] is True for f in report["fixes"])
     assert coord.shared_state.optimization_stack[-1]["action"] == "integrate_patch"
-    assert coord.shared_state.optimization_stack[-1]["variant_name"] == "spec-orphan"
+    assert coord.shared_state.optimization_stack[-1]["variant_name"] == "spec-owned"
     assert coord.shared_state.optimization_stack[-1]["source_phase"] == "FRAMEWORK_AGENT"
     assert coord.shared_state.optimization_stack[-1]["provenance"] == ("specialist:serving_specialist")
     assert coord.shared_state.optimization_stack[-1]["source_manifest"] == (
-        "/session/optimization_stack/src/spec-orphan/manifest.json"
+        "/session/optimization_stack/src/spec-owned/manifest.json"
     )
     assert coord.shared_state.optimization_stack[-1]["target_files"] == ["vllm/model.py"]
     assert coord.shared_state.optimization_stack_has_unvalidated_keeps()
@@ -1471,30 +1471,14 @@ async def test_resume_consistency_replays_orphaned_integrate_keep(coord: Coordin
 
 @pytest.mark.asyncio
 async def test_resume_consistency_replays_pending_integrate_keep(coord: Coordinator) -> None:
-    coord.writeback._resumed_from["is_resume"] = True
-    coord.shared_state.pending_integrate = {"task_id": "ti-pending", "specialist_task_id": "spec-pending"}
-    await coord.bus.append_and_seq(
-        Message.new(
-            "coordinator",
-            "*",
-            "delegated_result",
-            {
-                "task_id": "ti-pending",
-                "kind": "integrate_patch",
-                "state": "succeeded",
-                "result": {
-                    "status": "kept",
-                    "specialist_task_id": "spec-pending",
-                    "output_throughput": 125.0,
-                },
-            },
-        )
+    task = await _accepted_integrate(
+        coord, "ti-pending", {"status": "kept", "specialist_task_id": "spec-pending", "output_throughput": 125.0}
     )
 
     report = await coord.writeback._resume_consistency_pass()
 
     replay = next(f for f in report["fixes"] if isinstance(f, dict) and f["kind"] == "replayed_pending_integrate")
-    assert replay["task_id"] == "ti-pending"
+    assert replay["task_id"] == task.task_id
     assert replay["appended"] is True
     assert coord.shared_state.pending_integrate == {}
     assert coord.shared_state.optimization_stack[-1]["variant_name"] == "spec-pending"
@@ -1648,11 +1632,11 @@ async def test_resume_settles_an_env_only_integrate_from_its_task_row(
 
 
 @pytest.mark.asyncio
-async def test_resume_consistency_keeps_sentinel_when_event_scan_fails(
+async def test_resume_consistency_keeps_sentinel_when_the_task_row_cannot_be_read(
     coord: Coordinator,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An unreadable event log must not be treated as 'no KEEP exists'."""
+    """An unreadable task registry must not be treated as 'no KEEP exists'."""
     coord.writeback._resumed_from["is_resume"] = True
     sentinel = {
         "task_id": "ti-unreadable",
@@ -1664,7 +1648,7 @@ async def test_resume_consistency_keeps_sentinel_when_event_scan_fails(
     async def _boom(*_args, **_kwargs):
         raise sqlite3.DatabaseError("database disk image is malformed")
 
-    monkeypatch.setattr(coord.bus, "tail", _boom)
+    monkeypatch.setattr(coord.tasks, "find", _boom)
 
     rolled_back: list[dict] = []
     monkeypatch.setattr(
@@ -1673,204 +1657,11 @@ async def test_resume_consistency_keeps_sentinel_when_event_scan_fails(
         lambda pending, _gone_scope=None: rolled_back.append(pending) or {"reversed": [], "failed": []},
     )
 
-    with pytest.raises(RuntimeError, match="refusing resume before measurement"):
+    with pytest.raises(sqlite3.DatabaseError, match="malformed"):
         await coord.writeback._resume_consistency_pass()
 
     assert rolled_back == []
     assert coord.shared_state.pending_integrate == sentinel
-
-
-@pytest.mark.asyncio
-async def test_resume_consistency_discards_orphaned_integrate_keep_missing_workspace(
-    coord: Coordinator,
-    tmp_path: Path,
-) -> None:
-    coord.writeback._resumed_from["is_resume"] = True
-    missing_workspace = tmp_path / "missing-workspace"
-    await coord.bus.append_and_seq(
-        Message.new(
-            "coordinator",
-            "*",
-            "delegated_result",
-            {
-                "task_id": "ti-missing",
-                "kind": "integrate_patch",
-                "state": "succeeded",
-                "result": {
-                    "status": "kept",
-                    "specialist_task_id": "spec-missing",
-                    "output_throughput": 125.0,
-                    "workspace": str(missing_workspace),
-                },
-            },
-        )
-    )
-
-    report = await coord.writeback._resume_consistency_pass()
-
-    discarded = next(w for w in report["warnings"] if w["kind"] == "orphaned_keep_discarded")
-    assert discarded["orphan_kind"] == "integrate_patch"
-    assert discarded["variant"] == "spec-missing"
-    assert coord.shared_state.optimization_stack == []
-
-
-@pytest.mark.asyncio
-async def test_resume_consistency_discards_orphan_when_workspace_missing(coord: Coordinator) -> None:
-    coord.writeback._resumed_from["is_resume"] = True
-    await coord.bus.append_and_seq(
-        Message.new(
-            "coordinator",
-            "*",
-            "delegated_result",
-            {
-                "task_id": "ti-gone",
-                "kind": "integrate_patch",
-                "state": "succeeded",
-                "result": {
-                    "status": "kept",
-                    "specialist_task_id": "spec-gone",
-                    "output_throughput": 123.0,
-                    "workspace": "/nonexistent/path/spec-gone",
-                },
-            },
-        )
-    )
-
-    report = await coord.writeback._resume_consistency_pass()
-
-    assert any(w.get("kind") == "orphaned_keep_discarded" for w in report["warnings"])
-    assert not any(
-        isinstance(e, dict) and e.get("variant_name") == "spec-gone" for e in coord.shared_state.optimization_stack
-    )
-
-
-@pytest.mark.asyncio
-async def test_resume_consistency_explore_orphan_alerts_not_replayed(coord: Coordinator) -> None:
-    coord.writeback._resumed_from["is_resume"] = True
-    await coord.bus.append_and_seq(
-        Message.new(
-            "coordinator",
-            "*",
-            "delegated_result",
-            {
-                "task_id": "te-orphan",
-                "kind": "explore",
-                "state": "succeeded",
-                "result": {
-                    "status": "kept",
-                    "best_variant": {"name": "ev-1", "extra_envs": {"A": "1"}},
-                    "output_throughput": 123.0,
-                },
-            },
-        )
-    )
-
-    report = await coord.writeback._resume_consistency_pass()
-
-    assert any(w.get("kind") == "orphaned_keep" and w.get("orphan_kind") == "explore" for w in report["warnings"])
-    assert not any(
-        isinstance(e, dict) and e.get("variant_name") == "ev-1" for e in coord.shared_state.optimization_stack
-    )
-
-
-@pytest.mark.asyncio
-async def test_resume_consistency_framework_keep_in_stack_is_not_orphaned(coord: Coordinator) -> None:
-    """A landed framework KEEP reconciles against its own stack entry."""
-    coord.writeback._resumed_from["is_resume"] = True
-    coord.shared_state.optimization_stack = [
-        {
-            "action": "framework",
-            "variant_name": "https://example.com/pull/7",
-            "candidate_extra_server_args": "",
-            "extra_envs": {},
-            "tput": 130.0,
-        }
-    ]
-    await coord.bus.append_and_seq(
-        Message.new(
-            "coordinator",
-            "*",
-            "delegated_result",
-            {
-                "task_id": "tf-landed",
-                "kind": "framework_agent",
-                "state": "succeeded",
-                "result": {
-                    "status": "kept",
-                    "candidate": {"pr_url": "https://example.com/pull/7", "ref": "PR:7"},
-                    "output_throughput": 130.0,
-                },
-            },
-        )
-    )
-
-    report = await coord.writeback._resume_consistency_pass()
-
-    assert not [
-        w for w in report["warnings"] if w.get("kind") == "orphaned_keep" and w.get("orphan_kind") == "framework_agent"
-    ]
-
-
-@pytest.mark.asyncio
-async def test_resume_consistency_framework_keep_absent_from_stack_still_alerts(coord: Coordinator) -> None:
-    """The reconciliation fix must not suppress a genuinely missing framework KEEP."""
-    coord.writeback._resumed_from["is_resume"] = True
-    await coord.bus.append_and_seq(
-        Message.new(
-            "coordinator",
-            "*",
-            "delegated_result",
-            {
-                "task_id": "tf-orphan",
-                "kind": "framework_agent",
-                "state": "succeeded",
-                "result": {
-                    "status": "kept",
-                    "candidate": {"pr_url": "https://example.com/pull/8", "ref": "PR:8"},
-                    "output_throughput": 140.0,
-                },
-            },
-        )
-    )
-
-    report = await coord.writeback._resume_consistency_pass()
-
-    orphan = next(
-        w for w in report["warnings"] if w.get("kind") == "orphaned_keep" and w.get("orphan_kind") == "framework_agent"
-    )
-    assert orphan["variant"] == "https://example.com/pull/8"
-
-
-@pytest.mark.asyncio
-async def test_resume_consistency_replays_pending_integrate_with_kept_result(coord: Coordinator) -> None:
-    coord.writeback._resumed_from["is_resume"] = True
-    coord.shared_state.baseline_tput = 100.0
-    coord.shared_state.pending_integrate = {"task_id": "ti-half", "specialist_task_id": "spec-half"}
-    await coord.bus.append_and_seq(
-        Message.new(
-            "coordinator",
-            "*",
-            "delegated_result",
-            {
-                "task_id": "ti-half",
-                "kind": "integrate_patch",
-                "state": "succeeded",
-                "result": {
-                    "status": "kept",
-                    "specialist_task_id": "spec-half",
-                    "output_throughput": 130.0,
-                },
-            },
-        )
-    )
-
-    report = await coord.writeback._resume_consistency_pass()
-
-    assert any(isinstance(f, dict) and f.get("kind") == "replayed_pending_integrate" for f in report["fixes"])
-    assert coord.shared_state.pending_integrate == {}
-    assert any(
-        isinstance(e, dict) and e.get("variant_name") == "spec-half" for e in coord.shared_state.optimization_stack
-    )
 
 
 @pytest.mark.asyncio
@@ -2007,34 +1798,6 @@ async def test_integrate_patch_keep_promotes_stack_and_clears_pending(coord: Coo
     assert coord.shared_state.cumulative_gain_validated_stack_len == len(coord.shared_state.optimization_stack)
 
 
-# -- _context_analysis_reader fallback (path read) --------------------------
-def test_context_analysis_reader_strips_base64_from_the_cached_text(coord: Coordinator) -> None:
-    coord.shared_state.last_trace_analyze = {
-        "analysis_md_text": "# Report\n![chart](data:image/png;base64,iVBORw0KGgo)\nbody\n",
-        "analysis_md_path": "/nonexistent/analysis.md",
-    }
-    out = coord.conversation._context_analysis_reader()
-    assert "iVBORw0KGgo" not in out
-    assert "# Report" in out and "body" in out
-
-
-def test_context_analysis_reader_falls_back_to_the_recorded_path(
-    coord: Coordinator,
-    tmp_path,
-) -> None:
-    md = tmp_path / "analysis.md"
-    md.write_text("# roofline snapshot\n", encoding="utf-8")
-    coord.shared_state.last_trace_analyze = {"analysis_md_path": str(md)}
-    out = coord.conversation._context_analysis_reader()
-    assert "roofline snapshot" in out
-
-
-def test_context_analysis_reader_unreadable_path(coord: Coordinator) -> None:
-    coord.shared_state.last_trace_analyze = {"analysis_md_path": "/nonexistent/dir/analysis.md"}
-    out = coord.conversation._context_analysis_reader()
-    assert "unreadable" in out or "no analysis.md" in out
-
-
 # -- stop ----------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_stop_is_reported_as_a_stop_request(coord: Coordinator) -> None:
@@ -2144,35 +1907,6 @@ async def test_running_tasks_reader_sees_live_specialist(coord: Coordinator) -> 
     assert "serving_specialist" in out
 
 
-# -- fan_out_specialist_wave (valid entries) -------------------------------
-@pytest.mark.asyncio
-async def test_fan_out_wave_dispatches_valid_task(coord: Coordinator, monkeypatch) -> None:
-    seen: list[dict] = []
-
-    async def _fake_delegate(source, intent):
-        seen.append(dict(intent.payload.get("params") or {}))
-
-    monkeypatch.setattr(coord.router, "handle_delegate", _fake_delegate)
-    intent = Intent(
-        type=IntentType.DELEGATE,
-        payload={"idempotency_key": "wave", "action_name": "specialist"},
-    )
-    await coord.specialist_dispatch.fan_out_specialist_wave(
-        "orchestration",
-        intent,
-        {
-            "domain": "kernel_agent",
-            "tasks": [
-                {"task_description": "scout fused moe", "task_summary": "moe", "mode": "patch", "lane": "gpu"},
-            ],
-        },
-    )
-    assert len(seen) == 1
-    assert seen[0]["scope"] == "freeform"
-    assert seen[0]["task_description"] == "scout fused moe"
-    assert seen[0]["mode"] == "patch"
-
-
 # -- warm_specialist_params (rich state) -----------------------------------
 @pytest.mark.asyncio
 async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypatch) -> None:
@@ -2182,7 +1916,7 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
     state.model_name = "llama"
     state.gpu_type = "mi300x"
     state.last_trace_analyze = {
-        "analysis_md_text": "roofline body",
+        "has_analysis_md": True,
         "analysis_md_path": "/tmp/a.md",
         "roofline_snapshot_id": "snap-1",
         "hot_kernels_top15": [{"name": "gemm"}],
@@ -2194,7 +1928,6 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
             "symptom": "mem bound",
             "layer": "attention",
             "domain_hint": "kernel_agent",
-            "severity": "high",
             "attempts": [{"r": 1}],
         },
     )
@@ -2475,6 +2208,30 @@ async def test_handle_intent_broadcasts_an_alert(coord: Coordinator) -> None:
     assert [(m.to_agent, m.payload) for m in await coord.bus.tail(topic="alert")] == [("*", alert)]
 
 
+_ROUTABLE_PAYLOADS = {
+    IntentType.DELEGATE: {"action_name": "baseline", "params": {}},
+    IntentType.REQUEST: {"target_agent": "kernel_agent", "kind": "trace_analyze"},
+    IntentType.EXTEND_LEASE: {"task_id": "no-such-task", "extra_sec": 60},
+    IntentType.PRUNE_BRANCH: {"family": "explore", "reason": "plateau"},
+    IntentType.ESCALATE_STRATEGY_CHANGE: {"reason": "stalled", "next_action_hint": "baseline"},
+    IntentType.SEND_MESSAGE: {"topic": "status", "body_md": "ok"},
+    IntentType.ALERT: {"severity": "high", "summary": "server wedged"},
+}
+
+
+@pytest.mark.parametrize("intent_type", list(IntentType), ids=lambda intent_type: intent_type.value)
+@pytest.mark.asyncio
+async def test_every_intent_type_is_routed_to_a_handler(coord: Coordinator, intent_type: IntentType) -> None:
+    """A type the vocabulary holds and the router cannot route would end every such intent as a handler exception."""
+    coord.shared_state.phase = "PRELUDE"
+
+    await coord.router.handle_intent("orchestration", Intent(type=intent_type, payload=_ROUTABLE_PAYLOADS[intent_type]))
+
+    observed = [m.payload.get("kind") for m in await coord.bus.tail(topic="observation")]
+    assert "handle_intent_exception" not in observed
+    assert coord.shared_state.crash_count == 0
+
+
 # -- advance_phase_if_needed -----------------------------------------------
 @pytest.mark.asyncio
 async def test_advance_phase_escalation_transition(coord: Coordinator, monkeypatch) -> None:
@@ -2513,20 +2270,21 @@ async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monke
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("prior", "target", "reason"),
+    ("prior", "target", "reason", "evidence"),
     [
+        ("FRAMEWORK_AGENT", "KERNEL_AGENT", "optimize_no_more_leverage", {"hint": "skip_to_kernel"}),
         # Entering the phase whose exit reads the hint is no exception: the hint was emitted for the phase it was
         # emitted in, and carrying it across would end FRAMEWORK_AGENT on arrival.
-        ("PRELUDE", "FRAMEWORK_AGENT", "prelude_done"),
-        ("FRAMEWORK_AGENT", "CYCLE_END", "some_other_reason"),
+        ("PRELUDE", "FRAMEWORK_AGENT", "prelude_done", {}),
+        ("FRAMEWORK_AGENT", "CYCLE_END", "some_other_reason", {}),
     ],
 )
-async def test_advance_phase_hint_discarded_on_a_transition_it_did_not_drive(
-    coord: Coordinator, monkeypatch, prior: str, target: str, reason: str
+async def test_a_phase_transition_clears_the_pending_hint_whether_or_not_the_hint_drove_it(
+    coord: Coordinator, monkeypatch, prior: str, target: str, reason: str, evidence: dict
 ) -> None:
     coord.shared_state.phase = prior
     coord.shared_state.pending_escalate_hint = "skip_to_kernel"
-    monkeypatch.setattr(phase_transitions, "compute_next_phase", lambda *a, **k: (target, reason, {}))
+    monkeypatch.setattr(phase_transitions, "compute_next_phase", lambda *a, **k: (target, reason, dict(evidence)))
 
     async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
@@ -2535,39 +2293,10 @@ async def test_advance_phase_hint_discarded_on_a_transition_it_did_not_drive(
     await coord.phase_machine.advance_phase_if_needed()
     assert (coord.shared_state.phase or "").upper() == target
     assert coord.shared_state.pending_escalate_hint == ""
-    assert coord.shared_state.last_discarded_escalate_hint == "skip_to_kernel"
-    assert coord.shared_state.last_discarded_escalate_hint_ts
+    assert json.loads((coord.session_dir / "state.json").read_text(encoding="utf-8"))["pending_escalate_hint"] == ""
 
 
-@pytest.mark.asyncio
-async def test_advance_phase_hint_consumed_when_it_drove_the_transition(coord: Coordinator, monkeypatch) -> None:
-    """The complementary case: a hint-driven transition must record consumption, not a discard, so the two are
-    distinguishable in the breakdown.
-    """
-
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord.shared_state.pending_escalate_hint = "skip_to_kernel"
-    monkeypatch.setattr(
-        phase_transitions,
-        "compute_next_phase",
-        lambda *a, **k: ("KERNEL_AGENT", "skip_to_kernel", {"hint": "skip_to_kernel"}),
-    )
-
-    async def _entered(*, from_phase, to_phase, reason="", evidence=None):
-        return None
-
-    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
-    await coord.phase_machine.advance_phase_if_needed()
-    assert (coord.shared_state.phase or "").upper() == "KERNEL_AGENT"
-    assert coord.shared_state.pending_escalate_hint == ""
-    assert coord.shared_state.last_discarded_escalate_hint == ""
-
-
-# -- materialize -----------------------------------------------------------
-def _proposed(action_name: str, payload: dict) -> ProposedAction:
-    return ProposedAction("orchestration", action_name, {"predicted_gain_pct": 3.0, **payload})
-
-
+# -- specialist ownership ----------------------------------------------------
 def test_specialist_owner_is_frozen_at_creation_outside_agent_phases(
     coord: Coordinator,
 ) -> None:
@@ -2581,9 +2310,9 @@ def test_specialist_owner_is_frozen_at_creation_outside_agent_phases(
         "gap_layer": "framework",
     }
 
-    assert coord.router._stamp_specialist_owner(explore_params) == "EXPLORE"
+    assert coord.specialist_dispatch.stamp_owner(explore_params) == "EXPLORE"
     assert explore_params["source_phase"] == "EXPLORE"
-    assert coord.router._stamp_specialist_owner(framework_params) == "FRAMEWORK_AGENT"
+    assert coord.specialist_dispatch.stamp_owner(framework_params) == "FRAMEWORK_AGENT"
     assert framework_params["source_phase"] == "FRAMEWORK_AGENT"
 
 
@@ -2597,7 +2326,7 @@ def test_a_patch_mode_specialist_is_owned_at_dispatch(coord: Coordinator, phase:
     coord.shared_state.phase = phase
     params = {"scope": "freeform", "mode": "patch", "task_description": "fix the scheduler crash"}
 
-    assert coord.router._stamp_specialist_owner(params) == "FRAMEWORK_AGENT"
+    assert coord.specialist_dispatch.stamp_owner(params) == "FRAMEWORK_AGENT"
     assert params["source_phase"] == "FRAMEWORK_AGENT"
 
 
@@ -2610,234 +2339,205 @@ def test_a_research_specialist_names_no_owner(coord: Coordinator) -> None:
     coord.shared_state.phase = "KERNEL_AGENT"
     params = {"scope": "freeform", "task_description": "find out why prefill blocks decode"}
 
-    assert coord.router._stamp_specialist_owner(params) == ""
+    assert coord.specialist_dispatch.stamp_owner(params) == ""
     assert "source_phase" not in params
 
 
-@pytest.mark.asyncio
-async def test_materialize_explore_proposal_id_does_not_break_content_dedup(
-    coord: Coordinator,
-    monkeypatch,
-) -> None:
-    coord.shared_state.baseline_tput = 800.0
-    monkeypatch.setattr(coord.proposals, "phase_framework", coord.phase_framework, raising=False)
-    await coord.proposals.materialize(_proposed("explore", {"params": {"grid": [{"name": "v0"}]}}))
-    await coord.proposals.materialize(_proposed("explore", {"params": {"grid": [{"name": "v0"}]}}))
-
-    queued = [task for task in await coord.tasks.queued() if task.kind == "explore"]
-    assert len(queued) == 1
-    assert queued[0].params["proposal_msg_id"]
+# -- the task a delegate becomes ---------------------------------------------
+# An explore is admitted on something to measure; the tests that are not about that grid delegate one admission
+# has no quarrel with.
+_DELEGATE_PARAMS = {"explore": {"grid": [{"name": "v1"}]}}
+_MEASURED_BASELINE = {"status": "ok", "output_throughput": 100.0, "completed_requests": 8}
+_FAILED_BASELINE = {"status": "failed", "error_class": "server_launch_failed", "error": "server exited 1"}
 
 
-@pytest.mark.asyncio
-async def test_materialize_explore_seeds_cumulative_env_base(coord: Coordinator, monkeypatch) -> None:
-    # Regression: explore must inherit current_best.extra_envs as its env base, else the accepted stack's envs
-    # collapse to the last variant's delta.
-    coord.shared_state.baseline_tput = 800.0
-    monkeypatch.setattr(coord.proposals, "phase_framework", coord.phase_framework, raising=False)
-    coord.shared_state.current_best = {
-        "tput": 900.0,
-        "extra_server_args": "--kv-cache-dtype fp8",
-        "extra_envs": {"VLLM_ROCM_USE_AITER_MHA": "1", "HIP_FORCE_DEV_KERNARG": "1"},
+def _delegate(action_name: str, params=None) -> Intent:
+    payload = {
+        "action_name": action_name,
+        "params": params if params is not None else dict(_DELEGATE_PARAMS.get(action_name, {})),
     }
-    await coord.proposals.materialize(_proposed("explore", {"params": {"grid": [{"name": "v0"}]}}))
-    task = await coord.tasks.get((await coord.tasks.queued())[0].task_id)
-    assert task.params["base_extra_args"] == "--kv-cache-dtype fp8"
-    assert task.params["base_extra_envs"] == {
-        "VLLM_ROCM_USE_AITER_MHA": "1",
-        "HIP_FORCE_DEV_KERNARG": "1",
-    }
+    return Intent(type=IntentType.DELEGATE, payload=payload)
 
 
-@pytest.mark.asyncio
-async def test_materialize_baseline_ignores_params_outside_fingerprint(coord: Coordinator) -> None:
-    await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
-    await coord.proposals.materialize(_proposed("baseline", {"params": {"tag": "x"}}))
-    queued = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
-    assert len(queued) == 1
-    tail = await coord.bus.tail(topic="observation", n=20)
-    assert any(m.payload.get("reason") == "duplicate_proposal_content" for m in tail)
-
-
-@pytest.mark.asyncio
-async def test_materialize_baseline_distinct_envs_queue_separately(coord: Coordinator) -> None:
-    await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
-    await coord.proposals.materialize(
-        _proposed("baseline", {"params": {"extra_envs": {"VLLM_ROCM_USE_AITER_MOE": "0"}}})
-    )
-    queued = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
-    assert len(queued) == 2
-
-
-@pytest.mark.asyncio
-async def test_materialize_requeues_same_content_after_terminal_twin(coord: Coordinator) -> None:
-    await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
-    first = [t for t in await coord.tasks.queued() if t.kind == "baseline"][0]
-    await coord.tasks.transition(first.task_id, "running")
-    await coord.tasks.transition(first.task_id, "failed")
-    await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
-    queued = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
-    assert len(queued) == 1
-    assert queued[0].task_id != first.task_id
-
-
-@pytest.mark.asyncio
-async def test_materialize_carries_the_predicted_gain_onto_the_task(coord: Coordinator) -> None:
-    await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
-
-    (task,) = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
-    assert task.params["predicted_gain_pct"] == 3.0
-
-
-@pytest.mark.asyncio
-async def test_materialize_stops_requeueing_once_every_retry_key_is_spent(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.state.task_registry import RETRY_KEY_ATTEMPTS
-
-    for _ in range(RETRY_KEY_ATTEMPTS):
-        await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
-        (task,) = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
-        await coord.tasks.transition(task.task_id, "running")
-        await coord.tasks.transition(task.task_id, "failed")
-
-    await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
-
-    assert [t for t in await coord.tasks.queued() if t.kind == "baseline"] == []
-    tail = await coord.bus.tail(topic="observation", n=20)
-    skipped = [m.payload["reason"] for m in tail if m.payload.get("kind") == "proposal_materialize_skipped"]
-    assert skipped == ["idempotency_key_exhausted"]
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("result", "requeued_key"),
+    ("named", "stamped"),
     [
-        ({"status": "failed", "error_class": "server_launch_failed", "error": "server exited 1"}, "-retry1"),
-        ({"status": "ok", "output_throughput": 100.0, "completed_requests": 8}, None),
+        pytest.param({}, {"source_phase": "FRAMEWORK_AGENT", "lever_kind": None}, id="no-lever-named"),
+        pytest.param(
+            {"pr_url": "https://example.com/pull/1"},
+            {"source_phase": "FRAMEWORK_AGENT", "lever_kind": "upstream_pr"},
+            id="an-upstream-pr",
+        ),
     ],
-    ids=["failed-result", "measured-result"],
 )
-async def test_a_baseline_twin_answers_a_repeat_proposal_only_once_it_measured(
-    coord: Coordinator, result: dict, requeued_key: str | None
+@pytest.mark.asyncio
+async def test_a_delegated_patch_specialist_is_queued_with_its_owner(
+    coord: Coordinator, tmp_path, monkeypatch, named: dict, stamped: dict
 ) -> None:
-    """The runner books every returned result ``succeeded``; whether the twin measured is in the result itself."""
+    """The task is where the owner is frozen: the integrate_patch of what the specialist delivers reads it there."""
+    import hyperloom.orchestrator.specialists.runner as runner_mod
+
+    # The session's own git tree is the source; a framework installed on the host must not answer for it.
+    monkeypatch.setattr(runner_mod, "resolve_framework_tree", lambda _framework: "")
+    (tmp_path / "framework" / ".git").mkdir(parents=True)
+    coord.shared_state.framework_repo_path = str(tmp_path / "framework")
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    params = {"scope": "freeform", "mode": "patch", "task_description": "fix the scheduler crash", **named}
+
+    await coord.router.handle_intent("orchestration", _delegate("specialist", params))
+
+    (task,) = await coord.tasks.queued()
+    assert {key: task.params.get(key) for key in ("source_phase", "lever_kind")} == stamped
+
+
+async def _baselines(coord: Coordinator) -> list:
+    rows = await coord.db.fetchall("SELECT task_id FROM tasks WHERE kind = 'baseline' ORDER BY created_at, rowid")
+    return [await coord.tasks.get(row["task_id"]) for row in rows]
+
+
+async def _run_baseline(coord: Coordinator, task, result: dict) -> None:
+    """Run ``task`` to the end with ``result``; the runner books every returned result ``succeeded``."""
 
     async def _baseline(_ctx):
         return dict(result)
 
     coord.sub.register_executor("baseline", _baseline)
-    await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
-    first = [t for t in await coord.tasks.queued() if t.kind == "baseline"][0]
     lease = await coord.locks.acquire_many(
-        list(first.requires_lanes), holder_id=first.task_id, task_id=first.task_id, action="baseline", ttl_sec=600
+        list(task.requires_lanes), holder_id=task.task_id, task_id=task.task_id, action="baseline", ttl_sec=600
     )
-    await coord.sub.run_task(first, prebound_lease=lease)
-    assert (await coord.tasks.get(first.task_id)).state == "succeeded"
+    await coord.sub.run_task(task, prebound_lease=lease)
+    assert (await coord.tasks.get(task.task_id)).state == "succeeded"
 
-    await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
 
-    live = [t.idempotency_key for t in (*await coord.tasks.queued(), *await coord.tasks.running())]
-    tail = await coord.bus.tail(topic="observation", n=20)
-    skipped = [m.payload for m in tail if m.payload.get("kind") == "proposal_materialize_skipped"]
-    if requeued_key is None:
-        assert live == []
-        assert [(p["reason"], p["task_id"]) for p in skipped] == [("baseline_already_succeeded", first.task_id)]
-    else:
-        assert live == [f"{first.idempotency_key}{requeued_key}"]
-        assert skipped == []
+@pytest.mark.asyncio
+async def test_a_delegated_explore_is_seeded_with_the_stack_it_measures_on(coord: Coordinator) -> None:
+    # Regression: explore must inherit current_best.extra_envs as its env base, else the accepted stack's envs
+    # collapse to the last variant's delta.
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.shared_state.baseline_tput = 800.0
+    coord.shared_state.current_best = {
+        "tput": 900.0,
+        "extra_server_args": "--kv-cache-dtype fp8",
+        "extra_envs": {"VLLM_ROCM_USE_AITER_MHA": "1", "HIP_FORCE_DEV_KERNARG": "1"},
+    }
+
+    await coord.router.handle_intent("orchestration", _delegate("explore", {"grid": [{"name": "v0"}]}))
+
+    (task,) = await coord.tasks.queued()
+    assert task.params["base_extra_args"] == "--kv-cache-dtype fp8"
+    assert task.params["base_extra_envs"] == {
+        "VLLM_ROCM_USE_AITER_MHA": "1",
+        "HIP_FORCE_DEV_KERNARG": "1",
+    }
+    assert task.params["keep_threshold_pct"] == pytest.approx(resolve_keep_threshold(coord.shared_state))
+    assert task.params["proposal_msg_id"]
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_baseline_delegate_is_answered_by_the_one_still_queued(coord: Coordinator) -> None:
+    """A baseline is its launch: a later tick, a key the agent wrote or a param outside the launch starts no second
+    bring-up."""
+    await coord.router.handle_intent("orchestration", _delegate("baseline", {"runs": 1}))
+    (first,) = await _baselines(coord)
+    coord.shared_state.tick = int(coord.shared_state.tick or 0) + 7
+
+    await coord.router.handle_intent("orchestration", _delegate("baseline", {"runs": 2, "tag": "again"}))
+    await coord.router.handle_intent(
+        "orchestration",
+        Intent(type=IntentType.DELEGATE, payload={"action_name": "baseline", "idempotency_key": "baseline-take-2"}),
+    )
+
+    assert [t.task_id for t in await _baselines(coord)] == [first.task_id]
+    assert await _observed(coord, "policy_denied", "rule") == ["duplicate_idempotency_key_running"] * 2
+
+
+@pytest.mark.asyncio
+async def test_baseline_delegates_with_different_launches_queue_separately(coord: Coordinator) -> None:
+    await coord.router.handle_intent("orchestration", _delegate("baseline", {}))
+    await coord.router.handle_intent(
+        "orchestration", _delegate("baseline", {"extra_envs": {"VLLM_ROCM_USE_AITER_MOE": "0"}})
+    )
+
+    assert len(await _baselines(coord)) == 2
+    assert await _observed(coord, "policy_denied", "rule") == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result", "refusal", "keys_after"),
+    [
+        (_FAILED_BASELINE, [], ["{key}", "{key}-retry1"]),
+        ({**_MEASURED_BASELINE, "measure_round_dropped": True}, [], ["{key}", "{key}-retry1"]),
+        (_MEASURED_BASELINE, ["duplicate_idempotency_key"], ["{key}"]),
+    ],
+    ids=["failed-result", "cold-figure-only", "measured-result"],
+)
+async def test_a_baseline_twin_answers_a_repeat_delegate_only_once_it_measured(
+    coord: Coordinator, result: dict, refusal: list[str], keys_after: list[str]
+) -> None:
+    """Whether the twin measured is in its result: a failed one, or one that kept only its warm-up's cold figure,
+    leaves a retry key; one that measured its hot round is the answer."""
+    await coord.router.handle_intent("orchestration", _delegate("baseline", {}))
+    (first,) = await _baselines(coord)
+    await _run_baseline(coord, first, result)
+
+    await coord.router.handle_intent("orchestration", _delegate("baseline", {}))
+
+    assert await _observed(coord, "policy_denied", "rule") == refusal
+    assert [t.idempotency_key for t in await _baselines(coord)] == [
+        key.format(key=first.idempotency_key) for key in keys_after
+    ]
+    denied = [
+        m.payload for m in await coord.bus.tail(topic="observation", n=50) if m.payload.get("kind") == "policy_denied"
+    ]
+    assert all(first.task_id in payload["hint"] for payload in denied)
+
+
+@pytest.mark.asyncio
+async def test_a_baseline_delegate_is_refused_once_every_retry_key_is_spent(coord: Coordinator) -> None:
+    from hyperloom.orchestrator.state.task_registry import RETRY_KEY_ATTEMPTS
+
+    for _ in range(RETRY_KEY_ATTEMPTS):
+        await coord.router.handle_intent("orchestration", _delegate("baseline", {}))
+        (task,) = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
+        await coord.tasks.transition(task.task_id, "running")
+        await coord.tasks.transition(task.task_id, "failed")
+    assert await _observed(coord, "policy_denied", "rule") == []
+
+    await coord.router.handle_intent("orchestration", _delegate("baseline", {}))
+
+    assert len(await _baselines(coord)) == RETRY_KEY_ATTEMPTS
+    assert [t for t in await coord.tasks.queued() if t.kind == "baseline"] == []
+    assert await _observed(coord, "policy_denied", "rule") == ["duplicate_idempotency_key"]
+    assert await _observed(coord, "policy_denied", "reason") == [
+        f"delegate{{action_name='baseline'}} duplicate idempotency_key exhausted retries for "
+        f"{(await _baselines(coord))[0].idempotency_key!r}"
+    ]
 
 
 # -- handle_delegate branches ----------------------------------------------
-# An explore is admitted on something to measure; these tests are about the other delegate branches,
-# not that grid, so they delegate one admission has no quarrel with.
-_DELEGATE_PARAMS = {"explore": {"grid": [{"name": "v1"}]}}
-
-
-def _delegate(action_name: str, key: str, params=None) -> Intent:
-    payload = {
-        "action_name": action_name,
-        "params": params if params is not None else dict(_DELEGATE_PARAMS.get(action_name, {})),
-        "idempotency_key": key,
-    }
-    return Intent(type=IntentType.DELEGATE, payload=payload)
-
-
 @pytest.mark.asyncio
 async def test_handle_delegate_pruned_advisory(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.baseline_tput = 800.0
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     monkeypatch.setattr(coord.shared_state, "is_pruned", lambda a: True)
-    monkeypatch.setattr(coord.dispatcher, "_sequence_denial_for_action", lambda a: None)
-    await coord.router.handle_delegate("orchestration", _delegate("explore", "d-pruned"))
+    await coord.router.handle_delegate("orchestration", _delegate("explore"))
     assert await coord.tasks.queued()
+    assert await _observed(coord, "delegate_pruned_advisory", "action") == ["explore"]
 
 
 @pytest.mark.asyncio
-async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.policy.denial import PolicyDenied
-
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    monkeypatch.setattr(
-        coord.dispatcher,
-        "_sequence_denial_for_action",
-        lambda a: PolicyDenied(
-            "blocked",
-            rule="exec_order",
-            hint="wait",
-        ),
-    )
+async def test_handle_delegate_admission_denied(coord: Coordinator, monkeypatch) -> None:
+    coord.shared_state.phase = "PRELUDE"
     recorded: list = []
 
     async def _rec(source, intent, denied, action_name=None):
         recorded.append(denied)
 
     monkeypatch.setattr(coord.router, "record_policy_denied", _rec)
-    await coord.router.handle_delegate("orchestration", _delegate("explore", "d-seq"))
-    assert [d.rule for d in recorded] == ["exec_order"]
-
-
-@pytest.mark.asyncio
-async def test_handle_delegate_duplicate_running_denied(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.setattr(coord.dispatcher, "_sequence_denial_for_action", lambda a: None)
-    await coord.router.handle_delegate("orchestration", _delegate("baseline", "d-same", {"runs": 1}))
-    recorded: list = []
-
-    async def _rec(source, intent, denied, action_name=None):
-        recorded.append(denied)
-
-    monkeypatch.setattr(coord.router, "record_policy_denied", _rec)
-    # Same key while the first task is still queued (non-terminal) -> denied.
-    await coord.router.handle_delegate("orchestration", _delegate("baseline", "d-same", {"runs": 2}))
-    assert [d.rule for d in recorded] == ["duplicate_idempotency_key_running"]
-
-
-@pytest.mark.asyncio
-async def test_a_delegate_reusing_the_key_of_a_measured_baseline_is_answered_by_it(
-    coord: Coordinator, monkeypatch
-) -> None:
-    """The twin rule a proposed baseline is held to holds on the delegate channel too."""
-    monkeypatch.setattr(coord.dispatcher, "_sequence_denial_for_action", lambda a: None)
-
-    async def _baseline(_ctx):
-        return {"status": "ok", "output_throughput": 100.0, "completed_requests": 8}
-
-    coord.sub.register_executor("baseline", _baseline)
-    await coord.router.handle_delegate("orchestration", _delegate("baseline", "d-measured", {"runs": 1}))
-    (first,) = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
-    lease = await coord.locks.acquire_many(
-        list(first.requires_lanes), holder_id=first.task_id, task_id=first.task_id, action="baseline", ttl_sec=600
-    )
-    await coord.sub.run_task(first, prebound_lease=lease)
-    recorded: list = []
-
-    async def _rec(source, intent, denied, action_name=None):
-        recorded.append(denied)
-
-    monkeypatch.setattr(coord.router, "record_policy_denied", _rec)
-
-    await coord.router.handle_delegate("orchestration", _delegate("baseline", "d-measured", {"runs": 1}))
-
-    assert [d.rule for d in recorded] == ["duplicate_idempotency_key"]
-    assert [t for t in await coord.tasks.queued() if t.kind == "baseline"] == []
+    await coord.router.handle_delegate("orchestration", _delegate("explore"))
+    assert [d.rule for d in recorded] == ["phase_incompatible"]
+    assert await coord.tasks.queued() == []
 
 
 # -- one integrate_patch per specialist deliverable -------------------------
@@ -2914,38 +2614,30 @@ async def _end_specialist(coord: Coordinator, finish: asyncio.Event, *, booked: 
         await coord.dispatcher._drain_completions()
 
 
-def _integrate_request(channel: IntentType, params: dict | None = None) -> Intent:
+def _integrate_request(params: dict | None = None) -> Intent:
     payload = {"action_name": "integrate_patch", "params": params or {"specialist_task_id": "spec-a"}}
-    if channel is IntentType.PROPOSE_ACTION:
-        payload.update(predicted_gain_pct=2.0, rationale="land the patch")
-    return Intent(type=channel, payload=payload)
+    return Intent(type=IntentType.DELEGATE, payload=payload)
 
 
 async def _observed(coord: Coordinator, kind: str, field: str) -> list:
     return [m.payload[field] for m in await coord.bus.tail(topic="observation", n=50) if m.payload.get("kind") == kind]
 
 
-_CHANNELS = pytest.mark.parametrize(
-    "channel", [IntentType.DELEGATE, IntentType.PROPOSE_ACTION], ids=["delegate", "propose_action"]
-)
-
-
 @pytest.mark.asyncio
-@_CHANNELS
 @pytest.mark.parametrize("booked", [False, True], ids=["asked-before-its-result-is-booked", "asked-after"])
 async def test_an_agents_integrate_patch_waits_for_its_specialist_and_lands_the_deliverable_once(
-    coord: Coordinator, monkeypatch, channel: IntentType, booked: bool
+    coord: Coordinator, monkeypatch, booked: bool
 ) -> None:
     """Asked for while the specialist runs it is denied; asked for once it ended it is the task the Coordinator queues."""
     finish = await _dispatch_specialist(coord, monkeypatch, _PATCH_DELIVERABLE)
 
-    await coord.router.handle_intent("orchestration", _integrate_request(channel))
+    await coord.router.handle_intent("orchestration", _integrate_request())
 
     assert await _observed(coord, "policy_denied", "rule") == ["integrate_patch_specialist_unfinished"]
     assert await _integrate_tasks(coord) == []
 
     await _end_specialist(coord, finish, booked=booked)
-    await coord.router.handle_intent("orchestration", _integrate_request(channel))
+    await coord.router.handle_intent("orchestration", _integrate_request())
     await coord.dispatcher._drain_completions()
 
     (task,) = await _integrate_tasks(coord)
@@ -2956,29 +2648,23 @@ async def test_an_agents_integrate_patch_waits_for_its_specialist_and_lands_the_
 
 
 @pytest.mark.asyncio
-@_CHANNELS
-async def test_an_agent_cannot_integrate_a_specialist_that_left_nothing(
-    coord: Coordinator, monkeypatch, channel: IntentType
-) -> None:
+async def test_an_agent_cannot_integrate_a_specialist_that_left_nothing(coord: Coordinator, monkeypatch) -> None:
     finish = await _dispatch_specialist(coord, monkeypatch, {"patches_written": []})
     await _end_specialist(coord, finish)
 
-    await coord.router.handle_intent("orchestration", _integrate_request(channel))
+    await coord.router.handle_intent("orchestration", _integrate_request())
 
     assert await _observed(coord, "policy_denied", "rule") == ["integrate_patch_no_deliverable"]
     assert await _integrate_tasks(coord) == []
 
 
 @pytest.mark.asyncio
-@_CHANNELS
-async def test_an_agent_cannot_queue_an_integrate_patch_that_names_no_specialist(
-    coord: Coordinator, channel: IntentType
-) -> None:
+async def test_an_agent_cannot_queue_an_integrate_patch_that_names_no_specialist(coord: Coordinator) -> None:
     """Denied where it enters, so it never takes the landing lanes to fail in the executor."""
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord.shared_state.baseline_tput = 1000.0
 
-    await coord.router.handle_intent("orchestration", _integrate_request(channel, {"source_phase": "FRAMEWORK_AGENT"}))
+    await coord.router.handle_intent("orchestration", _integrate_request({"source_phase": "FRAMEWORK_AGENT"}))
 
     assert await _observed(coord, "policy_denied", "rule") == ["integrate_patch_no_specialist"]
     assert await _integrate_tasks(coord) == []
@@ -2986,10 +2672,7 @@ async def test_an_agent_cannot_queue_an_integrate_patch_that_names_no_specialist
 
 
 @pytest.mark.asyncio
-@_CHANNELS
-async def test_an_agent_cannot_queue_the_integrate_patch_of_an_upstream_pr(
-    coord: Coordinator, channel: IntentType
-) -> None:
+async def test_an_agent_cannot_queue_the_integrate_patch_of_an_upstream_pr(coord: Coordinator) -> None:
     """Only the FRAMEWORK_AGENT pump lands a diff fetched from an upstream PR."""
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord.shared_state.baseline_tput = 1000.0
@@ -2999,33 +2682,18 @@ async def test_an_agent_cannot_queue_the_integrate_patch_of_an_upstream_pr(
         "source_phase": "FRAMEWORK_AGENT",
     }
 
-    await coord.router.handle_intent("orchestration", _integrate_request(channel, params))
+    await coord.router.handle_intent("orchestration", _integrate_request(params))
 
     assert await _observed(coord, "policy_denied", "rule") == ["integrate_patch_upstream_pr"]
     assert await _integrate_tasks(coord) == []
 
 
 @pytest.mark.asyncio
-@_CHANNELS
 @pytest.mark.parametrize(
     ("ended_with", "refusal", "tasks_after"),
     [
-        (
-            None,
-            {
-                IntentType.DELEGATE: "duplicate_idempotency_key_running",
-                IntentType.PROPOSE_ACTION: "duplicate_proposal_content",
-            },
-            1,
-        ),
-        (
-            {"status": "reverted", "benched": True},
-            {
-                IntentType.DELEGATE: "duplicate_idempotency_key",
-                IntentType.PROPOSE_ACTION: "integrate_patch_already_measured",
-            },
-            1,
-        ),
+        (None, "duplicate_idempotency_key_running", 1),
+        ({"status": "reverted", "benched": True}, "duplicate_idempotency_key", 1),
         ({"status": "apply_failed"}, None, 2),
     ],
     ids=["still-queued", "benchmarked", "ended-unmeasured"],
@@ -3033,9 +2701,8 @@ async def test_an_agent_cannot_queue_the_integrate_patch_of_an_upstream_pr(
 async def test_an_agents_integrate_patch_meets_the_one_the_coordinator_queued(
     coord: Coordinator,
     monkeypatch,
-    channel: IntentType,
     ended_with: dict | None,
-    refusal: dict | None,
+    refusal: str | None,
     tasks_after: int,
 ) -> None:
     """Every route shares the deliverable's key, so it is benchmarked once; a retry is the same deliverable."""
@@ -3056,13 +2723,9 @@ async def test_an_agents_integrate_patch_meets_the_one_the_coordinator_queued(
         )
         await coord.sub.run_task(queued, prebound_lease=lease)
 
-    await coord.router.handle_intent("orchestration", _integrate_request(channel))
+    await coord.router.handle_intent("orchestration", _integrate_request())
 
-    refused = [
-        *await _observed(coord, "policy_denied", "rule"),
-        *await _observed(coord, "proposal_materialize_skipped", "reason"),
-    ]
-    assert refused == ([refusal[channel]] if refusal else [])
+    assert await _observed(coord, "policy_denied", "rule") == ([refusal] if refusal else [])
     tasks = await _integrate_tasks(coord)
     assert [task.idempotency_key for task in tasks] == ["integrate_patch:spec-a", "integrate_patch:spec-a-retry1"][
         :tasks_after
@@ -3082,16 +2745,51 @@ async def test_a_finished_deliverable_is_queued_for_integrate_patch_once(coord: 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "asked_through",
-    [None, IntentType.DELEGATE, IntentType.PROPOSE_ACTION],
-    ids=["queued-by-the-coordinator", "delegate", "propose_action"],
-)
+@pytest.mark.parametrize("inside", [False, True], ids=["outside-the-session", "inside-the-session"])
+async def test_a_deliverable_is_queued_only_when_its_paths_stay_inside_the_session(
+    coord: Coordinator, monkeypatch, tmp_path: Path, inside: bool
+) -> None:
+    """The path walk runs where the deliverable becomes task params, on both routes, so a refusal leaves no row."""
+    probe_config = (coord.session_dir if inside else tmp_path.parent / f"{tmp_path.name}-elsewhere") / "probe.yaml"
+    finish = await _dispatch_specialist(
+        coord,
+        monkeypatch,
+        _PATCH_DELIVERABLE,
+        params={
+            "enablement": True,
+            "source_phase": "ENABLEMENT",
+            "domain": "serving_specialist",
+            "gap_canonical_id": "gap.enablement.boot",
+            "enablement_origin": "eval",
+            "enablement_probe_config_path": str(probe_config),
+        },
+    )
+
+    await _end_specialist(coord, finish)
+    await coord.router.handle_intent("orchestration", _integrate_request())
+
+    refused_by_the_coordinator = await _observed(coord, "specialist_patch_integrate_refused", "rule")
+    refused_to_the_agent = await _observed(coord, "policy_denied", "rule")
+    tasks = await _integrate_tasks(coord)
+    if inside:
+        assert (refused_by_the_coordinator, refused_to_the_agent) == ([], ["duplicate_idempotency_key_running"])
+        assert [task.params["config_path"] for task in tasks] == [str(probe_config)]
+    else:
+        assert (refused_by_the_coordinator, refused_to_the_agent) == (
+            ["path_outside_session_dir"],
+            ["path_outside_session_dir"],
+        )
+        assert tasks == []
+        assert await _observed(coord, "specialist_patch_integrate_refused", "specialist_task_id") == ["spec-a"]
+        assert coord.shared_state.last_action_failures == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delegated", [False, True], ids=["queued-by-the-coordinator", "delegate"])
 async def test_an_enablement_round_moves_onto_the_integrate_patch_of_its_config_deliverable(
-    coord: Coordinator, monkeypatch, asked_through: IntentType | None
+    coord: Coordinator, monkeypatch, delegated: bool
 ) -> None:
     """The round the specialist held is handed to the task that measures what it delivered, whoever queued it."""
-    from hyperloom.orchestrator.state.round_store import RoundRequest
 
     finish = await _dispatch_specialist(
         coord,
@@ -3104,14 +2802,12 @@ async def test_an_enablement_round_moves_onto_the_integrate_patch_of_its_config_
             "gap_canonical_id": "gap.enablement.boot",
         },
     )
-    opened = await coord.rounds.open(
-        "round-spec-a", RoundRequest(now_unix=1.0, request_id="open"), holder_task_id="spec-a", lease_sec=600.0
-    )
+    opened = await coord.rounds.open("round-spec-a", now_unix=1.0, holder_task_id="spec-a", lease_sec=600.0)
     assert opened.ok
 
-    await _end_specialist(coord, finish, booked=asked_through is None)
-    if asked_through is not None:
-        await coord.router.handle_intent("orchestration", _integrate_request(asked_through))
+    await _end_specialist(coord, finish, booked=not delegated)
+    if delegated:
+        await coord.router.handle_intent("orchestration", _integrate_request())
 
     (task,) = await _integrate_tasks(coord)
     assert (task.params["enablement"], task.params["extra_envs"]) == (True, {"X": "1"})

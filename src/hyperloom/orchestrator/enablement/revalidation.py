@@ -15,8 +15,7 @@ from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..collaborator import CoordinatorCollaborator
 from ..launch_controls import kept_launch_controls
-from ..state.round_store import RoundRequest
-from ..state.task_registry import TaskSpec, TerminalTaskReuse, create_in_cursor, task_dispatch_origin
+from ..state.task_registry import TERMINAL_STATES, TaskSpec, create_in_cursor, task_dispatch_origin
 from .generation_scan import GenerationScan
 from .params import _enablement_carrier_params
 
@@ -30,6 +29,10 @@ log = _logging.getLogger(__name__)
 
 class _RowAlreadyLive(Exception):
     """The generation's key already names a live row, so no round is taken."""
+
+
+class _GenerationSpent(Exception):
+    """The generation's key already names an ended row, so the next generation is tried."""
 
 
 class EnablementRevalidation(CoordinatorCollaborator):
@@ -141,8 +144,6 @@ class EnablementRevalidation(CoordinatorCollaborator):
         **create_kwargs: Any,
     ) -> tuple["Task | None", int]:
         """Create or re-use a task row, skipping generations already spent."""
-        from ..state.task_registry import TERMINAL_STATES
-
         generation = scan.generation
         for _attempt in range(max(1, scan.attempts)):
             task, _existing = await self.tasks.create_or_return_existing(
@@ -204,7 +205,7 @@ class EnablementRevalidation(CoordinatorCollaborator):
             holder = uuid.uuid4().hex
 
             def _join(cur: sqlite3.Cursor, _key: str = key, _holder: str = holder) -> None:
-                _task, existing = create_in_cursor(
+                task, existing = create_in_cursor(
                     cur,
                     TaskSpec(
                         kind="baseline",
@@ -217,22 +218,26 @@ class EnablementRevalidation(CoordinatorCollaborator):
                         dispatch_origin=task_dispatch_origin(self.shared_state),
                     ),
                 )
-                if existing:
-                    # A live row already runs this generation, under the round
-                    # it opened.
-                    raise _RowAlreadyLive(_key)
+                if not existing:
+                    return
+                # Raised inside the acquire, so the round it would have opened is rolled back with it.
+                if task.state in TERMINAL_STATES:
+                    raise _GenerationSpent(f"idempotency key {_key!r} already names a {task.state} task")
+                # A live row already runs this generation, under the round
+                # it opened.
+                raise _RowAlreadyLive(_key)
 
             try:
                 acquired = await self.rounds.open(
                     f"revalidation-{holder}",
-                    RoundRequest(now_unix=time.time(), request_id=key, evidence={"idempotency_key": key}),
                     holder_task_id=holder,
+                    now_unix=time.time(),
                     lease_sec=float(lease_ttl_sec),
                     join=_join,
                 )
             except _RowAlreadyLive:
                 return "", generation
-            except TerminalTaskReuse as exc:
+            except _GenerationSpent as exc:
                 log.warning(
                     "ENABLEMENT revalidation: gen%d is spent (%s); opening generation %d",
                     generation,

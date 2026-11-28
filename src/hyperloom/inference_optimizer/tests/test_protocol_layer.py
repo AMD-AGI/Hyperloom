@@ -31,6 +31,7 @@ from hyperloom.orchestrator.state.task_registry import (
     TaskSpec,
 )
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
+from ._lease_helpers import lane_holders
 
 
 @pytest.fixture
@@ -61,18 +62,25 @@ def test_validate_envelope_unknown_intent_rejected():
         validate_envelope(envelope)
 
 
-def test_validate_envelope_propose_action_requires_predicted_gain():
-    envelope = {"intents": [{"intent_type": "propose_action", "payload": {"action_name": "baseline"}}]}
-    with pytest.raises(IntentValidationError, match="predicted_gain_pct"):
-        validate_envelope(envelope)
-
-
 # message_bus
 def test_topic_allowlist_v06_changes():
     """objection/vote/parliament topics are removed."""
     assert "objection" not in TOPIC_ALLOWLIST
     assert "vote" not in TOPIC_ALLOWLIST
     assert "parliament_open" not in TOPIC_ALLOWLIST
+
+
+def test_topic_allowlist_holds_only_topics_the_coordinator_writes():
+    """No Coordinator literal writes ``decision``, and an agent's message is an ``observation`` whatever it names."""
+    assert TOPIC_ALLOWLIST == {
+        "observation",
+        "event",
+        "alert",
+        "delegated_result",
+        "request",
+        "response",
+        "strategy_change",
+    }
 
 
 @pytest.mark.asyncio
@@ -93,23 +101,10 @@ async def test_message_bus_unknown_topic_rejected(db):
 
 
 @pytest.mark.asyncio
-async def test_message_bus_tail_filters_by_to_agent_with_broadcast(db):
-    bus = MessageBus(db)
-    await bus.append_and_seq(Message.new("Coordinator", "Orchestration", "decision", {"kind": "phase_advance"}))
-    await bus.append_and_seq(Message.new("Robustness", "*", "alert", {"severity": "high", "summary": "stall"}))
-    await bus.append_and_seq(Message.new("Coordinator", "Kernel", "decision", {"kind": "phase_advance"}))
-    msgs = await bus.tail(to_agent="Orchestration")
-    topics = {(m.from_agent, m.to_agent) for m in msgs}
-    assert ("Coordinator", "Orchestration") in topics
-    assert ("Robustness", "*") in topics
-    assert ("Coordinator", "Kernel") not in topics
-
-
-@pytest.mark.asyncio
 async def test_message_bus_replay_for_returns_ascending(db):
     bus = MessageBus(db)
     seqs = []
-    for topic in ("observation", "event", "decision"):
+    for topic in ("observation", "event", "alert"):
         s = await bus.append_and_seq(Message.new("kernel_agent", "orchestration", topic, {}))
         seqs.append(s)
     msgs = await bus.replay_for("orchestration", after_seq=0)
@@ -157,9 +152,9 @@ async def test_resource_lock_acquire_release(db):
         ttl_sec=60,
     )
     assert lease.lanes == ("workspace_mutation",)
-    assert (await locks.lane_holders()).get("workspace_mutation") == 1
+    assert (await lane_holders(locks)).get("workspace_mutation") == 1
     await locks.release(lease)
-    assert await locks.lane_holders() == {}
+    assert await lane_holders(locks) == {}
 
 
 @pytest.mark.asyncio
@@ -183,7 +178,7 @@ async def test_resource_lock_lane_busy_rolls_back(db):
         is None
     )
     # Original lease should still be intact (atomic rollback)
-    assert (await locks.lane_holders()).get("benchmark_lane") == 1
+    assert (await lane_holders(locks)).get("benchmark_lane") == 1
     await locks.release(a)
 
 
@@ -236,9 +231,9 @@ async def test_resource_lock_release_ignores_another_holder(db):
     )
     # Wrong holder release must not delete the row
     await locks.release(type(lease)(holder_id="other", lanes=lease.lanes))
-    assert (await locks.lane_holders()).get("profile_lane") == 1
+    assert (await lane_holders(locks)).get("profile_lane") == 1
     await locks.release(lease)
-    assert await locks.lane_holders() == {}
+    assert await lane_holders(locks) == {}
 
 
 @pytest.mark.asyncio
@@ -252,7 +247,7 @@ async def test_resource_lock_does_not_expire_a_live_owner(db):
         ttl_sec=0,  # expires immediately
     )
     assert await locks.reap_dead_holders() == []
-    assert (await locks.lane_holders())["workspace_mutation"] == 1
+    assert (await lane_holders(locks))["workspace_mutation"] == 1
 
 
 # task_registry

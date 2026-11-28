@@ -167,9 +167,9 @@ def test_either_input_alone_is_a_profile(tmp_path, kept):
     (tmp_path / "tracelens" / "analysis.json").unlink()
     if kept == "report":
         state.last_trace_analyze["hot_kernels_top15"] = []
-        state.last_trace_analyze["analysis_md_text"] = "report body"
+        state.last_trace_analyze["has_analysis_md"] = True
     else:
-        state.last_trace_analyze["analysis_md_text"] = ""
+        state.last_trace_analyze["has_analysis_md"] = False
 
     ev = build_request(state)["evidence"]
 

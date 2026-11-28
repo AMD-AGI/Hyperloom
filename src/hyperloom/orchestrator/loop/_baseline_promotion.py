@@ -30,6 +30,7 @@ from ..actions.executors._accuracy_gate import (
 )
 from ..state.round_store import FAILED
 from ._promote_outcome import _PromoteOutcome
+from ..state.shared_state import BaselineAttempt
 from ..state.task_registry import Task
 
 log = logging.getLogger(__name__)
@@ -105,18 +106,11 @@ def _adopt_eval_trigger(state: Any, result_payload: Mapping[str, Any]) -> None:
     cfg = result_payload.get("materialized_config")
     if isinstance(cfg, str) and cfg:
         enablement.probe_config_path = cfg
-    enablement.eval_definition_digest = str(result_payload.get(ACCURACY_DEFINITION_DIGEST_KEY) or "")
     incoming_kind = result_payload.get(BASELINE_EVAL_FAILURE_KIND_KEY)
     if isinstance(incoming_kind, str) and incoming_kind:
         enablement.baseline_eval_kind = incoming_kind
-    observed = to_float(result_payload.get(BASELINE_EVAL_OBSERVED_ACCURACY_KEY))
-    if observed is not None:
-        enablement.observed_accuracy = float(observed)
-    enablement.observed_task = str(result_payload.get("accuracy_task") or "")
-    enablement.observed_metric = str(result_payload.get("accuracy_metric") or "")
     evidence = str(result_payload.get(BASELINE_EVAL_EVIDENCE_KEY) or "")
     if evidence:
-        enablement.baseline_eval_evidence = evidence[:4000]
         enablement.record_launch_observation(
             log=evidence, observation_path=str(result_payload.get("boot_observation_path") or "")
         )
@@ -142,25 +136,19 @@ class BaselinePromotionMixin:
             out[key] = None if value is None else str(value)
         return out
 
-    def _should_run_prelude_bootstrap(self, tput: Any) -> bool:
+    def _should_run_prelude_bootstrap(self) -> bool:
         """Whether to enqueue the post-baseline PRELUDE bootstrap chain.
 
-        Returns ``False`` when there is no positive baseline throughput, when a
-        roofline task is already pending, or when a stop is already pending
-        (e.g. the baseline accuracy test produced no result ->
-        ``baseline_accuracy_failed``). In the stop case the run is about to halt
-        at the Coordinator's end-of-tick check, so no new bootstrap work (warm
-        replay / roofline / scout / static recon) must be enqueued or dispatched
-        in the meantime.
-
-        Args:
-            tput: The promoted baseline throughput.
+        Returns ``False`` when a roofline task is already pending, or when a
+        stop is already pending (e.g. the baseline accuracy test produced no
+        result -> ``baseline_accuracy_failed``). In the stop case the run is
+        about to halt at the Coordinator's end-of-tick check, so no new
+        bootstrap work (warm replay / roofline / scout / static recon) must be
+        enqueued or dispatched in the meantime.
 
         Returns:
             bool: True only when the bootstrap chain should run.
         """
-        if not (isinstance(tput, (int, float)) and tput > 0):
-            return False
         if (self.shared_state.auto_roofline_pending_task_id or "").strip():
             return False
         if (self.shared_state.stop_reason or "").strip():
@@ -174,9 +162,6 @@ class BaselinePromotionMixin:
         downstream gains end up measured against a different reference than the one they claim. A revalidation is
         exempt: the enablement patch changed the stack, so the prior anchor no longer describes anything reproducible.
         """
-        tput = result.get("output_throughput")
-        if not (isinstance(tput, (int, float)) and tput > 0):
-            return "no_measurement"
         prior_anchor = float(self.shared_state.baseline_tput or 0.0)
         if prior_anchor <= 0.0 or is_revalidation:
             return ""
@@ -197,7 +182,7 @@ class BaselinePromotionMixin:
             and isinstance(hot_pass_ran, (int, float))
             and hot_pass_ran > 0
         )
-        if float(tput) > prior_anchor or corrects_a_cold_anchor:
+        if float(result["output_throughput"]) > prior_anchor or corrects_a_cold_anchor:
             return ""
         return "below_anchor"
 
@@ -207,10 +192,12 @@ class BaselinePromotionMixin:
         task: "Task | None",
         outcome: _PromoteOutcome,
     ) -> None:
-        """Promote a baseline result: anchor tput / accuracy / config and bootstrap PRELUDE."""
+        """Promote a measured baseline: anchor tput / accuracy / config and bootstrap PRELUDE.
+
+        Only a valid measurement is promoted, so ``output_throughput`` is positive here.
+        """
         stamp_output_per_gpu(result, self.shared_state.tp)
-        tput = result.get("output_throughput")
-        measured_ok = isinstance(tput, (int, float)) and tput > 0
+        tput = float(result["output_throughput"])
         promoting_tid = str(getattr(task, "task_id", "") or "").strip()
         task_params = getattr(task, "params", None) or {}
         tracked_tid = str(getattr(self.shared_state.enablement, "revalidation_task_id", "") or "").strip()
@@ -220,18 +207,14 @@ class BaselinePromotionMixin:
         )
         prior_anchor = float(self.shared_state.baseline_tput or 0.0)
         held_reason = self._anchor_held_reason(result, is_revalidation=is_revalidation)
-        anchor_accepted = not held_reason
-        if measured_ok:
-            self._anchor_baseline_tput(
-                result, held_reason=held_reason, prior_anchor=prior_anchor, promoting_tid=promoting_tid
-            )
-            self.shared_state.baseline_failure_streak = 0
-            self.shared_state.baseline_failures_this_leg = 0
-            # A genuine baseline is what revalidates an enablement KEEP.
-            await self._settle_pending_revalidation(
-                result, is_revalidation=is_revalidation, promoting_tid=promoting_tid
-            )
-        if anchor_accepted:
+        self._anchor_baseline_tput(
+            tput, held_reason=held_reason, prior_anchor=prior_anchor, promoting_tid=promoting_tid
+        )
+        self.shared_state.baseline_failure_streak = 0
+        self.shared_state.baseline_failures_this_leg = 0
+        # A genuine baseline is what revalidates an enablement KEEP.
+        await self._settle_pending_revalidation(result, is_revalidation=is_revalidation, promoting_tid=promoting_tid)
+        if not held_reason:
             self._promote_anchor_run_facts(result, task_params)
             # Once the stack carries a validated layer, current_best belongs to
             # the stack top and a baseline must not reset it to the bare
@@ -239,35 +222,32 @@ class BaselinePromotionMixin:
             if not (self.shared_state.optimization_stack or []):
                 self._anchor_current_best(result)
             outcome.verdict = Verdict.ADOPTED
-            outcome.audit_decision = "promoted"
-        elif measured_ok:
-            outcome.verdict = Verdict.REVERTED
-            outcome.audit_decision = "no_promote"
         else:
-            outcome.verdict = Verdict.FAILED
-            outcome.audit_decision = "discarded"
-        audit_extras = self._baseline_audit_extras(result, task_params, held_reason, prior_anchor)
-        # seed the gaps[] ledger from baseline.
-        await self._coord.gap_refresh.refresh_gaps(
-            reason="baseline_done", workload_id=self._coord.recipe_journal.workload_canonical_id()
+            outcome.verdict = Verdict.REVERTED
+        attempt = BaselineAttempt(
+            task_id=promoting_tid,
+            status="succeeded",
+            decision="no_promote" if held_reason else "promoted",
+            result=result,
+            extras=self._baseline_attempt_extras(result, task_params, held_reason, prior_anchor),
         )
         if self.shared_state.baseline_tput > 0:
             await self.drain_queued_baselines(reason="baseline_established")
         # Only the run that first establishes the anchor bootstraps; a later
         # re-baseline must not re-fire replay, scout or recon.
-        if prior_anchor <= 0.0 and self._should_run_prelude_bootstrap(tput):
+        if prior_anchor <= 0.0 and self._should_run_prelude_bootstrap():
             await self._bootstrap_prelude_after_baseline(tput)
-        outcome.audit_extras = audit_extras
+        self.shared_state.record_baseline_attempt(attempt)
+        outcome.changed = True
 
     def _anchor_baseline_tput(
         self,
-        result: dict,
+        measured: float,
         *,
         held_reason: str,
         prior_anchor: float,
         promoting_tid: str,
     ) -> None:
-        measured = float(result.get("output_throughput"))
         if held_reason:
             log.info(
                 "baseline anchor: keeping %.1f; re-baseline measured %.1f (task=%s reason=%s)",
@@ -344,7 +324,7 @@ class BaselinePromotionMixin:
         enablement = self.shared_state.enablement
         enablement.validation_pending = False
         enablement.revalidation_task_id = ""
-        await self._coord.enablement_lane.settle_enablement_round(FAILED, reason="revalidation_below_floor")
+        await self._coord.enablement_lane.settle_enablement_round(FAILED)
         enablement_event.record_revalidation_outcome(
             enablement_event.RevalidationOutcome(
                 generation=generation,
@@ -432,15 +412,14 @@ class BaselinePromotionMixin:
         if stop_reason := baseline_budget_stop_reason(self.shared_state, result):
             self.shared_state.set_stop_reason(stop_reason)
 
-    def _baseline_audit_extras(
+    def _baseline_attempt_extras(
         self,
         result: dict,
         task_params: Mapping[str, Any],
         held_reason: str,
         prior_anchor: float,
     ) -> dict[str, Any]:
-        tput = result.get("output_throughput")
-        measured = float(tput) if isinstance(tput, (int, float)) else None
+        measured = float(result["output_throughput"])
         extras: dict[str, Any] = {
             "materialized_config": result.get("materialized_config"),
             "accuracy": result.get("accuracy"),
@@ -451,7 +430,7 @@ class BaselinePromotionMixin:
             "enablement_succeeded": bool(getattr(self.shared_state.enablement, "succeeded", False)),
             "enablement_accuracy_floor": float(getattr(self.shared_state.enablement, "accuracy_floor", 0.0) or 0.0),
         }
-        if held_reason and measured is not None and measured > 0:
+        if held_reason:
             extras["anchor_kept_tput"] = prior_anchor
             extras["anchor_held"] = {"reason": held_reason, "prior": prior_anchor, "measured": measured}
         # Present only when the probe cut a runaway eval short; explains a ~0 accuracy.
@@ -460,8 +439,6 @@ class BaselinePromotionMixin:
         return extras
 
     async def _bootstrap_prelude_after_baseline(self, tput: Any) -> None:
-        # History injection fires regardless of --no-warm-replay.
-        self._coord.phase_prelude.inject_warm_recipe_history_into_ledger()
         # Warm-recipe replay, anchored on the hot baseline_tput contract.
         await self._coord.phase_prelude.maybe_enqueue_warm_replay(
             baseline_tput=float(self.shared_state.baseline_tput or tput),

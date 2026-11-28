@@ -32,8 +32,8 @@ def _backends(orchestration: ScriptedPlan) -> dict[str, MockBackend]:
     return {"orchestration": MockBackend(orchestration, name="o")}
 
 
-def _propose(action_name: str) -> Intent:
-    return Intent(type=IntentType.PROPOSE_ACTION, payload={"action_name": action_name, "predicted_gain_pct": 1.5})
+def _delegate(action_name: str) -> Intent:
+    return Intent(type=IntentType.DELEGATE, payload={"action_name": action_name})
 
 
 @pytest.mark.asyncio
@@ -110,8 +110,9 @@ def test_a_phase_transition_is_a_point_event_in_the_new_phase(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_proposed_action_links_call_intent_and_task(session_dir):
-    c = Coordinator(session_dir, backends=_backends(ScriptedPlan(turns=[MockTurn(intents=[_propose("baseline")])])))
+async def test_a_delegated_action_links_call_intent_and_task(session_dir):
+    c = Coordinator(session_dir, backends=_backends(ScriptedPlan(turns=[MockTurn(intents=[_delegate("baseline")])])))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         with tt.trajectory_scope(session_dir=session_dir, component="coordinator"):
             await c.tick(1)
@@ -124,13 +125,13 @@ async def test_a_proposed_action_links_call_intent_and_task(session_dir):
         if r["status"] == tt.STATUS_COMPLETED and r["agent"] == "orchestration"
     ]
     intents = _rows(session_dir, tt.EVENT_INTENT)
-    (propose_intent,) = [r for r in intents if r["attributes"]["name"] == IntentType.PROPOSE_ACTION.value]
-    assert propose_intent["parent_span_id"] == call["span_id"]
-    assert propose_intent["call_id"] == call["call_id"]
-    assert propose_intent["attributes"]["admitted"] is True
+    (delegate_intent,) = [r for r in intents if r["attributes"]["name"] == IntentType.DELEGATE.value]
+    assert delegate_intent["parent_span_id"] == call["span_id"]
+    assert delegate_intent["call_id"] == call["call_id"]
+    assert delegate_intent["attributes"]["admitted"] is True
 
     (queued,) = [r for r in _rows(session_dir, tt.EVENT_TASK) if r["status"] == tt.STATUS_QUEUED]
-    assert queued["parent_span_id"] == propose_intent["span_id"]
+    assert queued["parent_span_id"] == delegate_intent["span_id"]
     assert queued["attributes"]["kind"] == "baseline"
 
 
@@ -144,9 +145,10 @@ async def test_a_dispatched_task_runs_under_its_own_scope(session_dir):
 
     delegate = Intent(
         type=IntentType.DELEGATE,
-        payload={"action_name": "baseline", "params": {"runs": 1}, "idempotency_key": "k-traj"},
+        payload={"action_name": "baseline", "params": {"runs": 1}},
     )
     c = Coordinator(session_dir, backends=_backends(ScriptedPlan(turns=[MockTurn(intents=[delegate])])))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     c.sub.register_executor("baseline", _executor)
     try:
         with tt.trajectory_scope(session_dir=session_dir, component="coordinator"):
@@ -190,11 +192,11 @@ async def test_a_denied_intent_is_recorded_as_not_admitted(session_dir):
     c = Coordinator(session_dir, backends=_backends(ScriptedPlan(turns=[], default_intent=_heartbeat())))
     try:
         with tt.trajectory_scope(session_dir=session_dir, component="coordinator"):
-            await c.router.handle_intent("nobody", _propose("baseline"))
+            await c.router.handle_intent("orchestration", _delegate(""))
     finally:
         await c.stop()
 
     (row,) = _rows(session_dir, tt.EVENT_INTENT)
     assert row["attributes"]["admitted"] is False
-    assert "nobody" in row["attributes"]["denied"]
+    assert "missing action_name" in row["attributes"]["denied"]
     assert not _rows(session_dir, tt.EVENT_TASK)

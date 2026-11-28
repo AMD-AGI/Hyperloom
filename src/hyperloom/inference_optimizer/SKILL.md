@@ -25,7 +25,7 @@ objective progress.
 
 The CLI starts a Python Coordinator that coordinates:
 
-- Orchestration: decides next actions (`baseline`, `explore`, `specialist`, `integrate_patch`, `sweep`, Kernel requests). In CLOSE, the Coordinator auto-enqueues `report` at session end; Orchestration may also propose it.
+- Orchestration: decides next actions (`baseline`, `explore`, `specialist`, `integrate_patch`, `sweep`), each one `delegate` intent, and Kernel requests, each one `request` intent. In CLOSE, the Coordinator auto-enqueues `report` at session end; Orchestration may also delegate it.
 - Kernel (programmatic, not LLM): the Coordinator dispatches `trace_analyze`, `integrate`, and related request kinds directly to Python handlers without an LLM turn. The `run_gemm_tuning` and `run_fusion` lanes are Coordinator-owned: they run inside the `kernel_agent` task at KERNEL entry and PolicyGate rejects an agent request for either.
 
 State lives under a **session directory** (per optimization run).
@@ -396,10 +396,12 @@ brief:
   dispatch ahead of all other queued work, the grid does not wait for other
   explores, and a plateau exit from FRAMEWORK_AGENT waits for both within the
   phase budget. Orchestration is never offered the domain, and the policy gate
-  denies any delegate naming it as domain or tag. With `HYPERLOOM_CUSTOM_SPECIALIST_ONLY=1`
-  FRAMEWORK_AGENT runs nothing else: Orchestration takes no turn there (its
-  specialists, grids and patches would be denied), the custom task may run to
-  the phase end with no lease extension, the Coordinator's own discovery, scout,
+  denies any delegate naming it as domain or tag. When admission refuses the
+  dispatch (no time left for it, the untested backlog at its cap) the cycle
+  runs without it and a `custom_specialist_refused` observation names the rule.
+  With `HYPERLOOM_CUSTOM_SPECIALIST_ONLY=1`
+  FRAMEWORK_AGENT runs nothing else: Orchestration takes no turn there, the
+  custom task may run to the phase end with no lease extension, the Coordinator's own discovery, scout,
   predictor and general bench are skipped, and the phase hints
   `skip_to_sweep` once the custom task (or its refused admission), its grid and
   its `integrate_patch` tasks are done; the exit goes to KERNEL_AGENT when that phase is
@@ -419,8 +421,9 @@ brief:
   other lever. **Both arms dry advances the phase** via
   `optimize_no_more_leverage`. The LLM may also emit
   `escalate_strategy_change{hint='skip_to_kernel'}` when it judges
-  further effort unproductive. No hint ends the run; a hint outside the closed
-  vocabulary is denied (`escalate_hint_not_in_vocab`).
+  further effort unproductive. No hint ends the run, and `skip_to_kernel` is
+  the only hint the LLM may send: any other is denied
+  (`escalate_hint_not_in_vocab`).
 
 ### FRAMEWORK_AGENT phase — the optimisation phase
 
@@ -629,8 +632,8 @@ synthetic one. Neither does a run graded on anything but output throughput
 the throughput objective.
 
 Every complete measured attempt is written idempotently when the session
-breakdown is written. Rendered Experience references from an orchestration
-grid, proposed or delegated, are carried through to the measured Experience. A
+breakdown is written. Rendered Experience references from a grid Orchestration
+delegated are carried through to the measured Experience. A
 network write failure is spooled for retry.
 
 Each injection appends one entry to `state.json` `experience_kb_injections`

@@ -209,7 +209,7 @@ class _BenchmarkLaunchMixin:
         params = ctx.task.params
         config_path = self._attempt_config_path(params)
         shared_state = ctx.extra.get("shared_state") or self.shared_state
-        fw, server_args = self._settle_attempt_server_args(params, shared_state)
+        fw, server_args = self._settle_attempt_server_args(params)
         output_dir = self._resolve_workspace(ctx, "baseline")
         output_dir.mkdir(parents=True, exist_ok=True)
         # Orchestration-supplied script + result_dir overrides.
@@ -241,9 +241,8 @@ class _BenchmarkLaunchMixin:
         activate_runtime(config_path, params.get("runtime_override") or {})
         # Report the invocation now, with the config final and the server not
         # yet booted. This frame is the only one that knows the args as a fact:
-        # the one-shot eager fallback has had its say by here, and after the
-        # launch the same answer can only be guessed at by parsing the server's
-        # own log back.
+        # after the launch the same answer can only be guessed at by parsing
+        # the server's own log back.
         if recorder is not None:
             recorder.record_invocation(
                 invocation=BaselineInvocation(
@@ -308,8 +307,6 @@ class _BenchmarkLaunchMixin:
             base = server_base.args
             if operator_args:
                 base = merge_server_args(base, operator_args) if base else operator_args
-            # Base on ``server_args`` (carries the one-shot cuda-graph eager-fallback flag when armed) so the MN
-            # per-round restart keeps that fallback too.
             # PD knobs auto-resolved by the helper from $PD_* env, falling back to state.json.
             await restart_server_for_round(
                 RoundServer.from_env(

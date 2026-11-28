@@ -6,8 +6,8 @@
 The coordinator database of such a session is kept outside the session directory, below the container's ``TMPDIR``,
 so a run resumed after a preemption finds none there. These tests resume the same session with the database kept (the
 same ``TMPDIR``, or a new ``TMPDIR`` and ``HYPERLOOM_LEDGER_DIR`` on a disk that outlives the container), and read what
-the resume recovers: the half-applied integrate window the stopped leg left and the KEEP it had recorded on the bus but
-not yet put on the stack. Without the database, and with the session having run, the
+the resume recovers: the integrate window the stopped leg left open, whose KEEP is on the task row and not yet on the
+stack. Without the database, and with the session having run, the
 resume is refused, naming ``HYPERLOOM_LEDGER_DIR``: the leases and tasks of the earlier legs cannot be inspected, so
 work they left running would go unseen (fail closed, as the guard did on the shared database)."""
 
@@ -30,7 +30,6 @@ from hyperloom.inference_optimizer.session.paths import (
     private_db_path_for,
     shared_db_path_for,
 )
-from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.orchestrator.bus.storage.connection import DatabaseNotPrivate, SqliteConnection
 from hyperloom.orchestrator.loop._promote_outcome import IntegrateRecoveryIncomplete
 from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -38,22 +37,19 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskSpec
 from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
+from ._booked_results import record_outcome
+
 _SECRET = "hf_live_value_123"
 _KEPT = {
-    "task_id": "ti-orphan",
-    "kind": "integrate_patch",
-    "state": "succeeded",
-    "result": {
-        "status": "kept",
-        "specialist_task_id": "spec-orphan",
-        "output_throughput": 123.0,
-        "source_phase": "FRAMEWORK_AGENT",
-        "domain": "serving_specialist",
-        "provenance": "specialist:serving_specialist",
-        "framework_agent_authoring": True,
-        "source_manifest": "/session/optimization_stack/src/spec-orphan/manifest.json",
-        "target_files": ["vllm/model.py"],
-    },
+    "status": "kept",
+    "specialist_task_id": "spec-kept",
+    "output_throughput": 123.0,
+    "source_phase": "FRAMEWORK_AGENT",
+    "domain": "serving_specialist",
+    "provenance": "specialist:serving_specialist",
+    "framework_agent_authoring": True,
+    "source_manifest": "/session/optimization_stack/src/spec-kept/manifest.json",
+    "target_files": ["vllm/model.py"],
 }
 
 
@@ -65,42 +61,35 @@ def _coordinator(session: Path) -> Coordinator:
 
 
 async def _stopped_leg(session: Path) -> Coordinator:
-    """A leg with a credential in its pins that has a KEEP recorded but not on the stack, and is about to be lost (its
-    coordinator is returned open)."""
+    """A leg with a credential in its pins that ran and is about to be lost (its coordinator is returned open)."""
     state = SharedState()
     state.operator_extra_env = {"HF_TOKEN": _SECRET}
     state.save(session)
     coord = _coordinator(session)
     coord.shared_state.tick = 3  # the leg ran: a tick was counted
     coord.shared_state.save(session)
-    await coord.bus.append_and_seq(Message.new("coordinator", "*", "delegated_result", _KEPT))
     return coord
 
 
 async def _lost_with_an_integrate_window_open(session: Path) -> None:
-    """The stopped leg dies with an integrate window open too: a task row that reads running and the sentinel."""
+    """The stopped leg dies with an integrate window open: the KEEP on the task row, the sentinel, nothing on the stack."""
     coord = await _stopped_leg(session)
     task, _ = await coord.tasks.create_or_return_existing(
-        TaskSpec(kind="integrate_patch", params={}, idempotency_key="ti-roll", task_id="ti-roll")
+        TaskSpec(kind="integrate_patch", params={}, idempotency_key="ti-kept", task_id="ti-kept")
     )
-    await coord.tasks.transition(task.task_id, "running")
+    await record_outcome(coord, task.task_id, _KEPT)
     coord.shared_state.pending_integrate = {
-        "task_id": "ti-roll",
-        "framework_source_root": "/tmp/framework",
-        "patches": ["/tmp/p.diff"],
+        "task_id": "ti-kept",
+        "specialist_task_id": "spec-kept",
+        "recovery": {"phase": "accepted"},
     }
     coord.shared_state.save(session)
     coord.db.raw.close()
 
 
-async def _resumed_leg(session: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+async def _resumed_leg(session: Path) -> dict[str, object]:
     """What the resume recovers: whether it was refused, the fixes it made and the stack it rebuilt."""
     coord = _coordinator(session)
-    monkeypatch.setattr(
-        coord.writeback,
-        "_resume_rollback_pending_integrate",
-        lambda pending, _gone_scope=None: {"reversed": list(pending["patches"]), "failed": []},
-    )
     try:
         report = await coord.writeback._resume_consistency_pass()
     except IntegrateRecoveryIncomplete as exc:
@@ -111,14 +100,11 @@ async def _resumed_leg(session: Path, monkeypatch: pytest.MonkeyPatch) -> dict[s
     return {**outcome, "stack": len(coord.shared_state.optimization_stack or [])}
 
 
-_KEEP_REPLAYED = {
+_RECOVERED = {
     "refused": None,
-    "fixes": ["queued_resume_stack_rebench", "replayed_orphaned_keep"],
+    "fixes": ["queued_resume_stack_rebench", "replayed_pending_integrate"],
     "stack": 1,
 }
-
-
-_RECOVERED = {**_KEEP_REPLAYED, "fixes": [*_KEEP_REPLAYED["fixes"], "rolled_back_pending_integrate"]}
 
 
 def _container(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> Path:
@@ -133,7 +119,7 @@ def _container(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> Pa
 async def test_a_resume_in_the_same_container_recovers_what_the_stopped_leg_left(session_dir, tmp_path, monkeypatch):
     _container(tmp_path, monkeypatch, "container")
     await _lost_with_an_integrate_window_open(session_dir)
-    assert await _resumed_leg(session_dir, monkeypatch) == _RECOVERED
+    assert await _resumed_leg(session_dir) == _RECOVERED
 
 
 @pytest.mark.asyncio
@@ -150,7 +136,7 @@ async def test_a_resume_in_a_new_container_on_the_ledger_directory_an_operator_n
 
     _container(tmp_path, monkeypatch, "container-2")  # the preempted run starts again on a new pod
     assert db_path_for(session_dir) == database
-    assert await _resumed_leg(session_dir, monkeypatch) == _RECOVERED
+    assert await _resumed_leg(session_dir) == _RECOVERED
 
 
 @pytest.mark.asyncio

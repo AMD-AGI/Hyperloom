@@ -124,7 +124,6 @@ async def _capture_tunableop_recording(run: _ShapeCaptureRun, state: Any) -> Han
         }
     )
     capture_state = copy.deepcopy(state)
-    capture_state.baseline_eager_fallback = False
     benchmark_result, fault = await _served_capture_workload(
         BaselineExecutor(session_dir=run.session_dir, shared_state=capture_state),
         run,

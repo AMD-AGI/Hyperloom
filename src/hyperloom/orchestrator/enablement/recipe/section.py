@@ -226,7 +226,7 @@ def _lane_engaged(state: dict[str, Any]) -> bool:
     records it kept, and the setup rows it ran.
 
     ``launch_observation_path`` is deliberately NOT read here. All three of its
-    writers (``writeback._record_enablement_eval_trigger`` and the two boot
+    writers (``writeback._persist_eval_failure`` and the two boot
     failure paths) set it from the *trigger* observation -- the failed launch or
     failed eval that gives the lane something to author against -- and they run
     before any round is dispatched. Reading it would emit the section for a

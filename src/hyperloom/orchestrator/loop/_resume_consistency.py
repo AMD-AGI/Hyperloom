@@ -24,7 +24,7 @@ class ResumeConsistencyMixin:
     async def _resume_consistency_pass(self) -> dict[str, Any]:
         """One-shot resume audit + recovery for stack/current_best consistency.
 
-        Recovers half-applied / orphaned KEEPs through the same lift the live
+        Recovers a half-applied KEEP through the same lift the live
         path uses, then compensates the validation watermark by enqueuing a
         single full-stack end-to-end rebench. Idempotent — only runs on a
         resumed session and every recovery step dedupes, so a second pass is a
@@ -73,8 +73,7 @@ class ResumeConsistencyMixin:
         # is already terminal, unstick the window so a fresh revalidation can be enqueued -- closed and charged to the
         # stall counter, or reopened uncharged when the run cancelled the row.
         await self._resume_recover_pending_revalidation(report)
-        # (2) Replay orphaned KEEPs that crashed before the append, then (2b) put the kept source patches on the tree.
-        await self._resume_recover_orphaned_keeps(report)
+        # (2) Put the kept source patches on the tree.
         if halt := install_kept_source_layers(state, self.session_dir, report):
             raise IntegrateRecoveryIncomplete(halt)
 

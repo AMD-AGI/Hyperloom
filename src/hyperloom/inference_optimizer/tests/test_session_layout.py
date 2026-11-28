@@ -19,7 +19,6 @@ from hyperloom.inference_optimizer.session.manifest import (
     load_manifest,
     write_manifest,
 )
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import PolicyGate
@@ -27,6 +26,7 @@ from hyperloom.orchestrator.bus.resource_lock import (
     SqliteLeaseBackend,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
+from hyperloom.orchestrator.state.round_store import RoundStore
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.inference_optimizer.session.session_paths import (
     agent_prompt_snapshot,
@@ -411,7 +411,7 @@ async def _run_one_task(tmp_path, monkeypatch, kind: str, idempotency_key: str):
         captured["session_dir"] = ctx.extra.get("session_dir")
         return {"status": "succeeded"}
 
-    sub = SubAgentRunner(locks, tasks, session_dir=sd)
+    sub = SubAgentRunner(locks, tasks, RoundStore(db), session_dir=sd)
     sub.register_executor(kind, runner)
     task, _ = await tasks.create_or_return_existing(
         TaskSpec(
@@ -444,7 +444,7 @@ async def test_sub_agent_runner_skips_unknown_action(tmp_path, monkeypatch):
 
 
 def _gate(tmp_path: Path) -> PolicyGate:
-    return PolicyGate(role_registry=default_role_registry(), session_dir=tmp_path)
+    return PolicyGate(session_dir=tmp_path)
 
 
 def test_policy_path_inside_session_dir_passes(tmp_path):

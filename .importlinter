@@ -63,7 +63,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.state.objective
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.state.shared_state
     hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.roles
-    hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.roles.agent_role
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.actions.executors.report
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.phases.machine_state
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.policy.gate
@@ -430,7 +429,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.state.objective
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.state.shared_state
     hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.roles
-    hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.roles.agent_role
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.actions.executors.report
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.phases.machine_state
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.policy.gate
@@ -516,7 +514,6 @@ ignore_imports =
     hyperloom.orchestrator.prompts.specialist_prompt_builder -> hyperloom.orchestrator.policy.gate
     hyperloom.orchestrator.specialists.dispatch -> hyperloom.orchestrator.knowledge.static_recon_checklist
     hyperloom.orchestrator.specialists.dispatch -> hyperloom.orchestrator.phases.machine_state
-    hyperloom.orchestrator.specialists.dispatch -> hyperloom.orchestrator.policy.gate
     hyperloom.orchestrator.specialists.leaf -> hyperloom.orchestrator.prompts.specialist_prompt_builder
     hyperloom.orchestrator.specialists.profile -> hyperloom.orchestrator.actions.executors._multi_node_env
     hyperloom.orchestrator.specialists.rebench -> hyperloom.orchestrator.actions.executors.grid._grid_runner

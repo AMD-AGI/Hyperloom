@@ -38,6 +38,7 @@ def _coordinator(session_dir: Path):
             "orchestration": MockBackend(silent, name="orch"),
         },
     )
+    coord.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     coord.sub.register_executor("kernel_agent", coord.phase_kernel.run_agent)
     coord.sub.register_executor("roofline", _no_reprofile)
     return coord

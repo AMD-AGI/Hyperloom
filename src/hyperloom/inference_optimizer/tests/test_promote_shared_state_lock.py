@@ -7,6 +7,7 @@ rows.
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
@@ -72,22 +73,64 @@ def _task(kind: str, *, task_id: str = "t1", params: dict | None = None) -> Task
     )
 
 
-def _count_record_attempt(coord: Coordinator, monkeypatch) -> list[dict]:
-    """Spy that records every record_action_attempt call's arguments, forwarding to the real impl."""
-    calls: list[dict] = []
-    real = coord.shared_state.record_action_attempt
-
-    def spy(action, attempt):
-        calls.append({"action": action, "attempt": attempt})
-        return real(action, attempt)
-
-    monkeypatch.setattr(coord.shared_state, "record_action_attempt", spy)
-    return calls
+def _saved(session_dir: Path) -> dict:
+    return json.loads((session_dir / "state.json").read_text(encoding="utf-8"))
 
 
-# GAP 2: changed / audit convergence for baseline / profile / explore / roofline.
+_PROFILED = {"status": "succeeded", "main_trace_path": "/tmp/trace.json.gz", "output_throughput": 150.0}
+_EXPLORED = {"explore_search_update": {"tested": {"fp-1": {"name": "v1", "outcome": "REVERT"}}}, "winners": []}
+
+
 @pytest.mark.asyncio
-async def test_promote_baseline_writes_state_and_audit(session_dir):
+@pytest.mark.parametrize(
+    ("kind", "result", "saved_field", "saved_value"),
+    [
+        ("baseline", {"output_throughput": 100.0}, "baseline_tput", 100.0),
+        ("profile", _PROFILED, "last_profile_trace", "/tmp/trace.json.gz"),
+        ("roofline", {"status": "succeeded", "snapshot_id": 5}, "roofline_failure_streak", 0),
+        ("explore", _EXPLORED, "explore_search", None),
+    ],
+)
+async def test_a_promotion_saves_what_it_changed(session_dir, kind, result, saved_field, saved_value):
+    """Each of these handlers changes the state on every result, so each result reaches ``state.json``."""
+    coord = _coord(session_dir)
+    coord.shared_state.roofline_failure_streak = 2
+    coord.shared_state.save(session_dir)
+
+    await coord.writeback.promote_to_shared_state(kind, result, task=_task(kind))
+
+    saved = _saved(session_dir)[saved_field]
+    if kind == "explore":
+        assert list(saved["tested"]) == ["fp-1"]
+    else:
+        assert saved == saved_value
+
+
+@pytest.mark.asyncio
+async def test_the_breakdown_is_told_the_decision_on_a_measured_baseline_and_on_a_failed_one(session_dir, monkeypatch):
+    from hyperloom.inference_optimizer.breakdown.recorder import baseline_event
+
+    told: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        baseline_event, "record_action_decision", lambda **row: told.append((row["task_id"], row["decision"]))
+    )
+    coord = _coord(session_dir)
+
+    await coord.writeback.promote_to_shared_state(
+        "baseline", {"output_throughput": 100.0}, task=_task("baseline", task_id="b-1")
+    )
+    await coord.writeback.handle_unpromotable_result(
+        _task("baseline", task_id="b-2"), {"status": "failed", "error_class": "no_report"}
+    )
+    await coord.writeback.handle_unpromotable_result(_task("explore", task_id="e-1"), {"status": "failed"})
+
+    assert told == [("b-1", "promoted"), ("b-2", "no_promote")]
+    assert coord.shared_state.last_baseline["task_id"] == "b-2"
+
+
+# GAP 2: what each of baseline / profile / explore / roofline writes.
+@pytest.mark.asyncio
+async def test_promote_baseline_writes_state_and_the_last_baseline(session_dir):
     coord = _coord(session_dir)
     s = coord.shared_state
 
@@ -120,14 +163,14 @@ async def test_promote_baseline_writes_state_and_audit(session_dir):
         "model_path": "/models/Qwen",
         "tp_size": 1,
     }
-    # Audit row: promoted with key_metric = output_throughput.
+    # The latest-baseline record: promoted with key_metric = output_throughput.
     assert s.last_baseline["decision"] == "promoted"
     assert s.last_baseline["status"] == "succeeded"
     assert s.last_baseline["key_metric"] == 100.0
 
 
 @pytest.mark.asyncio
-async def test_promote_profile_writes_state_and_audit(session_dir):
+async def test_promote_profile_writes_state(session_dir):
     coord = _coord(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
@@ -182,11 +225,6 @@ async def test_promote_profile_writes_state_and_audit(session_dir):
     assert s.current_best["action"] == "explore"
     assert s.current_best["tput"] == 100.0
     assert s.cumulative_gain_validated == 0.0
-    # Audit row.
-    assert s.last_profile["decision"] == "promoted"
-    assert s.last_profile["status"] == "succeeded"
-    assert s.last_profile["extras"]["trace_path"] == "/tmp/trace.json.gz"
-    assert s.last_profile["extras"]["profile_args"] == "--mem-fraction-static=0.9"
 
 
 @pytest.mark.asyncio
@@ -219,7 +257,7 @@ async def test_promote_profile_without_task_uses_shared_state_workload(session_d
 
 
 @pytest.mark.asyncio
-async def test_promote_explore_promoted_writes_state_and_audit(session_dir):
+async def test_promote_explore_promoted_writes_state(session_dir):
     coord = _coord(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
@@ -240,18 +278,12 @@ async def test_promote_explore_promoted_writes_state_and_audit(session_dir):
 
     assert s.current_best["action"] == "explore"
     assert s.current_best["tput"] == 130.0
-    accepted = s.explore_search.get("accepted") if isinstance(s.explore_search, dict) else None
-    assert isinstance(accepted, list) and len(accepted) == 1
-    # Audit row: promoted; extras carry the round + winner stats.
-    assert s.last_explore["decision"] == "promoted"
-    assert s.last_explore["status"] == "succeeded"
-    assert s.last_explore["extras"]["round_id"] == "r1"
-    assert s.last_explore["extras"]["winners_count"] == 1
+    assert [(entry["action"], entry["variant_name"]) for entry in s.optimization_stack] == [("explore", "v1")]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["succeeded", "recovered"])
-async def test_promote_roofline_with_a_trace_writes_audit(session_dir, status):
+async def test_promote_roofline_with_a_trace_resets_the_failure_streak(session_dir, status):
     """A trace salvaged from a failed profile run is analysed like any other."""
     coord = _coord(session_dir)
     s = coord.shared_state
@@ -271,9 +303,6 @@ async def test_promote_roofline_with_a_trace_writes_audit(session_dir, status):
 
     # roofline resets its failure streak on an analysed snapshot.
     assert s.roofline_failure_streak == 0
-    # Audit row: promoted; snapshot_id taken from last_trace_analyze snapshot.
-    assert s.last_roofline["decision"] == "promoted"
-    assert s.last_roofline["extras"]["snapshot_id"] == 5
 
 
 @pytest.mark.asyncio
@@ -287,7 +316,7 @@ async def test_roofline_with_an_analysis_anchors_the_watermark(session_dir):
     s.last_trace_analyze = {
         "roofline_snapshot_id": 5,
         "analysis_md_path": "/tmp/a.md",
-        "analysis_md_text": "# roofline\nattention is 64.8% of GPU time\n",
+        "has_analysis_md": True,
     }
 
     await coord.writeback.promote_to_shared_state(
@@ -307,7 +336,7 @@ async def test_roofline_without_an_analysis_leaves_the_watermark_armed(session_d
     s.baseline_tput = 100.0
     s.cumulative_gain_validated = 75.0
     s.last_roofline_tput = 0.0
-    s.last_trace_analyze = {"roofline_snapshot_id": 5, "analysis_md_text": ""}
+    s.last_trace_analyze = {"roofline_snapshot_id": 5, "has_analysis_md": False}
 
     await coord.writeback.promote_to_shared_state(
         "roofline",
@@ -339,35 +368,7 @@ async def test_promote_profile_with_trace_clears_last_trace_analyze(session_dir)
     assert s.last_trace_analyze == {}
 
 
-# GAP 4: profile "skipped" arm audits as skipped and clears the pending roofline task, without touching current_best /
-# last_profile_trace.
-@pytest.mark.asyncio
-async def test_promote_profile_skipped_audits_and_clears_pending(session_dir):
-    coord = _coord(session_dir)
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.auto_roofline_pending_task_id = "t1"
-
-    await coord.writeback.promote_to_shared_state(
-        "profile",
-        {
-            "status": "skipped",
-            "error_class": "no_profiler",
-            "error": "profiler disabled",
-        },
-        task=_task("profile", task_id="t1"),
-    )
-
-    # Pending roofline task cleared; audit row is a skipped verdict.
-    assert s.auto_roofline_pending_task_id == ""
-    assert s.last_profile["decision"] == "skipped"
-    assert s.last_profile["extras"]["error_class"] == "no_profiler"
-    # Skipped arm never promotes current_best.
-    assert not s.current_best or s.current_best.get("action") != "profile"
-
-
-# GAP 5: integrate_patch KEEP lifts current_best and clears pending_integrate; integrate_patch is NOT in
-# _AUDIT_ACTIONS so no last_integrate_patch is written.
+# GAP 5: integrate_patch KEEP lifts current_best and clears pending_integrate.
 @pytest.mark.asyncio
 async def test_promote_integrate_patch_kept_lifts_and_clears_pending(session_dir):
     coord = _coord(session_dir)
@@ -954,7 +955,7 @@ async def test_prebaseline_enablement_patch_is_config_only_not_gain(session_dir,
     assert entry["recipe_publishable"] is False
     assert s.current_best["action"] == "integrate_patch"
     assert s.current_best["extra_server_args"] == "--mem-fraction-static 0.95"
-    assert s.current_best["optimization_stack"] == s.optimization_stack
+    assert "optimization_stack" not in s.current_best
     assert s.current_best_measurement["tput"] == 140.0
     assert s.baseline_tput == 0.0
     assert s.gain_per_stack_entry == [None]
@@ -1141,6 +1142,43 @@ async def test_realized_diff_replaces_the_delivered_patch(session_dir, tmp_path,
 
 
 @pytest.mark.asyncio
+async def test_a_realized_diff_named_through_a_symlink_is_staged_as_the_file_it_points_at(
+    session_dir, tmp_path, monkeypatch
+):
+    """The store refuses a symlink, so the outbox names every source by its canonical path."""
+    draft = tmp_path / "kb-draft"
+    monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    realized = tmp_path.resolve() / "snapshot" / "realized.patch"
+    realized.parent.mkdir()
+    realized.write_bytes(b"as landed")
+    link = tmp_path / "latest.patch"
+    link.symlink_to(realized)
+    coord = _coord(session_dir)
+    coord.shared_state.baseline_tput = 100.0
+
+    await coord.writeback.promote_to_shared_state(
+        "integrate_patch",
+        {
+            "status": "kept",
+            "output_throughput": 130.0,
+            "specialist_task_id": "spec-realized-link",
+            "patches_applied": [],
+            "source_realized_patch": str(link),
+        },
+        task=_task("integrate_patch", params={"source_phase": "FRAMEWORK_AGENT"}),
+    )
+
+    staged = KnowledgeSections(draft).staged("patch")
+    ref = "patch/overlays/000000/00-realized.patch"
+    assert staged.knowledge["patches"] == [ref]
+    assert (draft / "files" / ref).read_bytes() == b"as landed"
+    row = staged.knowledge["provenance"][0]
+    assert row["realized"] is True
+    assert row["host_origin"]["sources"] == [str(realized)]
+
+
+@pytest.mark.asyncio
 async def test_delivered_patch_is_the_fallback_when_no_realized_diff(session_dir, tmp_path, monkeypatch):
     draft = tmp_path / "kb-draft"
     monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
@@ -1272,7 +1310,6 @@ def test_outbox_drain_acknowledges_only_confirmed_success(
         "id": "FRAMEWORK_AGENT:0",
         "owner": "FRAMEWORK_AGENT",
         "stack_index": 0,
-        "include_patches": True,
         "patch_sources": [str(patch)],
         "missing_patch_sources": [],
     }
@@ -1302,7 +1339,6 @@ def test_outbox_dead_letters_missing_patch_without_blocking_close(
         "id": "FRAMEWORK_AGENT:0",
         "owner": "FRAMEWORK_AGENT",
         "stack_index": 0,
-        "include_patches": True,
         "patch_sources": [str(session_dir / "gone.patch")],
         "missing_patch_sources": [],
     }
@@ -1344,7 +1380,6 @@ async def test_resume_settles_state_before_draining_kb_outbox(
             "id": "EXPLORE:0",
             "owner": "EXPLORE",
             "stack_index": 0,
-            "include_patches": False,
             "patch_sources": [],
             "missing_patch_sources": [],
         }
@@ -1358,7 +1393,6 @@ async def test_resume_settles_state_before_draining_kb_outbox(
         "_resume_recover_pending_targeted_build",
         "_resume_recover_pending_warm_replay",
         "_resume_recover_pending_revalidation",
-        "_resume_recover_orphaned_keeps",
     ):
         monkeypatch.setattr(coord.writeback, name, _noop)
     monkeypatch.setattr(coord.bus, "record_observation", _noop)
@@ -1388,11 +1422,12 @@ async def test_resume_settles_state_before_draining_kb_outbox(
 @pytest.mark.asyncio
 @pytest.mark.asyncio
 # GAP 7: replay_warm_recipe routes through promote_warm_replay (self-saves) and never sets outcome.changed, so the
-# unified tail neither audits nor re-saves.
+# unified tail does not save again.
 @pytest.mark.asyncio
 async def test_promote_replay_warm_recipe_routes_and_skips_tail(session_dir, monkeypatch):
     coord = _coord(session_dir)
-    calls = _count_record_attempt(coord, monkeypatch)
+    saves: list[Path] = []
+    monkeypatch.setattr(coord.shared_state, "save", saves.append)
 
     warm_calls: list[dict] = []
 
@@ -1421,39 +1456,7 @@ async def test_promote_replay_warm_recipe_routes_and_skips_tail(session_dir, mon
     # The dedicated warm-replay promote path ran exactly once with the result.
     assert len(warm_calls) == 1
     assert warm_calls[0]["result"]["output_throughput"] == 120.0
-    # replay_warm_recipe is not audited by the unified tail.
-    assert all(c["action"] != "replay_warm_recipe" for c in calls)
-
-
-# GAP 8: roofline failure (status != succeeded/skipped) bumps the failure streak and audits as discarded (roofline IS
-# an audited action).
-@pytest.mark.asyncio
-async def test_promote_roofline_failed_bumps_streak_and_audits_discarded(session_dir):
-    coord = _coord(session_dir)
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.roofline_failure_streak = 2
-    s.auto_roofline_pending_task_id = "t1"
-
-    await coord.writeback.promote_to_shared_state(
-        "roofline",
-        {
-            "status": "failed",
-            "phase": "trace_analyze",
-            "error_class": "tracelens_error",
-            "error": "boom",
-        },
-        task=_task("roofline", task_id="t1"),
-    )
-
-    # Streak incremented; pending pointer cleared.
-    assert s.roofline_failure_streak == 3
-    assert s.auto_roofline_pending_task_id == ""
-    # Audit row: discarded, with the failure context in extras.
-    assert s.last_roofline["decision"] == "discarded"
-    assert s.last_roofline["status"] == "succeeded"  # record_action_attempt stamps the attempt status
-    assert s.last_roofline["extras"]["error_class"] == "tracelens_error"
-    assert s.last_roofline["extras"]["phase"] == "trace_analyze"
+    assert saves == []
 
 
 # GAP 9: explore resume_stack_revalidate (native, non-GEAK) with a valid tput clears resume_pending_revalidation and

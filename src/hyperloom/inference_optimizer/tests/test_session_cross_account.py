@@ -463,7 +463,7 @@ _BUS_LEG = textwrap.dedent(
     from hyperloom.inference_optimizer.session import paths
     from hyperloom.inference_optimizer.session.manifest import write_manifest
     from hyperloom.orchestrator.bus.message_bus import Message
-    from hyperloom.orchestrator.loop.coordinator import Coordinator, default_role_registry
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     argv = ["optimize", "--model", "/models/m", "--framework", "sglang"]
@@ -481,7 +481,7 @@ _BUS_LEG = textwrap.dedent(
         state.operator_server_args, state.operator_extra_env = server_args, env
     state.save(session)
     os.environ["INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"] = str(session)
-    coordinator = Coordinator(session, backends={{name: object() for name in default_role_registry()}})
+    coordinator = Coordinator(session, backends={{"orchestration": object()}})
     announcement = {{
         "task_id": "t1",
         "kind": "benchmark_run",

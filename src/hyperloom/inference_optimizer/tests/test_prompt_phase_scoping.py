@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 import pytest
 
 from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
-from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE, COORDINATOR_INTERNAL_ACTIONS
 from hyperloom.orchestrator.phases import machine_state as _ps
 from hyperloom.orchestrator.phases import phase_predicates, phase_transitions
 from hyperloom.orchestrator.prompts.prompt_builder import (
@@ -61,16 +61,37 @@ def test_the_cycle_directive_replaces_the_default_arc(registry):
 
 # Phase-scoped modules render only where the behaviour exists
 def test_the_stop_step_asks_for_report_only_where_the_phase_admits_it(registry):
-    """Outside CLOSE a proposed ``report`` is refused at admission, so the prompt must not ask for one."""
+    """Outside CLOSE a delegated ``report`` is refused at admission, so the prompt must not ask for one."""
     for phase in _ps.PHASE_NAMES:
-        asks = "propose `report` once" in _build(registry, phase)
+        asks = "delegate `report` once" in _build(registry, phase)
         assert asks == ("report" in _ps.allowed_actions_for(phase)), phase
+
+
+def test_every_action_an_agent_queues_is_taught_as_a_delegate(registry):
+    """``delegate`` is the one verb that queues an action, so no phase's prompt may name another."""
+    for phase in ("", *_ps.PHASE_NAMES):
+        prompt = _build(registry, phase)
+        emits = [line.strip() for line in prompt.splitlines() if line.strip().startswith("EMIT:")]
+        assert "EMIT: delegate{action_name='baseline', params?={...}}" in emits, phase
+        assert all(emit.startswith(("EMIT: delegate{", "EMIT: REQUEST{", "EMIT: (no emit")) for emit in emits), phase
 
 
 def test_the_report_catalogue_entry_names_the_only_phase_that_admits_it(registry):
     """The catalogue entry renders in every phase, so it must not invite a ``report`` the phase refuses."""
     assert [phase for phase in _ps.PHASE_NAMES if "report" in _ps.allowed_actions_for(phase)] == [_ps.PHASE_CLOSE]
     assert "only in CLOSE" in registry["report"].description
+
+
+def test_an_action_the_coordinator_dispatches_has_no_proposal_template(registry):
+    """No phase admits a proposal for it, so its catalogue entry must not show how to send one."""
+    prompt = _build(registry, "")
+    assert "- **roofline**" in prompt
+    for name in COORDINATOR_INTERNAL_ACTIONS:
+        assert all(name not in _ps.allowed_actions_for(phase) for phase in _ps.PHASE_NAMES)
+        assert f"action_name='{name}'" not in prompt
+    lines = prompt.splitlines()
+    entry = next(i for i, line in enumerate(lines) if line.startswith("- **roofline**"))
+    assert lines[entry + 2].strip().startswith("EMIT: (no emit")
 
 
 @pytest.mark.parametrize(
@@ -224,7 +245,7 @@ async def test_the_reseeded_override_is_what_the_orchestration_turn_loads(tmp_pa
 
     assert handler._reseed_orch_prompt_for_phase("EXPLORE") is True
 
-    assert await coord.conversation.load_system_prompt("orchestration") == "PROMPT[phase=EXPLORE]"
+    assert coord.orch_prompt.get("orchestration") == "PROMPT[phase=EXPLORE]"
 
 
 @pytest.mark.parametrize(
@@ -365,13 +386,12 @@ def test_reloop_infeasible_when_the_target_phase_is_disabled():
 
 def test_the_payload_contract_lists_only_required_keys():
     """Required keys and value constraints are different claims."""
-    from hyperloom.inference_optimizer.protocol.intent import IntentType
     from hyperloom.orchestrator.roles.mcp_emit_intent import (
         PAYLOAD_REQUIRED,
         payload_contract,
     )
 
-    rendered = payload_contract(IntentType)
+    rendered = payload_contract()
 
     assert "alert:{severity,summary}" in rendered
     assert "severity ∈" not in rendered
@@ -382,10 +402,9 @@ def test_the_payload_contract_lists_only_required_keys():
 
 def test_the_payload_constraints_are_rendered_separately():
     """State the closed value sets and the optional dials as what they are."""
-    from hyperloom.inference_optimizer.protocol.intent import IntentType
     from hyperloom.orchestrator.roles.mcp_emit_intent import payload_constraints
 
-    rendered = payload_constraints(IntentType)
+    rendered = payload_constraints()
 
     assert "alert.severity ∈ low|medium|high" in rendered
     assert "prune_branch.scope ∈ family|queued" in rendered
@@ -394,10 +413,10 @@ def test_the_payload_constraints_are_rendered_separately():
 
 def test_the_payload_constraints_state_the_extend_lease_step_cap():
     """An agent asking for more than one step at a time is told the cap before the gate denies it."""
-    from hyperloom.inference_optimizer.protocol.intent import EXTEND_LEASE_MAX_SEC, IntentType
+    from hyperloom.inference_optimizer.protocol.intent import EXTEND_LEASE_MAX_SEC
     from hyperloom.orchestrator.roles.mcp_emit_intent import payload_constraints
 
-    rendered = payload_constraints(IntentType)
+    rendered = payload_constraints()
 
     assert f"extend_lease.extra_sec ≤ {EXTEND_LEASE_MAX_SEC} per call" in rendered
     assert "while the task runs" in rendered
@@ -405,16 +424,15 @@ def test_the_payload_constraints_state_the_extend_lease_step_cap():
 
 def test_both_provider_descriptions_carry_the_constraints():
     """Claude's tool description and Codex's output block say the same thing."""
-    from hyperloom.inference_optimizer.protocol.intent import IntentType
     from hyperloom.orchestrator.roles.codex import build_output_instructions
     from hyperloom.orchestrator.roles.mcp_emit_intent import (
         build_emit_intent_tool_input_schema,
         payload_constraints,
     )
 
-    constraints = payload_constraints(IntentType)
-    claude_description = build_emit_intent_tool_input_schema(IntentType)["properties"]["payload"]["description"]
-    codex_block = build_output_instructions(frozenset(IntentType))
+    constraints = payload_constraints()
+    claude_description = build_emit_intent_tool_input_schema()["properties"]["payload"]["description"]
+    codex_block = build_output_instructions()
 
     assert constraints in claude_description
     assert constraints in codex_block
@@ -460,20 +478,3 @@ def test_every_declared_transport_still_renders(registry, transport):
     )
 
     assert "Output protocol" in prompt
-
-
-def test_a_role_with_no_constraints_gets_no_constraints_line():
-    """Say nothing rather than an empty clause."""
-    from hyperloom.inference_optimizer.protocol.intent import IntentType
-    from hyperloom.orchestrator.roles.codex import build_output_instructions
-    from hyperloom.orchestrator.roles.mcp_emit_intent import build_intent_envelope_schema
-
-    only_send = frozenset({IntentType.SEND_MESSAGE})
-
-    block = build_output_instructions(only_send)
-    schema = build_intent_envelope_schema(only_send)
-    payload_description = schema["properties"]["intents"]["items"]["properties"]["payload"]["description"]
-
-    assert "Constraints" not in block
-    assert "Constraints" not in payload_description
-    assert "send_message:{topic}" in block

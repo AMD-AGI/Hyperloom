@@ -270,17 +270,13 @@ async def test_pruned_family_survives_coordinator_restart(session_dir):
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
         assert c2.shared_state.is_pruned("target_analysis")
-        # Prune is advisory: a proposal the phase allows still queues its task.
+        # Prune is advisory: a delegate the phase allows still queues its task.
         await c2.router.handle_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.PROPOSE_ACTION,
-                payload={"action_name": "target_analysis", "predicted_gain_pct": 5.0},
-            ),
+            "orchestration", Intent(type=IntentType.DELEGATE, payload={"action_name": "target_analysis"})
         )
         assert [t.kind for t in await c2.tasks.queued()] == ["target_analysis"]
         obs = await c2.bus.tail(topic="observation")
-        assert any(m.payload.get("kind") == "proposal_pruned_advisory" for m in obs)
+        assert any(m.payload.get("kind") == "delegate_pruned_advisory" for m in obs)
     finally:
         await c2.stop()
 

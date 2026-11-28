@@ -6,8 +6,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
-
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 
 
@@ -22,8 +20,6 @@ class _PromoteOutcome:
     verdict: Verdict
     adopted_variants: set[str] = field(default_factory=set)
     changed: bool = False
-    audit_decision: str | None = None
-    audit_extras: dict[str, Any] = field(default_factory=dict)
 
 
 class IntegrateRecoveryIncomplete(RuntimeError):

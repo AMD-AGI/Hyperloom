@@ -861,7 +861,6 @@ class ClosePhase(CoordinatorCollaborator):
         target, reason, evidence = decision
         move = Transition(from_phase=prior, to_phase=target, reason=reason, evidence=evidence)
         machine.set_terminal_stop_reason(reason)
-        machine.settle_escalate_hint(move)
         _phase_state.record_phase_transition(
             state, to_phase=target, reason=reason, evidence=evidence, at=_phase_state.PhaseClock(ts_unix=now)
         )

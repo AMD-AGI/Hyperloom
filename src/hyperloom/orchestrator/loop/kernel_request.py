@@ -121,18 +121,9 @@ def remembered_outcome(router: Any, request: KernelRequest) -> KernelRequestOutc
     return KernelRequestOutcome(result, "shared_state_kernel_rejection", True)
 
 
-def seed_integrate_base_tput(router: Any, request: KernelRequest) -> None:
-    """Fill in the baseline throughput an integrate request left out, from the session's current best."""
-    if request.kind != "integrate" or request.payload.get("base_tput"):
-        return
-    cb_tput = (router.shared_state.current_best or {}).get("tput")
-    if isinstance(cb_tput, (int, float)) and cb_tput > 0:
-        request.payload["base_tput"] = float(cb_tput)
-
-
 @asynccontextmanager
-async def kernel_step_heartbeat(router: Any, kind: str, started: float):
-    """Keep orchestration's bus timestamp moving through an inline step."""
+async def kernel_step_heartbeat(router: Any):
+    """Keep the inline step's liveness stamp fresh while the step runs."""
     # Imported here: ``phases`` reaches back into ``loop``, so taking it at module level would close an import cycle.
     from ..phases.machine_state import KERNEL_HEARTBEAT_SEC
 
@@ -145,18 +136,6 @@ async def kernel_step_heartbeat(router: Any, kind: str, started: float):
         while True:
             await asyncio.sleep(KERNEL_HEARTBEAT_SEC)
             _mark_running()
-            await router.bus.append_and_seq(
-                Message.new(
-                    "orchestration",
-                    "*",
-                    "observation",
-                    {
-                        "kind": "kernel_step_running",
-                        "step": kind,
-                        "elapsed_sec": round(time.monotonic() - started, 1),
-                    },
-                )
-            )
 
     _mark_running()
     task = asyncio.create_task(_beat())
@@ -196,7 +175,6 @@ async def run_kernel_handler(router: Any, request: KernelRequest, handler: Any) 
     Returns ``None`` once the lanes the handler needs were busy and the request has been
     answered with a deferral instead.
     """
-    seed_integrate_base_tput(router, request)
     # A handler that benchmarks runs under its action's catalogue lanes, so it waits out the
     # kernel_agent task instead of sharing the GPUs with it.
     action = REQUEST_KIND_TO_OWNED_ACTION.get(request.kind, request.kind)
@@ -225,7 +203,7 @@ async def run_kernel_handler(router: Any, request: KernelRequest, handler: Any) 
         artifacts=lifecycle_paths(request.payload),
     )
     try:
-        async with kernel_step_heartbeat(router, request.kind, started):
+        async with kernel_step_heartbeat(router):
             result = await handler(request.payload, session_dir=router.session_dir)
     except Exception as exc:
         log.exception(

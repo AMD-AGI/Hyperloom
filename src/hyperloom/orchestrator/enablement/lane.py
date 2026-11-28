@@ -30,7 +30,7 @@ from ..loop.offload import offload
 from .params import ENABLEMENT_PARAMS_BUDGET_SEC
 from .artifacts import snapshot_round, write_setting_script
 from ..bringup import recorded_verdict, session_root
-from ..state.round_store import ADVANCED, BOOTED, FAILED, Round, RoundRequest
+from ..state.round_store import ADVANCED, BOOTED, FAILED, Round
 from ..state.task_registry import TaskSpec, create_in_cursor, task_dispatch_origin
 from .recipe.section import recipe_for
 
@@ -292,8 +292,8 @@ class EnablementLane(CoordinatorCollaborator):
 
         acquired = await self.rounds.open(
             _authoring_round_id(holder),
-            RoundRequest(now_unix=time.time(), request_id=holder),
             holder_task_id=holder,
+            now_unix=time.time(),
             lease_sec=float(lease_ttl_sec),
             join=_join,
         )
@@ -342,12 +342,7 @@ class EnablementLane(CoordinatorCollaborator):
             round_row: The round as the store last reported it.
         """
         lease = max(_MIN_LEASE_SEC, float(round_row.expires_unix) - float(round_row.renewed_unix))
-        now = time.time()
-        await self.rounds.renew(
-            round_row,
-            RoundRequest(now_unix=now, request_id=f"renew:{round_row.round_id}:{round_row.fence}:{now:.0f}"),
-            lease_sec=lease,
-        )
+        await self.rounds.renew(round_row, now_unix=time.time(), lease_sec=lease)
 
     async def handoff_enablement_round(self, task: "Task") -> None:
         """Move the open round onto the integrate that consumes its deliverable.
@@ -371,8 +366,8 @@ class EnablementLane(CoordinatorCollaborator):
             lease = max(_MIN_LEASE_SEC, float(round_row.expires_unix) - float(round_row.renewed_unix))
         moved = await self.rounds.handoff(
             round_row,
-            RoundRequest(now_unix=time.time(), request_id=f"handoff:{task.task_id}"),
             new_holder_task_id=task.task_id,
+            now_unix=time.time(),
             lease_sec=lease,
         )
         if not moved.ok:
@@ -383,7 +378,7 @@ class EnablementLane(CoordinatorCollaborator):
                 moved.reason,
             )
 
-    async def settle_enablement_round(self, outcome: str, *, reason: str = "") -> None:
+    async def settle_enablement_round(self, outcome: str) -> None:
         """End the open round, if one is still open.
 
         A specialist that holds the round and has not started is cancelled: its
@@ -393,20 +388,11 @@ class EnablementLane(CoordinatorCollaborator):
         Args:
             outcome: What the round leaves behind; see the round store's
                 outcomes.
-            reason: Recorded on the settle's outbox row.
         """
         round_row = await self.rounds.held()
         if round_row is None:
             return
-        await self.rounds.settle(
-            round_row,
-            RoundRequest(
-                now_unix=time.time(),
-                request_id=f"settle:{round_row.round_id}:{round_row.fence}",
-                evidence={"reason": reason} if reason else {},
-            ),
-            outcome=outcome,
-        )
+        await self.rounds.settle(round_row, outcome=outcome, now_unix=time.time())
         holder = round_row.holder_task_id
         if await self.tasks.cancel_if_queued(holder, kind="specialist", reason="enablement_round_settled"):
             log.info("ENABLEMENT: cancelled specialist %s; its round was settled before it started", holder)
@@ -437,7 +423,7 @@ class EnablementLane(CoordinatorCollaborator):
         enablement.revalidation_task_id = ""
         enablement.origin = ""
         enablement.pending = False
-        await self.settle_enablement_round(BOOTED, reason=reason)
+        await self.settle_enablement_round(BOOTED)
         await self.close_lane_event(outcome=enablement_event.OUTCOME_SUCCEEDED, reason=reason)
 
     async def close_lane_event(self, *, outcome: str, reason: str) -> None:
@@ -569,7 +555,7 @@ class EnablementLane(CoordinatorCollaborator):
         setting_script = _archive_round(state, res, self.session_dir, attempt)
         outcome = await _answered_round_outcome(self.rounds, spec_tid, status=status)
         if outcome:
-            await self.settle_enablement_round(outcome, reason=status)
+            await self.settle_enablement_round(outcome)
         # Recorded after the accepted path is settled, because the row carries
         # it, and after the round is settled, because the streak the row states
         # is the one this round's own outcome left behind.

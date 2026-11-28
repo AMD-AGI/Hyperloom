@@ -23,9 +23,7 @@ from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     LaunchLayer,
     MaterializeOptions,
 )
-from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 from hyperloom.orchestrator.actions.executors.benchmark_run.bringup import _with_cuda_graph_disabled
-from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 _CLI_STUB = SimpleNamespace(
@@ -353,22 +351,6 @@ def _make_ctx(params: dict) -> SimpleNamespace:
 
 def _run(coro):
     return asyncio.run(coro)
-
-
-def test_baseline_eager_fallback_save_failure_is_not_reported_as_unarmed(tmp_path, monkeypatch):
-    shared_state = SharedState(baseline_eager_fallback=True, model_path="/models/qwen")
-
-    def _disk_full(session_dir):
-        raise OSError("No space left on device")
-
-    monkeypatch.setattr(shared_state, "save", _disk_full)
-    executor = BaselineExecutor(
-        default_config_path=tmp_path / "base.yaml",
-        session_dir=tmp_path,
-        shared_state=shared_state,
-    )
-    with pytest.raises(OSError, match="No space left on device"):
-        executor._consume_eager_fallback(shared_state)
 
 
 # reference-script base layer (precedence + 0-degrade)

@@ -14,7 +14,6 @@ from hyperloom.orchestrator.kernel import kernel_decisions as kd
 from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.policy.denial import PolicyDenied
 
 from .conftest import seed_kernel_keep
 from hyperloom.inference_optimizer.session.paths import make_session_dir
@@ -58,27 +57,6 @@ def _seed_post_baseline(coord: Coordinator) -> None:
         "trace_input": "/tmp/profile.tar.gz",
         "candidates_path": "/tmp/x.json",
     }
-
-
-def test_baseline_allowed_without_target_analysis(session_dir):
-    """``baseline`` is no longer blocked on a missing target_baseline.json."""
-    coord = Coordinator(
-        session_dir,
-        backends=_backends_full(),
-    )
-    assert coord.dispatcher._sequence_denial_for_action("baseline") is None
-    assert coord.dispatcher._sequence_denial_for_action("target_analysis") is None
-
-
-def test_baseline_first_still_blocks_other_actions(session_dir):
-    """With baseline_tput == 0, ``explore`` is denied for baseline (not target_analysis)."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    denied = coord.dispatcher._sequence_denial_for_action("explore")
-    assert isinstance(denied, PolicyDenied)
-    assert denied.rule == "execution_order"
-    assert "baseline must run first" in str(denied)
-    assert coord.dispatcher._sequence_denial_for_action("baseline") is None
-    assert coord.dispatcher._sequence_denial_for_action("target_analysis") is None
 
 
 def test_integrate_gate_inactive_without_keep(session_dir):
@@ -150,23 +128,6 @@ def test_integrate_gate_clears_when_kernel_already_rejected(session_dir):
     assert kd.pending_keep_kernel_ids(coord.shared_state) == []
 
 
-def test_pending_keep_no_longer_blocks_other_actions(session_dir):
-    """A pending kernel_opt KEEP no longer blocks explore / sweep; integrate is the LLM's call."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _seed_post_baseline(coord)
-    _seed_kernel_opt_state(
-        coord,
-        kernel_id="k-rmsnorm",
-        decision="KEEP",
-        source_file="/p/rmsnorm.py",
-    )
-    assert kd.pending_keep_kernel_ids(coord.shared_state)[0] == "k-rmsnorm"
-    for action in ("explore", "integrate", "report"):
-        assert coord.dispatcher._sequence_denial_for_action(action) is None, (
-            f"{action!r} must not be sequence-denied by a pending KEEP"
-        )
-
-
 def _seed_trace_analyze(coord, *, hot_kernels, task_groups=None):
     coord.shared_state.last_trace_analyze = {
         "trace_input": "/tmp/profile.tar.gz",
@@ -197,8 +158,8 @@ def test_report_allowed_when_hot_reusable_kernels_untried(session_dir):
         ],
     )
     coord.shared_state.last_trace_analyze["roofline_snapshot_id"] = 1
-    coord.shared_state.explore_attempts = [{"variant_name": "x"}]
-    assert coord.dispatcher._sequence_denial_for_action("report") is None
+    coord.shared_state.phase = "CLOSE"
+    assert coord.dispatcher.admission_denial_for_action("report") is None
     assert kd.untried_hot_reusable_kernels(coord.shared_state)
 
 

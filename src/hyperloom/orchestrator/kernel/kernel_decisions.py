@@ -26,7 +26,6 @@ from .patch_landing import (
 )
 from hyperloom_common.timeutil import now_iso as _now_iso
 from ..state.kernel_decision_settings import (
-    _DEFAULT_ATTEMPTS_HISTORY,
     _DEFAULT_HOT_KERNEL_GATE_TOP_N,
     _MAX_INTEGRATE_E2E_ATTEMPTS,
     _MAX_INTEGRATE_FAULT_ATTEMPTS,
@@ -278,13 +277,18 @@ def find_rejected_kernel_patch(
     payload: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     """Look up a previously-rejected patch matching ``payload``."""
-    key = kernel_patch_key(payload)
-    if not key:
-        return None
-    for entry in state.rejected_kernel_patches:
-        if isinstance(entry, dict) and entry.get("key") == key:
-            return entry
-    return None
+    entry = state.kernel_integrate_attempts.get(kernel_patch_key(payload))
+    return entry.get("rejected") if isinstance(entry, dict) else None
+
+
+def rejected_kernel_patches(state) -> list[dict[str, Any]]:
+    """The rejection record of every patch the integrate gate gave up on, oldest rejection first."""
+    rejected = [
+        entry["rejected"]
+        for entry in state.kernel_integrate_attempts.values()
+        if isinstance(entry, dict) and entry.get("rejected")
+    ]
+    return sorted(rejected, key=lambda row: row["ts"])
 
 
 def _bind_result_to_pending(state, result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
@@ -322,7 +326,7 @@ def _record_integration_keep(result: dict[str, Any], pending_record) -> None:
 
 
 def _reject_integration(state, entry: dict[str, Any], *, reason: str, pending_record) -> None:
-    """Record a patch's rejection against its attempt entry, the rejection ledger and its queued record."""
+    """Record a patch's rejection against its attempt entry and its queued record."""
     rejected = {
         "key": entry["key"],
         "kernel_id": entry["kernel_id"],
@@ -339,10 +343,6 @@ def _reject_integration(state, entry: dict[str, Any], *, reason: str, pending_re
         "ts": _now_iso(),
     }
     key, kernel_id, task_group_key = entry["key"], entry["kernel_id"], entry["task_group_key"]
-    state.rejected_kernel_patches = [
-        r for r in state.rejected_kernel_patches if not (isinstance(r, dict) and r.get("key") == key)
-    ]
-    state.rejected_kernel_patches.append(rejected)
     # A grouped task's members stay out of ``rejected_kernel_ids``: the ids are synthetic per trace and a member can
     # be re-dispatched under another task.
     if kernel_id and not task_group_key and kernel_id not in state.rejected_kernel_ids:
@@ -461,9 +461,6 @@ def record_gemm_tuning(state, result: dict[str, Any]) -> None:
     entry = dict(result)
     entry.setdefault("ts", _now_iso())
     state.last_gemm_tuning = entry
-    attempts = list(state.gemm_tuning_attempts or [])
-    attempts.append(entry)
-    state.gemm_tuning_attempts = attempts[-_DEFAULT_ATTEMPTS_HISTORY:]
 
 
 def _canonical_kernel_recipe_operator(kernel_id: str) -> str:

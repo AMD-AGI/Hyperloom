@@ -126,7 +126,7 @@ def test_register_executors_covers_every_phase_allowed_action():
     expected: set[str] = set()
     for actions in PHASE_ALLOWED_ACTIONS.values():
         expected |= set(actions)
-    # Kernel-owned actions never become tasks: PolicyGate denies delegate / propose_action for them, and the
+    # Kernel-owned actions never become tasks: admission denies a delegate that names one, and the
     # Coordinator routes them over the bus.
     expected -= KERNEL_AGENT_OWNED_ACTIONS
     missing = sorted(kind for kind in expected if kind not in reg)

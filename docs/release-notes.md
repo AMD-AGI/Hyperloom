@@ -61,8 +61,8 @@ it.
   checkout-built server, which `optimize` now opens directly. See
   [Upgrade](reference/upgrade.md).
 - **`hyperloom optimize` has no Critic agent.** Orchestration is the only LLM
-  role that takes turns. A `propose_action` that passes PolicyGate and
-  admission is queued in the same step, and the Coordinator queues the
+  role that takes turns. A `delegate` that passes PolicyGate and admission is
+  queued in the same step, and the Coordinator queues the
   `integrate_patch` of a finished specialist's deliverable itself; KEEP or
   REVERT is decided as before, by the measurement gate. **Breaking:**
   `--critic-mock`, `--critic-agent`, `--critic-protocol` and `--critic-prompt`
@@ -76,6 +76,312 @@ it.
   `critic` section of `session_breakdown.json` and its `critic_review` rows
   are no longer written; and resuming a session started before this change
   is not supported. See [Upgrade](reference/upgrade.md).
+- **Two policy denials that could not fire are removed.** With Orchestration
+  the only agent that takes turns, the optimizer no longer keeps a registry of
+  agent roles or narrows the intent vocabulary to one. This removal changes
+  none of what Orchestration is offered (the `emit_intent` schema, the
+  output-format block, its tool list), because its set was every intent type;
+  the entries below on `propose_action` and the context tools do. A
+  `policy_denied` observation no longer carries rule `role` (an unknown
+  agent, or an intent type outside the agent's set) or rule
+  `custom_specialist_only` (a `specialist`, `explore` or `integrate_patch`
+  from Orchestration in FRAMEWORK_AGENT under
+  `HYPERLOOM_CUSTOM_SPECIALIST_ONLY=1`): no second agent exists to refuse, and
+  Orchestration takes no turn in that mode and phase, so neither rule had an
+  intent to deny. `emit_intent` no longer answers `this role cannot emit`; a
+  type outside the vocabulary is still refused in the same turn as
+  `unknown intent_type`. The hint of rule `tool_whitelist_role` now says
+  Orchestration holds WebSearch and WebFetch `directly as tools`. See
+  [Upgrade](reference/upgrade.md).
+- **Records that nothing produced or read are no longer written.**
+  `state.json` drops `baseline_eager_fallback` (a one-shot baseline retry with
+  CUDA graphs disabled, armed by an error class nothing returns any more) and
+  `include_patches` on the rows of `kb_stage_outbox`; `last_baseline` never
+  has the decision `discarded`, which could not be reached (the roofline and
+  profile rows that could not be `skipped` or `discarded` either are removed
+  altogether, see the entry on a task's result below). `storage/coordinator.db`
+  has no
+  `round_events` table and no `events.in_reply_to` column, a `response` event
+  carries no `in_reply_to` key, and an inline kernel step appends no
+  `kernel_step_running` observation, so a session with long kernel steps
+  counts fewer `observation` events. `mcp_setup.json` drops
+  `emit_intent.registered`. The `dispatch audit` warning is gone; a task whose
+  kind has no executor still fails with `no_executor`. After a restart the
+  reconciler alone fails the tasks the previous process left running, so a
+  database error in that pass is retried on the next tick instead of within
+  the same one, and the failure charged for such a task ends `task reclaimed
+  by the reconciler`. A delegate whose key names a task
+  another author created is now answered as a duplicate key instead of raising
+  `dispatch_class mismatch`. `get_inbox` shows Orchestration's own `alert`
+  text as written. A baseline throughput reported as a numeric string anchors
+  as that number instead of being recorded `discarded`. A `claude-agent-sdk`
+  without `tool` or `create_sdk_mcp_server` now fails at start-up instead of
+  running a session that has no `emit_intent` tool. See
+  [Upgrade](reference/upgrade.md).
+- **`state.json` keeps one copy of each record. Breaking** for anything that
+  read the removed keys: `current_best.optimization_stack` (read the top-level
+  `optimization_stack`; `reports/final.json`'s `current_best` loses it too),
+  `explore_search.accepted` (read the `explore` rows of `optimization_stack`
+  or `explore_search.winners_history`), `rejected_kernel_patches` (read
+  `kernel_integrate_attempts.<key>.rejected`), five keys of `enablement` that
+  only staged the `trigger` block of the enablement event
+  (`observed_accuracy`, `observed_task`, `observed_metric`,
+  `eval_definition_digest`, `baseline_eval_evidence`),
+  `research_scout_seen_pr_ids`, `params_no_promote_streak`,
+  `gain_gated_action_count` and `agent_last_active`.
+  `storage/coordinator.db` has no `lane_capacity` table: `research_lane` takes
+  its capacity from `--research-lane-capacity` and every other lane admits one
+  holder, so editing the table mid-session no longer changes a capacity. In
+  the Orchestration prompt the Tick block is `tick=N`, `elapsed=` in the Time
+  budget block now counts every run of a resumed session (it counted the
+  current process only, beside a `remaining` that counted them all), and the
+  session-state block loses `params_no_promote_streak=`,
+  `gain_gated_action_count=` and the `accepted=N` count. The
+  `#explore_plateau` gap is no longer created; FRAMEWORK discovery no longer
+  drops a pull request because a research hint or a specialist's evidence
+  cited it; a research-scout task carries no `seen_pr_ids` and lists as
+  already proven the explore variants on the stack; the enablement trigger
+  reports `observed_accuracy: null`, not `0.0`, when the failed eval scored
+  nothing; and a queued task that still holds a row on its own lane is
+  dispatched instead of waiting on itself. Two tasks that need the same lane
+  still never run together. See [Upgrade](reference/upgrade.md).
+- **A dropped escalate hint is no longer reported back, and `skip_to_sweep`
+  is the Coordinator's alone.** `state.json` drops
+  `last_discarded_escalate_hint` and `last_discarded_escalate_hint_ts`, and
+  the Orchestration prompt has no `=== Discarded escalation hint (advisory)
+  ===` section. The section asked Orchestration to send again a hint a phase
+  transition had dropped; the session had left the phase by then, so the
+  re-sent `skip_to_kernel` was denied, and the section also reported the
+  Coordinator's own `skip_to_sweep` as Orchestration's. A phase transition
+  still clears a pending hint. `escalate_strategy_change` with
+  `next_action_hint='skip_to_sweep'` from Orchestration is now denied
+  (`escalate_hint_not_in_vocab`): it was accepted in every phase and ended
+  FRAMEWORK_AGENT with no round run. The prompt offered only `skip_to_kernel`,
+  which is unchanged, as is the `skip_to_sweep` the Coordinator sets at the
+  end of a custom-specialist-only cycle. See [Upgrade](reference/upgrade.md).
+- **A malformed timeout or retry variable stops the launch, and intents are
+  no longer refused for their shape.** **Breaking:**
+  `INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC`,
+  `INFERENCE_OPTIMIZER_CLAUDE_TURN_TIMEOUT_SEC`,
+  `INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC` and
+  `INFERENCE_OPTIMIZER_DEEPSEEK_CALL_TIMEOUT_SEC` must be a positive finite
+  number, and the five `INFERENCE_OPTIMIZER_LLM_RETRY_*` variables a
+  non-negative finite one; anything else ends `hyperloom optimize` at
+  start-up with an `EnvValueError` naming the variable, where it used to log
+  a warning and run on the default. The denial rules `prune_scope` and
+  `extend_lease_task_not_live` are gone, `payload` no longer fires for
+  `send_message`, and `execution_order` no longer fires for an action (it
+  still does for a kernel request before a baseline). A `send_message` with a
+  blank topic is stored as an observation, and one whose `to` names nobody is
+  broadcast or addressed as written. A `prune_branch` with an unknown scope
+  only cancels the family's queued tasks. An `extend_lease` for a task that
+  is not running is an `extend_lease_rejected` observation, and one for a
+  task that started during the Orchestration turn is granted instead of
+  refused. `explore`, `integrate` and `report` before a baseline are still
+  refused, by the phase (`phase_incompatible`). The `stale_stack_revalidation`
+  and `current_best_drift` observations are no longer sent; a stale stack
+  revalidation is still discarded. The Claude backend keeps every
+  `emit_intent` call of a turn and no longer drops a repeated one that
+  arrived in Claude Code's `__unparsedToolInput` wrapper. See
+  [Upgrade](reference/upgrade.md).
+- **Five Orchestration context tools are removed, and the prompt stops
+  describing what a turn does not carry.** **Breaking** for an `--orch-prompt`
+  that names one: `get_mission_status`, `get_shared_state`, `get_warm_start`
+  and `get_intervention_mix` returned the Mission progress, Shared session
+  state, Warm start and Intervention mix blocks that every turn's prompt
+  already holds, and `show_analysis_md` returned TraceLens's `analysis.md`,
+  whose path the `analysis_md=` line of the session-state block now names.
+  `state.json` drops `last_trace_analyze.analysis_md_text`, the copy of that
+  report only the tool read; `last_trace_analyze.has_analysis_md` records
+  whether the report was there.
+  `agents/orchestration/mcp_setup.json` lists the eight context tools that
+  remain. The system prompt loses its `PIPELINE & TIME BUDGET` section, which
+  advised skipping analysis and adding an explore round before the report
+  (the Coordinator schedules both); `PHASE CONTRACT` is section 3. The
+  catalogue entry of `roofline` no longer shows a proposal template, and the
+  session-state block no longer says `roofline` or `profile` may be proposed
+  directly: every phase denies that proposal, as before. Sentences that named
+  a block or a key no turn shows (a full inlined `analysis.md`, `=== Phase-allowed
+  actions ===`, a working-memory block, `KB hints`,
+  `explore_search.winners_history`, `<action>_attempts`,
+  `untried_hot_reusable_kernels`) now name what a turn does show, and the
+  statement that dispatches wait for a roofline refresh is gone, since they
+  do not. See [Upgrade](reference/upgrade.md).
+- **The session database keeps every event and task.** The Coordinator no
+  longer deletes rows from `storage/coordinator.db`. Every maintenance pass
+  and every macro-cycle start used to delete all `events` but the newest 5,000
+  and the proposals not yet reviewed, and all `succeeded` or `cancelled`
+  `tasks` but the 2,000 most recently updated. In a session that wrote more
+  than 5,000 events this removed the `delegated_result` rows that
+  `--resume-from` replayed an interrupted KEEP from and that
+  `reports/final.json` counts, and a deleted task row released its
+  idempotency key. `events_pruned` and `tasks_pruned` leave the
+  `maintenance tick` log line and the `cycle_soft_restart` observation;
+  `event_counts_by_topic` and the highlights of the final report cover the
+  newest 10,000 events; `get_inbox` without `since_seq` returns the whole
+  session's inbox; `hyperloom session events --all` counts the whole session.
+  The database now grows with the session (15.7 MB for one of 17 hours, 3,361
+  events and 399 tasks, about 20 MB a day). A session package leaves
+  `storage/coordinator.db` out once the file is larger than 64 MB, the ceiling
+  its must-ship files share, which the two limits used to keep it under: a
+  session of about three days or longer is packaged without its database,
+  with `reserved_overflow: true` and `complete: false` in
+  `PACKAGE_MANIFEST.json`, and the database stays in the session directory.
+  The lane warning for a holder that is not a task now ends `the holder has
+  no task row, so nothing can attest it ended`.
+  See [Upgrade](reference/upgrade.md).
+- **A task's result is kept once, on its task row.** The `delegated_result`
+  event that announces a finished task now carries `{task_id, kind, state}`;
+  `result` and `error` are read from the task's row in `storage/coordinator.db`
+  (`tasks.history[].evidence.outcome`), where the runner writes them before
+  the event. The inbox, `get_inbox` and `get_recent_outcomes` print the same
+  line from the row, without the `kept=` and `tput=` fields no executor ever
+  filled. **Breaking** for anything that parsed the event's payload, the
+  `payload` of a `delegated_result` highlight in `reports/final.json` (now the
+  three keys, with the summary `kind=... state=...`), or one of these
+  `state.json` keys, which are removed: `baseline_attempts`,
+  `profile_attempts`, `explore_attempts`, `roofline_attempts`, `last_profile`,
+  `last_explore`, `last_roofline`, `explore_search.rejected`,
+  `gemm_tuning_attempts`, `warm_history_injected` and `failures`.
+  `last_baseline` stays as the record
+  of the latest baseline and the decision on it (`anchor_held` included), and
+  so do `last_action_failures` and `explore_search.last_round`. Failure
+  packets live only in `reports/failures/<failure_id>.json`: `get_failure` and
+  `get_variant_failures` read those files, so they reach every packet of the
+  session and not only the 30 newest, and a packet that cannot be written is
+  an error where it was a debug line. An open bring-up round no longer writes
+  a `bringup_round` row to `leases`; `bringup_rounds` is its only record, and
+  the in-flight line of the task holding it no longer lists that lane. On
+  `--resume-from`, an integrate KEEP whose promotion a crash cut off is
+  adopted from the task row and the `pending_integrate` sentinel alone; the
+  two searches of the event log for `kept` results are gone, and with them
+  the `orphaned_keep*` reports, the `pending_integrate_scan_failed` warning
+  and the retry on every start of a KEEP the
+  promotion gate had refused. A `--reset-state` no longer adopts the
+  discarded state's kept patches again: they stay applied to the framework
+  tree with no stack row, so the next baseline is measured with them and the
+  recipe has no step for them unless the tree is restored before the reset.
+  In `session_breakdown.json`, `outcome.stage_reached` of a PRELUDE session
+  with no typed timeline event no longer counts a `profile` task that failed.
+  The Shared session state block loses
+  `last_profile=`, `last_explore=`, `attempts_history=` and the `rejected=N`
+  count, and the Acceptance threshold block lists each measured variant once.
+  See [Upgrade](reference/upgrade.md).
+- **`propose_action` is removed and `delegate` queues every task.
+  Breaking** for an Orchestration prompt passed with `--orch-prompt` and for
+  anything that matches on the names below. Orchestration had two intents
+  that queue an action; since the Critic was removed both created the same
+  task, and a `specialist` sent as a `propose_action` skipped the specialist
+  contract and held only `research_lane`, so a bench specialist could start
+  beside a serving benchmark. `delegate` is now the only one. A
+  `propose_action` is refused in the turn that sends it
+  (`unknown intent_type 'propose_action'`), `predicted_gain_pct` is no longer
+  a payload field (the catalogue asks for it as `params.predicted_gain_pct`
+  on `explore` only; the journal rows of that round, their decision-trace
+  rows and the Langfuse score still carry it, a `baseline` or
+  `target_analysis` journal row no longer does), and an `idempotency_key`
+  Orchestration sends is ignored:
+  the Coordinator keys every task by its work
+  (`integrate_patch:<specialist_task_id>`, a `baseline` by its seven launch
+  fields, anything else by its params). A `baseline` delegated again on a
+  later tick is therefore answered by the one queued, running or measured
+  instead of starting a second bring-up, an identical `specialist` delegate
+  is refused while its task is queued or running, and identical work whose
+  task ended may be sent five more times in a session. A refused repeat is a
+  `policy_denied` observation (`duplicate_idempotency_key_running` or
+  `duplicate_idempotency_key`) and a denial row of the phase event; the
+  `proposal_materialize_skipped`, `proposal_pruned_advisory` and
+  `proposal_rejected` observations and the `submitted` outcome of a proposal
+  row are no longer written. The specialist wave (`params.tasks`) is removed
+  with its rules `specialist_freeform_wave_too_large` and
+  `specialist_freeform_wave_invalid_task`: send one `delegate` per task; a
+  `tasks` list beside a `task_description`, or beside a `domain` and a
+  `gap_canonical_id`, is not read, and neither is `task_summary`, which the
+  prompt's free-form example no longer sends. The
+  operator-defined specialist is created by the Coordinator itself, so its
+  dispatch row has `dispatch_class` `coordinator` instead of `llm`, it writes
+  no `task_queued` event, and a refused admission is a
+  `custom_specialist_refused` observation and a log line naming the rule
+  instead of a `policy_denied` addressed to Orchestration. The prompt's
+  `analysis_md=` line before the first TraceLens snapshot says a `delegate`
+  of `roofline` or `profile` is denied, where it said a proposal. See
+  [Upgrade](reference/upgrade.md).
+- **PolicyGate keeps no copy of the session's resources and is not run a
+  second time at dispatch.** The bring-up round rule
+  (`enablement_round_in_flight`) and the GPU pool rule
+  (`specialist_gpu_request_exceeds_capacity`) are answered from the round
+  store and from the pool the dispatcher leases from, when the delegate is
+  handled: a round opened during the Orchestration turn refuses that turn's
+  `baseline`, and a GPU request is judged at the count the dispatcher will
+  lease, so one it could never fund is no longer queued to wait for good. A
+  queued `baseline` is still cancelled at dispatch while another task's round
+  is open (`policy_enablement_round_in_flight`); no other
+  `policy_<rule>` cancellation remains. **Removed denial rules:**
+  `specialist_gpu_request_invalid` (`gpu_count: 0` means the default),
+  `specialist_gpu_pool_disabled` (an empty pool is
+  `specialist_gpu_request_exceeds_capacity`, with a reason that says so),
+  `specialist_freeform_description_too_long`, the ceiling of 1000 on
+  `max_turns` (a larger value is the turn cap; a non-integer or negative one
+  is still denied with `specialist_dispatch_source`) and the five
+  `warm_replay_*` rules. The trajectory `intent` event of a delegate refused
+  by either resource rule now carries `admitted: true`, because both are
+  answered after PolicyGate. Two checks run before the work instead of after
+  it: a warm-replay kernel item whose files lie outside the session's framework
+  checkout is deferred before it is patched, where 1.2.x patched it and then
+  cancelled the replay with the patch still in the tree; and a specialist
+  deliverable whose `integrate_patch` names a path outside the session
+  directory is not queued (`specialist_patch_integrate_refused`), where
+  1.2.x queued it and cancelled it at dispatch. `resolved_patch_targets` is
+  gone from warm-replay plan entries. See [Upgrade](reference/upgrade.md).
+- **The gap ledger holds no row derived from the objective, the failure log
+  or the research hints, and a gap has no severity.** `gaps` in `state.json`,
+  the `=== Current gaps ===` block, `get_gaps` and a published recipe's
+  `remaining_gaps` lose the `<workload>#throughput_below_target`,
+  `#baseline_unstable` and `#fail:<action>:<error_class>[:<variant>]` rows,
+  which the Coordinator re-derived after every baseline, explore round and
+  specialist round, and the `gap.research_hint.*` rows it upserted after
+  every specialist round that returned findings. The same facts stay in the
+  prompt as `target_gap_pct=`, `baseline_failure_streak=`,
+  `last_action_failures=` and the `=== Specialist findings ===` block.
+  **Breaking** for a specialist delegate that cited one of those rows and
+  named no domain: it took the row's domain, symptom and recent attempts,
+  and now has to name `domain` or `tags` itself. A gap id is still required
+  and any non-empty id is still accepted. The rows that remain carry no
+  `severity`, which was `medium` on every one of them: gap rows read
+  `[<layer>]`, untested-proposal rows `[<domain>]`, and the untested
+  proposals are ordered predictor rows first, then the most recent
+  specialist round first, where 1.2.x put a round that cited a
+  higher-severity gap ahead and a round whose gap id the ledger did not hold
+  last. The operator-defined specialist is sent at the least-attempted gap,
+  and a recipe's `what_worked` row no longer takes a research hint's
+  `source`. Two defects go with it: a variant that failed before it measured
+  anything is no longer published into the recipe's `what_failed` as
+  `reverted` (it stays there under its action and error class), and a
+  research scout that returns more than 50 hints no longer pushes the gaps
+  that carry explore and specialist outcomes off the 50-row ledger. See
+  [Upgrade](reference/upgrade.md).
+- **The Coordinator stops writing bus rows for its own agent to read
+  back.** The `backend_error`,
+  `backend_unhealthy` and `reactor_exception` observations, the
+  `phase_transition` event and the `baseline_not_promoted` event are no
+  longer written to `storage/coordinator.db`. Each restated something the
+  Coordinator already held, as an inbox line that admitted a turn of the one
+  agent, and the first three told it that its own call had failed. A
+  failed call is read from the `failed` `llm.call` rows of
+  `reports/trace/trajectory/*.jsonl` (`error_message`) and, for a provider
+  failure, the `status=error` rows of `reports/trace/llm_calls.jsonl`; the
+  retry back-off and the `backend_unhealthy` stop after an hour are
+  unchanged. The `entered` line of the `=== Phase ===` block carries
+  `reason=<reason>` of the transition, and the session-state block carries a
+  failed baseline as before. A task the previous process left running is
+  charged its failure at the start of the tick, so the first turn after a
+  restart already reads it. `INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD`
+  is no longer read. A `send_message` is always stored under the topic
+  `observation` with the topic it named in its payload, so a message can no
+  longer be read back as a `delegated_result` or a `response`; the bus has no
+  `decision` topic, and `event_counts_by_topic` and `highlights` in
+  `reports/final.json` follow. Inbox lines no longer print `msg_id=`. See
+  [Upgrade](reference/upgrade.md).
 - **forge-loop runs every round as lanes and has no planning stage.** Every
   iteration is one round: one lane per focus the Analysis Agent divides its
   evidence into (at most `--lanes`, and one lane with no focus when it divides

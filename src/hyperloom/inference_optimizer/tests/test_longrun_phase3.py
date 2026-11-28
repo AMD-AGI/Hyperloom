@@ -48,7 +48,9 @@ def cyclic_coordinator(session_dir):
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
     }
-    return Coordinator(session_dir, backends=backends)
+    coordinator = Coordinator(session_dir, backends=backends)
+    coordinator.orch_prompt.set("orchestration", "SYSTEM PROMPT")
+    return coordinator
 
 
 def _arm_cycle_end_loopback(st):
@@ -85,7 +87,6 @@ async def test_soft_restart_preserves_best_and_ledger(cyclic_coordinator):
         {
             "schema_version": 1,
             "tested": {"fp_a": {"name": "a", "fingerprint": "fp_a"}},
-            "rejected": [{"name": "a", "fingerprint": "fp_a"}],
         }
     )
 
@@ -129,7 +130,7 @@ def _arm_explore_to_cycle_end(st):
     st.start_ts = (now - timedelta(minutes=10)).isoformat()
     st.max_minutes = 96 * 60
     st.kernel_enabled = False
-    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
+    st.pending_escalate_hint = ESCALATE_HINT_SKIP_TO_SWEEP
 
 
 @pytest.mark.asyncio
@@ -152,6 +153,39 @@ async def test_phase_transition_cancels_queued_specialist(cyclic_coordinator):
     assert c.shared_state.phase == ps.PHASE_CYCLE_END
     assert updated.state == "cancelled"
     assert updated.history[-1]["evidence"]["reason"] == "phase_transition:FRAMEWORK_AGENT->CYCLE_END"
+
+
+@pytest.mark.asyncio
+async def test_a_phase_transition_reaches_the_agent_through_the_phase_block_not_the_bus(cyclic_coordinator):
+    """The boundary is state the next prompt renders: the bus keeps only the tasks the transition dropped."""
+    from hyperloom.orchestrator.phases import phase_transitions
+
+    c = cyclic_coordinator
+    await _noop_phase_side_effects(c)
+    _arm_explore_to_cycle_end(c.shared_state)
+    queued, _ = await c.tasks.create_or_return_existing(
+        TaskSpec(kind="specialist", params={"needs_gpu": True}, idempotency_key="queued-specialist"),
+    )
+
+    await c.phase_machine.advance_phase_if_needed()
+
+    reason = c.shared_state.phase_history[-1]["reason"]
+    assert reason
+    rows = [(m.topic, m.payload.get("kind")) for m in await c.bus.tail(n=50)]
+    assert ("event", "phase_transition") not in rows
+    dropped = [m.payload for m in await c.bus.tail(topic="observation") if m.payload.get("kind")]
+    assert [(p["kind"], p["cancelled_task_ids"]) for p in dropped if "cancelled_task_ids" in p] == [
+        ("tasks_cancelled_on_phase_transition", [queued.task_id])
+    ]
+    entered = next(
+        line
+        for line in phase_transitions.phase_status_summary(c.shared_state).splitlines()
+        if line.startswith("entered")
+    )
+    assert entered.endswith(f" reason={reason}")
+    # A marker row written inside the phase does not replace the reason the phase was entered for.
+    ps.append_phase_history_event(c.shared_state, reason="in_phase_marker")
+    assert f" reason={reason}" in phase_transitions.phase_status_summary(c.shared_state)
 
 
 @pytest.mark.asyncio
@@ -226,14 +260,12 @@ async def _build_minimal_coord(tmp_path: Path, monkeypatch):
 
     idle_plan = ScriptedPlan(turns=[])
     backends = {"orchestration": MockBackend(idle_plan)}
-    from hyperloom.orchestrator.roles.agent_role import default_role_registry
     from .conftest import seed_target_analysis_marker
 
     seed_target_analysis_marker(sd)
     return Coordinator(
         session_dir=sd,
         backends=backends,
-        role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )
 

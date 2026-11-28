@@ -614,7 +614,6 @@ class _GemmTuningMixin:
             "last_profile_workload_action",
             "last_trace_analyze",
             "roofline_snapshots",
-            "baseline_eager_fallback",
         ):
             setattr(
                 self.shared_state,
@@ -721,18 +720,11 @@ class _GemmTuningMixin:
             log.warning("gemm result.json writeback failed for %s", path, exc_info=True)
 
     def _replace_latest_gemm_tuning_attempt(self, result: dict[str, Any]) -> None:
-        """Sync the latest GEMM history row, and publish the verdict to disk."""
+        """Replace the recorded GEMM tuning result with its adjudicated form, and publish the verdict to disk."""
         if not isinstance(result, dict):
             return
         entry = dict(result)
-        attempts = list(self.shared_state.gemm_tuning_attempts or [])
-        if attempts and isinstance(attempts[-1], dict):
-            entry.setdefault("ts", attempts[-1].get("ts"))
-            attempts[-1] = entry
-        else:
-            entry.setdefault("ts", datetime.now(timezone.utc).isoformat())
-            attempts.append(entry)
-        self.shared_state.gemm_tuning_attempts = attempts
+        entry.setdefault("ts", self.shared_state.last_gemm_tuning.get("ts") or datetime.now(timezone.utc).isoformat())
         self.shared_state.last_gemm_tuning = entry
         self._writeback_gemm_result_json(entry)
 

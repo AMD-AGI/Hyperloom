@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for ClaudeBackend helpers (no real SDK): gateway env pinning in the SDK options, tool-use parsing, and
+"""Coverage for ClaudeBackend helpers (on a stand-in SDK): gateway env pinning in the SDK options, tool-use parsing, and
 text collection from the streamed content blocks.
 """
 
@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import pytest
 
 from hyperloom_common.llm.llm_config import CLAUDE_GATEWAY_SIGNAL_KEYS, LEGACY_DEEPSEEK_ENV_KEYS
 from hyperloom.orchestrator.roles import ClaudeBackend
@@ -36,26 +37,7 @@ class _Msg:
     content: list[Any] = field(default_factory=list)
 
 
-class _FakeOptions:
-    def __init__(self, **kwargs: Any) -> None:
-        self.kwargs = kwargs
-
-
-def _make_query_factory():
-    async def _q(*, prompt, options):  # pragma: no cover - not invoked here
-        if False:
-            yield None
-
-    return _q
-
-
-def _backend(**over: Any) -> ClaudeBackend:
-    kwargs: dict[str, Any] = dict(
-        sdk_query_factory=_make_query_factory(),
-        sdk_options_cls=_FakeOptions,
-    )
-    kwargs.update(over)
-    return ClaudeBackend(**kwargs)
+pytestmark = pytest.mark.usefixtures("claude_sdk")
 
 
 def test_build_options_pins_gateway_env_and_ignores_global_settings(monkeypatch) -> None:
@@ -64,9 +46,9 @@ def test_build_options_pins_gateway_env_and_ignores_global_settings(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: sub-key")
     monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
     monkeypatch.delenv("ANTHROPIC_SMALL_FAST_MODEL", raising=False)
-    b = _backend(model="claude-opus-4-6")
+    b = ClaudeBackend(model="claude-opus-4-6")
 
-    opts = b._build_options(tools=[], max_turns=4, system_prompt=None)
+    opts = b._build_options(tools=[], system_prompt=None)
 
     assert opts.kwargs["setting_sources"] == []
     child_env = opts.kwargs["env"]
@@ -80,9 +62,9 @@ def test_build_options_leaves_settings_sources_unset_without_gateway_env(monkeyp
     # Taken from the product's signal set so a newly recognised gateway variable cannot leak in from the shell.
     for key in (*CLAUDE_GATEWAY_SIGNAL_KEYS, *LEGACY_DEEPSEEK_ENV_KEYS, "LLM_GATEWAY_KEY"):
         monkeypatch.delenv(key, raising=False)
-    b = _backend(model="claude-opus-4-6")
+    b = ClaudeBackend(model="claude-opus-4-6")
 
-    opts = b._build_options(tools=[], max_turns=4, system_prompt=None)
+    opts = b._build_options(tools=[], system_prompt=None)
 
     assert "env" not in opts.kwargs
     assert "setting_sources" not in opts.kwargs
@@ -96,9 +78,9 @@ def test_build_options_never_maps_openai_key_onto_the_anthropic_side(monkeypatch
     monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example.invalid/Unified/v1")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
     monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: openai-key")
-    b = _backend(model="claude-opus-4-6")
+    b = ClaudeBackend(model="claude-opus-4-6")
 
-    opts = b._build_options(tools=[], max_turns=4, system_prompt=None)
+    opts = b._build_options(tools=[], system_prompt=None)
 
     child_env = opts.kwargs["env"]
     assert opts.kwargs["setting_sources"] == []
@@ -109,7 +91,7 @@ def test_build_options_never_maps_openai_key_onto_the_anthropic_side(monkeypatch
 
 
 def test_parse_tool_use_block_prefers_native_intent_type() -> None:
-    b = _backend()
+    b = ClaudeBackend()
     block = ToolUseBlock(
         name=EMIT_INTENT_TOOL_NAME,
         input={
@@ -128,7 +110,7 @@ def test_parse_tool_use_block_prefers_native_intent_type() -> None:
 
 
 def test_parse_tool_use_block_unwraps_claude_code_wrapper() -> None:
-    b = _backend()
+    b = ClaudeBackend()
     raw = '{"intent_type": "send_message", "payload": {"topic": "heartbeat", "body_md": "ok"}}'
     wrapped = ToolUseBlock(
         name=EMIT_INTENT_TOOL_NAME,
@@ -140,7 +122,7 @@ def test_parse_tool_use_block_unwraps_claude_code_wrapper() -> None:
     assert intent.payload["topic"] == "heartbeat"
 
 
-async def test_raw_text_collects_every_text_shaped_block() -> None:
+async def test_raw_text_collects_every_text_shaped_block(claude_sdk) -> None:
     class _HasText:
         text = "attr-text"
 
@@ -152,5 +134,6 @@ async def test_raw_text_collects_every_text_shaped_block() -> None:
             content=[TextBlock("hello"), {"type": "text", "text": "d"}, {"type": "image"}, _HasText(), _NoText()]
         )
 
-    res = await _backend(sdk_query_factory=_q).run("p")
+    claude_sdk.query = _q
+    res = await ClaudeBackend().run("p")
     assert res.raw_text == "hellodattr-text"

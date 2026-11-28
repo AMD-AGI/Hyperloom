@@ -40,7 +40,7 @@ from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.phases.machine_state import ENABLEMENT_MAX_ATTEMPTS, PHASE_ENABLEMENT
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
-from hyperloom.orchestrator.state.round_store import FAILED, RoundRequest, RoundStore
+from hyperloom.orchestrator.state.round_store import FAILED, RoundStore
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 from .conftest import make_coordinator
@@ -117,10 +117,8 @@ async def _seed_stalled(rounds: RoundStore, n: int) -> None:
     for i in range(n):
         rid = f"seed-stalled-{i:03d}"
         holder = f"holder-{i:03d}"
-        await rounds.open(rid, RoundRequest(now_unix=float(i), request_id=rid), holder_task_id=holder, lease_sec=3600.0)
-        await rounds.settle(
-            await rounds.get(rid), RoundRequest(now_unix=float(i) + 1.0, request_id=f"settle-{rid}"), outcome=FAILED
-        )
+        await rounds.open(rid, now_unix=float(i), holder_task_id=holder, lease_sec=3600.0)
+        await rounds.settle(await rounds.get(rid), now_unix=float(i) + 1.0, outcome=FAILED)
 
 
 def _lane(session_dir: Path, **overrides: Any):
@@ -248,8 +246,6 @@ def _writeback(session_dir: Path, **overrides: Any):
             validation_pending=overrides.get("validation_pending", False),
             revalidation_generation=overrides.get("revalidation_generation", 0),
             baseline_eval_kind=overrides.get("baseline_eval_kind", ""),
-            observed_accuracy=overrides.get("observed_accuracy", 0.0),
-            observed_task=overrides.get("observed_task", ""),
         ),
         stop_reason="",
     )
@@ -259,8 +255,7 @@ def _writeback(session_dir: Path, **overrides: Any):
         rounds=overrides.get("rounds") or _rounds(session_dir),
         session_dir=str(session_dir),
     )
-    for name in ("_persist_eval_failure", "_record_enablement_eval_trigger"):
-        setattr(fake, name, types.MethodType(getattr(WritebackCollaborator, name), fake))
+    fake._persist_eval_failure = types.MethodType(WritebackCollaborator._persist_eval_failure, fake)
     return fake
 
 
@@ -460,7 +455,7 @@ async def test_a_snapshot_that_raised_leaves_the_row_silent(_bound_session, monk
     lane.shared_state.enablement.last_specialist_task_id = "spec-1"
     await lane.rounds.open(
         "enablement-spec-1",
-        RoundRequest(now_unix=0.0, request_id="seed-spec-1"),
+        now_unix=0.0,
         holder_task_id="spec-1",
         lease_sec=3600.0,
     )
@@ -555,6 +550,28 @@ def test_an_eval_less_rebaseline_cannot_downgrade_the_trigger(_bound_session):
     trigger = _ext()["trigger"]
     assert trigger["kind"] == "accuracy_below_floor"
     assert trigger["observed_accuracy"] == 0.21
+    assert trigger["observed_task"] == "gsm8k"
+    assert writeback.shared_state.enablement.baseline_eval_kind == "accuracy_below_floor"
+
+
+def test_a_trigger_that_observed_no_accuracy_records_none(_bound_session):
+    """An eval that never scored has no accuracy to report; the trigger says so instead of reporting zero."""
+    writeback = _writeback(_bound_session)
+
+    writeback._persist_eval_failure(
+        {
+            BASELINE_EVAL_FAILURE_KIND_KEY: "eval_runtime_failure",
+            BASELINE_EVAL_ACCURACY_FLOOR_KEY: 0.5,
+            BASELINE_EVAL_EVIDENCE_KEY: "run_eval failed with exit code 1",
+        }
+    )
+
+    trigger = _ext()["trigger"]
+    assert trigger["kind"] == "eval_runtime_failure"
+    assert trigger["observed_accuracy"] is None
+    assert trigger["observed_task"] is None
+    assert trigger["evidence_excerpt"] == "run_eval failed with exit code 1"
+    assert writeback.shared_state.enablement.launch_log == "run_eval failed with exit code 1"
 
 
 def test_a_failed_revalidation_closes_the_window_it_was_opened_for(_bound_session):

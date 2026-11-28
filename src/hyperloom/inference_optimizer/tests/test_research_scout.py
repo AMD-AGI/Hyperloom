@@ -100,38 +100,22 @@ def test_competitor_target_all_sourceless_writes_nothing(tmp_path: Path):
     assert not session_paths.competitor_target_json(tmp_path).exists()
 
 
-def test_seen_pr_ids_roundtrip():
-    s = SharedState()
-    assert s.research_scout_enabled is True
-    assert s.register_seen_pr_ids(["a", "b", "a", ""]) == 2
-    assert "a" in s.research_scout_seen_pr_ids
-    assert "zzz" not in s.research_scout_seen_pr_ids
-    restored = SharedState.from_dict(s.to_dict())
-    assert "b" in restored.research_scout_seen_pr_ids
-
-
 @pytest.mark.asyncio
 async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
-    from hyperloom.orchestrator.roles.agent_role import default_role_registry
     from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
     from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 
     state = SharedState(session_id="research-scout-readonly")
-    state.register_seen_pr_ids(["https://pr/seen"])
     state.specialist_rounds = [
         {
             "domain": "research_scout_specialist",
             "residual_questions": ["Does this vLLM version support the backend?"],
         }
     ]
-    state.explore_search = {
-        "accepted": [
-            {
-                "name": "kept-variant",
-                "source_evidence": ["https://pr/kept"],
-            }
-        ]
-    }
+    state.optimization_stack = [
+        {"action": "explore", "variant_name": "kept-variant", "fingerprint": "f1"},
+        {"action": "integrate_patch", "variant_name": "kept-patch"},
+    ]
     state.save(tmp_path)
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
     backends = {
@@ -140,7 +124,6 @@ async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
     coord = Coordinator(
         session_dir=tmp_path,
         backends=backends,
-        role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )
 
@@ -151,19 +134,5 @@ async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
 
     assert task.params["mode"] == "research"
     assert task.params["source_phase"] == "PRELUDE"
-    assert task.params["seen_pr_ids"] == ["https://pr/seen"]
     assert "Does this vLLM version support the backend?" in task.params["notes"]
-    assert {"name": "kept-variant", "source": "https://pr/kept"} in task.params["already_proven"]
-
-    research_hints.append_hints(
-        tmp_path,
-        [{"what": "enable aiter", "source": "https://example.test/aiter"}],
-    )
-    coord.gap_refresh.seed_gaps_from_research_hints()
-    first_id = next(row["canonical_id"] for row in coord.shared_state.gaps if row.get("symptom") == "enable aiter")
-    research_hints.append_hints(
-        tmp_path,
-        [{"what": "use hipblaslt", "source": "https://example.test/hipblaslt"}],
-    )
-    coord.gap_refresh.seed_gaps_from_research_hints()
-    assert any(row.get("canonical_id") == first_id for row in coord.shared_state.gaps)
+    assert task.params["already_proven"] == [{"name": "kept-variant", "source": ""}]

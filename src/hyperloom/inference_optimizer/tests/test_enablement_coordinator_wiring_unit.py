@@ -17,7 +17,6 @@ from hyperloom.common.failure_signature import FailureSignature
 from hyperloom.inference_optimizer.breakdown.stop_reasons import HOST_GPUS_UNAVAILABLE
 from hyperloom.orchestrator.bringup import observation_summary
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
-from hyperloom.orchestrator.state.round_store import RoundRequest
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task, TaskSpec, create_in_cursor
 
@@ -112,7 +111,6 @@ def test_build_params_threads_eval_origin_carriers(tmp_path):
     fake.shared_state.enablement.origin = "eval"
     fake.shared_state.enablement.accuracy_floor = 0.3
     fake.shared_state.enablement.probe_config_path = "/runs/baseline/materialized.yaml"
-    fake.shared_state.enablement.eval_definition_digest = "sha256:abc123"
     params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
     assert params is not None
     assert params["enablement_origin"] == "eval"
@@ -182,7 +180,7 @@ async def _hold_round(fake, holder: str, *, holder_state: str = ""):
         await _seed_task(fake, holder, kind="specialist", state=holder_state)
     acquired = await fake.rounds.open(
         f"enablement-{holder}",
-        RoundRequest(now_unix=time.time(), request_id=f"seed:{holder}"),
+        now_unix=time.time(),
         holder_task_id=holder,
         lease_sec=3600.0,
     )
@@ -215,7 +213,6 @@ def _enqueue_self(tmp_path, **state_kw):
             accepted_config_path=state_kw.get("enablement_accepted_config_path", ""),
             accepted_config=state_kw.get("enablement_accepted_config", {}),
             accuracy_floor=state_kw.get("enablement_accuracy_floor", 0.0),
-            eval_definition_digest=state_kw.get("enablement_eval_definition_digest", ""),
             active_runtime=state_kw.get("enablement_active_runtime", {}),
             revalidation_task_id=state_kw.get("enablement_revalidation_task_id", ""),
             revalidation_generation=state_kw.get("enablement_revalidation_generation", 0),

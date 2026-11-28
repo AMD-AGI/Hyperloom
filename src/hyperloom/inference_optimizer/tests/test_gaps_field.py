@@ -11,9 +11,13 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.state.objective import TargetGainObjective
+from hyperloom.inference_optimizer.baseline_comparison import research_hints
+from hyperloom.orchestrator.knowledge.recipe_journal import recipe_attrs_from_state
+from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 from hyperloom.orchestrator.state.gaps import _GAPS_ATTEMPTS_HISTORY, _GAPS_MAX_ENTRIES
+from hyperloom.orchestrator.state.objective import TargetGainObjective
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.task_registry import Task
 
 from .conftest import make_coordinator
 
@@ -37,7 +41,6 @@ def test_gaps_field_roundtrip_through_state_json(tmp_path):
             "canonical_id": "issue.moe.routing",
             "symptom": "MoE routing overhead dominates",
             "layer": "kernel_agent",
-            "severity": "high",
             "domain_hint": "kernel_switch_specialist",
             "source": "baseline",
             "first_seen_ts": "2025-01-01T00:00:00+00:00",
@@ -60,10 +63,20 @@ def test_upsert_gap_inserts_then_merges_by_canonical_id():
             "canonical_id": "issue.attn.headdim",
             "symptom": "attention head dim mismatch",
             "layer": "kernel_agent",
-            "severity": "medium",
         }
     )
     assert len(s.gaps) == 1
+    assert set(e1) == {
+        "canonical_id",
+        "symptom",
+        "layer",
+        "domain_hint",
+        "source",
+        "provenance",
+        "first_seen_ts",
+        "last_updated_ts",
+        "attempts",
+    }
     assert e1["canonical_id"] == "issue.attn.headdim"
     assert e1["first_seen_ts"]
     assert e1["last_updated_ts"]
@@ -72,11 +85,11 @@ def test_upsert_gap_inserts_then_merges_by_canonical_id():
         {
             "canonical_id": "issue.attn.headdim",
             "symptom": "(refined) attention head dim mismatch on prefill",
-            "severity": "high",  # override
+            "layer": "framework",  # override
         }
     )
     assert len(s.gaps) == 1
-    assert e2["severity"] == "high"
+    assert e2["layer"] == "framework"
     assert "prefill" in e2["symptom"]
     # ``first_seen_ts`` preserved.
     assert e2["first_seen_ts"] == e1["first_seen_ts"]
@@ -134,6 +147,17 @@ def test_upsert_gap_enforces_global_entries_cap():
     assert s.find_gap(f"issue.cap.{_GAPS_MAX_ENTRIES + 4}") is not None
 
 
+def test_upsert_gap_does_not_write_attempts():
+    """Attempts reach a row through ``append_gap_attempt``; an upsert neither seeds nor replaces them."""
+    s = SharedState()
+    seeded = s.upsert_gap({"canonical_id": "issue.x", "attempts": [{"action": "explore", "outcome": "REVERT"}]})
+    assert seeded["attempts"] == []
+
+    s.append_gap_attempt("issue.x", {"action": "explore", "variant_name": "v1", "outcome": "KEEP"})
+    again = s.upsert_gap({"canonical_id": "issue.x", "symptom": "refined", "attempts": []})
+    assert [a["variant_name"] for a in again["attempts"]] == ["v1"]
+
+
 # 4. Prompt rendering (to_gaps_summary)
 def test_to_gaps_summary_empty_returns_empty_string():
     """Cold-start sessions skip the whole block; the header is added only when the body is non-empty."""
@@ -147,7 +171,6 @@ def test_to_gaps_summary_renders_canonical_id_and_layer():
             "canonical_id": "issue.moe.routing",
             "symptom": "MoE routing dominates",
             "layer": "kernel_agent",
-            "severity": "high",
         }
     )
     s.append_gap_attempt(
@@ -159,9 +182,7 @@ def test_to_gaps_summary_renders_canonical_id_and_layer():
         },
     )
     out = s.to_gaps_summary()
-    assert "issue.moe.routing" in out
-    assert "kernel_agent/high" in out
-    assert "MoE routing dominates" in out
+    assert "issue.moe.routing [kernel_agent] MoE routing dominates" in out
     assert "attempts=1" in out
     assert "last=explore:REVERT" in out
 
@@ -185,7 +206,7 @@ def test_to_gaps_summary_caps_entries_at_max():
 
 def test_to_gaps_summary_lists_attempt_rows_only_when_asked():
     s = SharedState()
-    s.upsert_gap({"canonical_id": "g1", "symptom": "test", "layer": "framework", "severity": "medium"})
+    s.upsert_gap({"canonical_id": "g1", "symptom": "test", "layer": "framework"})
     s.append_gap_attempt("g1", {"action": "explore", "outcome": "FAILED", "error_class": "x", "failure_id": "fid1"})
 
     count_only = s.to_gaps_summary(max_attempts=0)
@@ -197,7 +218,7 @@ def test_to_gaps_summary_lists_attempt_rows_only_when_asked():
     assert "attempt:" in with_rows
 
 
-# 5. Coordinator helpers (refresh_gaps / _extract_* / warm_specialist_params)
+# 5. Coordinator helpers (record_explore_round_gaps / warm_specialist_params)
 @dataclass
 class _StubTask:
     task_id: str
@@ -211,150 +232,6 @@ def coord(tmp_path: Path):
         tmp_path,
         shared_state_overrides={"session_id": "test-session", "model_name": "llama-3.1-70B", "gpu_type": "mi300x"},
     )
-
-
-@pytest.mark.asyncio
-async def test_refresh_gaps_no_op_until_baseline(coord):
-    """Before baseline, refresh_gaps keeps gaps[] empty (extractors gate on baseline_tput > 0)."""
-    await coord.gap_refresh.refresh_gaps(
-        reason="baseline_done", workload_id=coord.recipe_journal.workload_canonical_id()
-    )
-    assert coord.shared_state.gaps == []
-
-
-@pytest.mark.asyncio
-async def test_refresh_gaps_seeds_throughput_gap_from_baseline(coord):
-    """After baseline + a non-zero gap to the objective, the extractor emits a `throughput_below_target` gap row anchored to the workload id."""
-    s = coord.shared_state
-    s.baseline_tput = 1000.0
-    coord._current_objective = TargetGainObjective(target_gain_pct=12.0)
-    await coord.gap_refresh.refresh_gaps(
-        reason="baseline_done", workload_id=coord.recipe_journal.workload_canonical_id()
-    )
-    matches = [g for g in s.gaps if g["canonical_id"].endswith("#throughput_below_target")]
-    assert matches, f"missing throughput gap in {s.gaps!r}"
-    gap = matches[0]
-    assert gap["layer"] == "framework"
-    assert gap["severity"] == "high"  # 12% gap → high severity
-    assert gap["domain_hint"] == "serving_specialist"
-    assert gap["source"] == "baseline"
-
-
-@pytest.mark.asyncio
-async def test_refresh_gaps_emits_baseline_unstable_gap(coord):
-    s = coord.shared_state
-    s.baseline_tput = 800.0
-    s.baseline_failure_streak = 2
-    await coord.gap_refresh.refresh_gaps(
-        reason="baseline_done", workload_id=coord.recipe_journal.workload_canonical_id()
-    )
-    instab = [g for g in s.gaps if g["canonical_id"].endswith("#baseline_unstable")]
-    assert instab, "missing baseline_unstable gap"
-    assert instab[0]["layer"] == "system"
-    assert instab[0]["severity"] == "high"  # streak ≥ 2
-
-
-@pytest.mark.asyncio
-async def test_refresh_gaps_dedupes_recurring_failures(coord):
-    """The attempts extractor folds repeated (action, error_class) failures into a single gap row, one attempt per failure."""
-    s = coord.shared_state
-    s.baseline_tput = 700.0
-    s.last_action_failures = [
-        {"action": "backends", "error_class": "no_report", "ts": "2025-01-01T00:00:00+00:00"},
-        {"action": "backends", "error_class": "no_report", "ts": "2025-01-01T00:01:00+00:00"},
-        {"action": "kernel_opt", "error_class": "compile_failure", "ts": "2025-01-01T00:02:00+00:00"},
-    ]
-    await coord.gap_refresh.refresh_gaps(
-        reason="explore_round", workload_id=coord.recipe_journal.workload_canonical_id()
-    )
-    by_id = {g["canonical_id"]: g for g in s.gaps}
-    backends_gaps = [g for cid, g in by_id.items() if "#fail:backends:no_report" in cid]
-    kernel_gaps = [g for cid, g in by_id.items() if "#fail:kernel_opt:compile_failure" in cid]
-    assert len(backends_gaps) == 1
-    assert len(backends_gaps[0]["attempts"]) == 2
-    assert backends_gaps[0]["layer"] == "framework"
-    assert kernel_gaps and kernel_gaps[0]["layer"] == "kernel_agent"
-
-
-@pytest.mark.asyncio
-async def test_refresh_gaps_counts_each_failure_once_across_refreshes(coord):
-    """Every refresh re-reads the whole failure log, so a failure already on the gap must not be counted again."""
-    s = coord.shared_state
-    wid = coord.recipe_journal.workload_canonical_id()
-    s.last_action_failures = [
-        {"action": "roofline", "error_class": "trace_analyze_failed", "ts": "2025-01-01T00:00:00+00:00"},
-        {"action": "roofline", "error_class": "trace_analyze_failed", "ts": "2025-01-01T00:05:00+00:00"},
-    ]
-    for _ in range(5):
-        await coord.gap_refresh.refresh_gaps(reason="tick", workload_id=wid)
-    gap = s.find_gap(f"{wid}#fail:roofline:trace_analyze_failed")
-    assert gap is not None
-    assert [a["ts"] for a in gap["attempts"]] == [
-        "2025-01-01T00:00:00+00:00",
-        "2025-01-01T00:05:00+00:00",
-    ]
-
-    # A new failure still lands, once.
-    s.last_action_failures.append(
-        {"action": "roofline", "error_class": "trace_analyze_failed", "ts": "2025-01-01T00:10:00+00:00"}
-    )
-    for _ in range(3):
-        await coord.gap_refresh.refresh_gaps(reason="tick", workload_id=wid)
-    assert [a["ts"][-14:-6] for a in gap["attempts"]] == ["00:00:00", "00:05:00", "00:10:00"]
-
-
-@pytest.mark.asyncio
-async def test_refresh_gaps_keeps_newest_failures_when_log_exceeds_attempt_cap(coord):
-    """A failure log longer than the attempt cap keeps the newest failures, oldest first, refresh after refresh."""
-    s = coord.shared_state
-    wid = coord.recipe_journal.workload_canonical_id()
-    total = _GAPS_ATTEMPTS_HISTORY + 5
-    s.last_action_failures = [
-        {"action": "explore", "error_class": "boot_failed", "ts": f"2025-01-01T00:{i:02d}:00+00:00"}
-        for i in range(total)
-    ]
-    expected = [f"2025-01-01T00:{i:02d}:00+00:00" for i in range(5, total)]
-    for _ in range(3):
-        await coord.gap_refresh.refresh_gaps(reason="tick", workload_id=wid)
-        gap = s.find_gap(f"{wid}#fail:explore:boot_failed")
-        assert gap is not None
-        assert [a["ts"] for a in gap["attempts"]] == expected
-
-
-def test_upsert_gap_collapses_repeated_attempts_already_on_the_row():
-    """A row that already holds copies of one attempt (state saved before the fix) is folded back to one."""
-    s = SharedState()
-    rolled_out = {"action": "roofline", "outcome": "REVERT", "error_class": "trace_analyze_failed", "ts": "t0"}
-    current = {"action": "roofline", "outcome": "REVERT", "error_class": "trace_analyze_failed", "ts": "t1"}
-    half = _GAPS_ATTEMPTS_HISTORY // 2
-    s.gaps = [
-        {
-            "canonical_id": "w#fail:roofline",
-            "attempts": [dict(rolled_out) for _ in range(half)] + [dict(current) for _ in range(half)],
-        }
-    ]
-    # ``t0`` has left the failure log; only ``t1`` is re-derived.
-    gap = s.upsert_gap({"canonical_id": "w#fail:roofline", "attempts": [dict(current)]})
-    assert gap["attempts"] == [rolled_out, current]
-
-
-@pytest.mark.asyncio
-async def test_refresh_gaps_emits_explore_plateau_after_streak(coord):
-    s = coord.shared_state
-    s.baseline_tput = 1000.0
-    s.params_no_promote_streak = 4
-    s.explore_search = {
-        "winners_history": [
-            {"variant_name": "v1", "gain_pct": 0.0},
-            {"variant_name": "v2", "gain_pct": 0.0},
-        ]
-    }
-    await coord.gap_refresh.refresh_gaps(
-        reason="explore_round", workload_id=coord.recipe_journal.workload_canonical_id()
-    )
-    plateau = [g for g in s.gaps if g["canonical_id"].endswith("#explore_plateau")]
-    assert plateau, "explore_plateau gap missing"
-    assert plateau[0]["domain_hint"] == "serving_specialist"
 
 
 @pytest.mark.asyncio
@@ -373,7 +250,7 @@ async def test_record_explore_round_gaps_appends_attempts(coord):
         kind="explore",
         params={"gap_canonical_id": "issue.fp8.kv"},
     )
-    coord.gap_refresh.record_explore_round_gaps(
+    coord.explore_outcomes.record_explore_round_gaps(
         workload_id=coord.recipe_journal.workload_canonical_id(),
         task=task,
         result={
@@ -401,7 +278,7 @@ async def test_record_explore_round_gaps_falls_back_to_anchor(coord):
         kind="explore",
         params={},
     )
-    coord.gap_refresh.record_explore_round_gaps(
+    coord.explore_outcomes.record_explore_round_gaps(
         workload_id=coord.recipe_journal.workload_canonical_id(),
         task=task,
         result={
@@ -416,6 +293,87 @@ async def test_record_explore_round_gaps_falls_back_to_anchor(coord):
     assert any(a["variant_name"] == "v1" for a in gap["attempts"])
 
 
+@pytest.mark.parametrize(
+    ("framework", "domain"),
+    [("custom", "framework_rewrite_specialist"), ("sglang", "serving_specialist")],
+)
+def test_the_explore_anchor_gap_names_the_authoring_domain_of_the_framework(coord, framework, domain):
+    """A scriptable workload's framework-layer gap routes to the rewrite specialist, not back to the serving surface."""
+    coord.shared_state.framework = framework
+    anchor = coord.recipe_journal.workload_canonical_id()
+    coord.explore_outcomes.record_explore_round_gaps(
+        workload_id=anchor,
+        task=_StubTask(task_id="explore-anchor"),
+        result={"per_variant_outcomes": [{"variant_name": "v1", "outcome": "REVERT"}]},
+    )
+    gap = coord.shared_state.find_gap(anchor)
+    assert (gap["layer"], gap["domain_hint"]) == ("framework", domain)
+
+
+async def test_a_closed_specialist_round_derives_no_gap_from_the_objective_the_failure_log_or_its_findings(coord):
+    """The objective shortfall, a baseline crash streak, a failed action and a research hint are shown elsewhere."""
+    s = coord.shared_state
+    s.baseline_tput = 1000.0
+    s.baseline_failure_streak = 2
+    coord._current_objective = TargetGainObjective(target_gain_pct=12.0)
+    s.record_action_failure(action="roofline", task_id="t-1", result={"error_class": "trace_analyze_failed"})
+
+    await coord.specialist_dispatch.record_specialist_result(
+        task=_StubTask(task_id="spec-1", kind="specialist"),
+        done_payload={
+            "domain": "serving_specialist",
+            "gap_canonical_id": "gap.own.idea",
+            "proposal_set": [],
+            "new_findings": [
+                {"what": "enable aiter", "source": "https://example.test/aiter", "domain_tags": ["serving"]}
+            ],
+        },
+        source="specialist:spec-1",
+    )
+
+    assert coord.target_gap_pct() > 0
+    assert [row["task_id"] for row in s.specialist_rounds] == ["spec-1"]
+    assert [hint["what"] for hint in research_hints.load_hints(coord.session_dir)] == ["enable aiter"]
+    assert "enable aiter" in (await coord.conversation.compose_prompt()).text.split("=== Specialist findings ===")[1]
+    assert s.gaps == []
+
+
+async def test_an_explore_round_publishes_only_its_measured_loser_as_reverted(coord):
+    """A variant that measured nothing reaches the recipe once, by its error class; a measured loser as reverted."""
+    s = coord.shared_state
+    s.baseline_tput = 900.0
+    s.current_best = {"action": "baseline", "tput": 900.0, "extra_server_args": "", "extra_envs": {}}
+    task = Task(task_id="t-explore", kind="explore", state="running", params={}, idempotency_key="explore-t")
+    outcomes = [
+        {"variant_name": "boot_dead", "outcome": "FAILED", "error_class": "server_init_dead", "fingerprint": "aa"},
+        {"variant_name": "slower", "outcome": "REVERT", "reason": "below_bar", "fingerprint": "bb"},
+    ]
+
+    await coord.dispatcher.reap_dispatched_task(
+        task,
+        SubAgentResult(
+            task_id=task.task_id,
+            state="succeeded",
+            result={"status": "succeeded", "round_id": "r1", "per_variant_outcomes": outcomes},
+        ),
+    )
+
+    (gap,) = s.gaps
+    assert gap["canonical_id"] == coord.recipe_journal.workload_canonical_id()
+    assert [(a["variant_name"], a["outcome"]) for a in gap["attempts"]] == [
+        ("boot_dead", "FAILED"),
+        ("slower", "REVERT"),
+    ]
+    assert [(row["variant_name"], row["error_class"]) for row in s.last_action_failures] == [
+        ("boot_dead", "server_init_dead")
+    ]
+    assert s.recipe_sediment_enabled
+    assert recipe_attrs_from_state(s, "test-session")["what_failed"] == [
+        {"name": "explore", "reason": "server_init_dead"},
+        {"name": "slower", "reason": "reverted", "gain_pct": None},
+    ]
+
+
 # 6. specialist warmup — gap fields flow into task.params
 @pytest.mark.asyncio
 async def test_warm_specialist_params_pulls_gap_symptom_and_layer(coord):
@@ -426,7 +384,6 @@ async def test_warm_specialist_params_pulls_gap_symptom_and_layer(coord):
             "canonical_id": "issue.moe.routing",
             "symptom": "MoE routing overhead",
             "layer": "kernel_agent",
-            "severity": "high",
             "domain_hint": "kernel_switch_specialist",
         }
     )
@@ -445,10 +402,9 @@ async def test_warm_specialist_params_pulls_gap_symptom_and_layer(coord):
     await coord.specialist_dispatch.warm_specialist_params(params)
     assert params["gap_symptom"] == "MoE routing overhead"
     assert params["gap_layer"] == "kernel_agent"
-    evidence = params["gap_evidence"]
-    assert isinstance(evidence, dict)
-    assert evidence["severity"] == "high"
-    assert len(evidence["recent_attempts"]) == 1
+    (attempt,) = params["gap_evidence"].pop("recent_attempts")
+    assert (attempt["variant_name"], attempt["outcome"]) == ("moe_x", "REVERT")
+    assert params["gap_evidence"] == {}
 
 
 @pytest.mark.asyncio
@@ -482,27 +438,6 @@ async def test_warm_specialist_params_noop_when_gap_unknown(coord):
     assert params["gap_symptom"] == "preset"
 
 
-# 7. refresh_gaps derives gaps only from baseline and attempts
-class _TraversePlane:
-    """KnowledgePlane double whose traverse rows refresh_gaps must not merge."""
-
-    pr_monitor_enabled = False
-
-    def recipe_kb_traverse_issues(self, *, model_class: str, gpu_type: str):
-        return [{"canonical_id": "issue.kb.fp8_kv_prior", "symptom": "prior session", "layer": "kernel_agent"}]
-
-
-@pytest.mark.asyncio
-async def test_refresh_gaps_ignores_plane_traverse_method(coord):
-    coord.shared_state.baseline_tput = 900.0
-    workload_id = coord.recipe_journal.workload_canonical_id()
-    await coord.gap_refresh.refresh_gaps(reason="plain", workload_id=workload_id)
-    expected = [dict(g) for g in coord.shared_state.gaps]
-    coord.knowledge_plane = _TraversePlane()
-    await coord.gap_refresh.refresh_gaps(reason="with_plane", workload_id=workload_id)
-    assert [dict(g) for g in coord.shared_state.gaps] == expected
-
-
 @pytest.mark.asyncio
 async def test_record_explore_round_gaps_carries_failure_artifacts(coord):
     """When a per_variant_outcome carries failure_id/fingerprint/workspace, they flow into the attempt."""
@@ -520,7 +455,7 @@ async def test_record_explore_round_gaps_carries_failure_artifacts(coord):
         kind="explore",
         params={"gap_canonical_id": "issue.fp8.kv2"},
     )
-    coord.gap_refresh.record_explore_round_gaps(
+    coord.explore_outcomes.record_explore_round_gaps(
         workload_id=coord.recipe_journal.workload_canonical_id(),
         task=task,
         result={

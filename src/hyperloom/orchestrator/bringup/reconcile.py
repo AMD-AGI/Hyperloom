@@ -12,11 +12,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from ..bus.resource_lock import BRINGUP_ROUND_LANE, SqliteLeaseBackend
+from ..bus.resource_lock import SqliteLeaseBackend
 from ..state.round_store import (
     EXPIRED_REAPED,
     Round,
-    RoundRequest,
     RoundStore,
 )
 from ..state.task_registry import TERMINAL_STATES, Task, TaskNotFound, TaskRegistry
@@ -57,13 +56,11 @@ class ReconcileLinks:
     """The running loop's state the pass reads and writes.
 
     Attributes:
-        resources: The gate's resource facts.
         session_dir: Where SharedState is saved after a terminal is set.
         result_pending: Whether a terminal task's result is still to be
             booked by the dispatcher.
     """
 
-    resources: Any
     session_dir: Any
     result_pending: Callable[[str], bool]
 
@@ -104,7 +101,7 @@ class ReconcileReport:
 
 
 class Reconciler:
-    """The unconditional repair pass, and the projection rebuild that ends it.
+    """The unconditional repair pass.
 
     Attributes:
         last_report (ReconcileReport): What the most recent pass did; read by
@@ -123,8 +120,7 @@ class Reconciler:
 
         Args:
             stores: The durable stores the pass repairs.
-            shared_state: SharedState, read for the projection and written when
-                an unreaped round stops the session.
+            shared_state: SharedState, whose revalidation window the pass closes.
             links: The running loop's state the pass reads and writes.
         """
         self._rounds = stores.rounds
@@ -134,7 +130,6 @@ class Reconciler:
         self._tasks = stores.tasks
         self._locks = stores.locks
         self._shared_state = shared_state
-        self._resources = links.resources
         self._session_dir = links.session_dir
         self._result_pending = links.result_pending
         self.last_report = ReconcileReport()
@@ -150,7 +145,7 @@ class Reconciler:
         return taken
 
     async def run(self, now_unix: float) -> ReconcileReport:
-        """Run every rule in order, the projection rebuild last.
+        """Run every rule in order.
 
         Args:
             now_unix: Current wall time.
@@ -164,7 +159,6 @@ class Reconciler:
             self._reap_leases,
             self._resolve_open_rounds,
             self._close_stale_validation_window,
-            self._rebuild_projection,
         ):
             try:
                 await rule(now_unix, report)
@@ -185,7 +179,7 @@ class Reconciler:
 
     async def _fail_dead_tasks(self, now_unix: float, report: ReconcileReport) -> None:
         """Fail every running task whose process is provably gone."""
-        report.failed_tasks.extend(await self._tasks.reclaim_dead_running(reason="reconciler_dead_holder"))
+        report.failed_tasks.extend(await self._tasks.reclaim_dead_running())
 
     async def _resolve_open_rounds(self, now_unix: float, report: ReconcileReport) -> None:
         """Advance completed owners without timing out active ownership."""
@@ -267,12 +261,8 @@ class Reconciler:
         if successor is not None:
             moved = await self._rounds.handoff(
                 round_row,
-                RoundRequest(
-                    now_unix=now_unix,
-                    request_id=f"reconcile:handoff:{successor.task_id}",
-                    evidence={"reason": "holder_terminal_with_successor"},
-                ),
                 new_holder_task_id=successor.task_id,
+                now_unix=now_unix,
                 # A successor that declares no TTL inherits what the round has left.
                 lease_sec=float(successor.lease_ttl_sec) or (round_row.expires_unix - round_row.renewed_unix),
             )
@@ -281,20 +271,12 @@ class Reconciler:
             return
         if float(now_unix) - _unix_of(holder.updated_at) < TERMINAL_HOLDER_CAP_SEC:
             return
-        await self._expire(round_row, now_unix, report, why="holder_terminal_without_result")
+        await self._expire(round_row, now_unix, report)
 
-    async def _expire(self, round_row: Round, now_unix: float, report: ReconcileReport, *, why: str) -> None:
+    async def _expire(self, round_row: Round, now_unix: float, report: ReconcileReport) -> None:
         """Settle a completed owner after its successor window ends."""
         outcome = EXPIRED_REAPED
-        result = await self._rounds.settle(
-            round_row,
-            RoundRequest(
-                now_unix=now_unix,
-                request_id=f"reconcile:{why}:{round_row.round_id}:{round_row.fence}",
-                evidence={"reason": why, "cleanup": "holder_terminal_without_resources"},
-            ),
-            outcome=outcome,
-        )
+        result = await self._rounds.settle(round_row, outcome=outcome, now_unix=now_unix)
         if not result.ok:
             return
         report.settled.append((round_row.round_id, outcome))
@@ -302,19 +284,10 @@ class Reconciler:
     async def _holder_has_resources(self, task_id: str) -> bool:
         """Keep round ownership while execution or GPU cleanup still owns rows."""
         row = await self._db.fetchone(
-            "SELECT 1 FROM leases WHERE task_id=? AND lane != ? "
-            "UNION ALL SELECT 1 FROM gpu_leases WHERE task_id=? LIMIT 1",
-            (task_id, BRINGUP_ROUND_LANE, task_id),
+            "SELECT 1 FROM leases WHERE task_id=? UNION ALL SELECT 1 FROM gpu_leases WHERE task_id=? LIMIT 1",
+            (task_id, task_id),
         )
         return row is not None
-
-    async def _rebuild_projection(self, now_unix: float, report: ReconcileReport) -> None:
-        """Re-read the facts the gate's resource rules judge against."""
-        self._resources.update(
-            self._shared_state,
-            rounds=await self._rounds.open_rounds(),
-            live_task_ids=[t.task_id for t in await self._tasks.running()],
-        )
 
     async def _task(self, task_id: str) -> Task | None:
         """Read one task, or ``None`` when the registry has no such row."""

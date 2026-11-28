@@ -536,9 +536,8 @@ def baseline_writer(native_benchmark, monkeypatch, tmp_path):
     _agentx(monkeypatch, native_benchmark)
     coord = make_coordinator(tmp_path, shared_state_overrides={"framework": "vllm", "benchmark_mode": "agentx"})
     writer = coord.writeback
-    monkeypatch.setattr(coord.gap_refresh, "refresh_gaps", AsyncMock())
     monkeypatch.setattr(writer, "drain_queued_baselines", AsyncMock())
-    monkeypatch.setattr(writer, "_should_run_prelude_bootstrap", lambda _tput: False)
+    monkeypatch.setattr(writer, "_should_run_prelude_bootstrap", lambda: False)
     return writer, _PromoteOutcome(verdict=Verdict.RECORDED)
 
 
@@ -576,7 +575,7 @@ async def test_baseline_perf_updates_without_resetting_the_stack(baseline_writer
 
     await writer._promote_baseline(result, task=None, outcome=outcome)
 
-    assert outcome.audit_decision == "promoted"
+    assert state.last_baseline["decision"] == "promoted"
     assert state.baseline_tput == 190.0
     assert state.baseline_config_path == result["materialized_config"]
     assert state.baseline_perf == {
@@ -624,7 +623,7 @@ async def test_rejected_baseline_preserves_the_entire_anchor(baseline_writer, tm
 
     await writer._promote_baseline(result, task=None, outcome=outcome)
 
-    assert outcome.audit_decision == "no_promote"
+    assert state.last_baseline["decision"] == "no_promote"
     assert {key: getattr(state, key) for key in prior_baseline} == prior_baseline
     assert state.current_best == _ANCHOR
     assert state.current_best_measurement == {"declared_launch_identity": "old-identity"}
@@ -668,7 +667,7 @@ async def test_accepted_baseline_without_axes_clears_stale_perf(baseline_writer,
 
     await writer._promote_baseline(result, task=None, outcome=outcome)
 
-    assert outcome.audit_decision == "promoted"
+    assert state.last_baseline["decision"] == "promoted"
     assert state.baseline_tput == 190.0
     assert state.baseline_config_path == result["materialized_config"]
     assert state.baseline_perf == {}
@@ -709,7 +708,7 @@ async def test_promoted_baseline_arms_the_agentx_checkpoint(baseline_writer, tmp
     await writer._promote_baseline(result, task=None, outcome=outcome)
 
     anchor, _ = resolve_grading_anchor_perf(writer.shared_state)
-    assert outcome.audit_decision == "promoted"
+    assert writer.shared_state.last_baseline["decision"] == "promoted"
     assert round_checkpoint(anchor) == AgentxCheckpoint(55.0, enforce=True)
 
 

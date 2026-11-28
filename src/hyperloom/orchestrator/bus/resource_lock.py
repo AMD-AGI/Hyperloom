@@ -18,7 +18,6 @@ from hyperloom_common.timeutil import now_iso
 from hyperloom.orchestrator.state.task_states import TERMINAL_STATES
 
 from .storage.connection import SqliteConnection
-from .storage.schema import DEFAULT_LANE_CAPACITIES
 
 
 log = logging.getLogger(__name__)
@@ -39,6 +38,10 @@ KNOWN_LANES = (
     "build_lane",
 )
 
+#: Holders a lane admits at once: every lane is serial. A session gives ``research_lane`` its own capacity on the
+#: backend it opens.
+DEFAULT_LANE_CAPACITIES: dict[str, int] = dict.fromkeys(KNOWN_LANES, 1)
+
 # Lane → lanes that must *also* be free or co-acquired.
 LANE_CONFLICTS: dict[str, frozenset[str]] = {
     "benchmark_lane": frozenset({"profile_lane", "server_lifecycle", "gpu_research_lane"}),
@@ -54,28 +57,6 @@ LANE_CONFLICTS: dict[str, frozenset[str]] = {
 }
 
 
-#: The lane an open bring-up round holds for as long as it is open.
-#:
-#: Deliberately absent from :data:`KNOWN_LANES`, because no task may request it.
-#: A round is held by a task that still has to be dispatchable while the round
-#: stands, and every serving lane mutexes against ``gpu_research_lane``, so a
-#: round holding a serving lane under a holder id of its own would deny its own
-#: holder the dispatch the round exists to cover. ``RoundStore`` writes and
-#: drops this row inside the transaction that opens, renews and settles the
-#: round; capacity readers and the breakdown lane timeline read it like any
-#: other ownership row.
-BRINGUP_ROUND_LANE = "bringup_round"
-
-#: Recorded on a round's lane row in place of a pid. The round's holder is a
-#: task, not this process, and only the task registry can prove a task's process
-#: dead. The dead-holder pass skips non-positive pids, leaving these rows to
-#: explicit round settlement.
-ROUND_LEASE_PID = 0
-
-#: Recorded in the lane row's ``action`` column.
-_ROUND_LEASE_ACTION = "bringup_round"
-
-
 def _lease_iso(unix_ts: float) -> str:
     """Render unix seconds the way the lease table's timestamps compare.
 
@@ -88,61 +69,6 @@ def _lease_iso(unix_ts: float) -> str:
         str: A fixed-width UTC ISO-8601 timestamp.
     """
     return datetime.fromtimestamp(float(unix_ts), tz=timezone.utc).isoformat(timespec="microseconds")
-
-
-def hold_round_lane(
-    cur: sqlite3.Cursor,
-    *,
-    round_id: str,
-    holder_task_id: str,
-    expires_unix: float,
-    now_unix: float,
-) -> None:
-    """Write the lane row an open round holds, inside the caller's transaction.
-
-    Keyed on ``(BRINGUP_ROUND_LANE, round_id)`` and idempotent, so the one call
-    serves the acquire, every renewal, and a handoff that moves the round to a
-    new holder. ``acquired_at`` survives a renewal; only the holder and the
-    expiry move.
-
-    Args:
-        cur: Cursor of the transaction writing the round row, so the round and
-            its lane land together or not at all.
-        round_id: The round holding the lane; also the lease's holder id.
-        holder_task_id: The task the round is held by right now.
-        expires_unix: When the round's lease runs out.
-        now_unix: Current wall time.
-    """
-    stamp = _lease_iso(now_unix)
-    cur.execute(
-        "INSERT INTO leases(lane, holder_id, task_id, action, pid,"
-        "  acquired_at, expires_at) VALUES (?,?,?,?,?,?,?)"
-        " ON CONFLICT(lane, holder_id) DO UPDATE SET"
-        "  task_id = excluded.task_id,"
-        "  expires_at = excluded.expires_at",
-        (
-            BRINGUP_ROUND_LANE,
-            round_id,
-            holder_task_id,
-            _ROUND_LEASE_ACTION,
-            ROUND_LEASE_PID,
-            stamp,
-            _lease_iso(expires_unix),
-        ),
-    )
-
-
-def drop_round_lane(cur: sqlite3.Cursor, *, round_id: str) -> None:
-    """Release the lane row a round held, inside the caller's transaction.
-
-    Args:
-        cur: Cursor of the transaction settling the round.
-        round_id: The round whose lane is released.
-    """
-    cur.execute(
-        "DELETE FROM leases WHERE lane = ? AND holder_id = ?",
-        (BRINGUP_ROUND_LANE, round_id),
-    )
 
 
 def _expand_lanes(lanes: list[str]) -> list[str]:
@@ -206,9 +132,9 @@ UNVERIFIABLE_NO_LOCAL_SCOPE = (
 #: be told, because this is the very path that wedged 2026-09-21 and the
 #: exemption is a reason not to RECLAIM, never a reason not to REPORT.
 UNVERIFIABLE_HOLDS_GPU = "the holder still owns GPU cards, so its lane is exempt from reclamation"
-#: The holder's ``tasks`` row was pruned out from under its lease. Nothing can
-#: judge it any more: the state that said it ended is gone.
-UNVERIFIABLE_HOLDER_PRUNED = "the holder's task row no longer exists, so nothing can attest it ended"
+#: The lease names a holder with no ``tasks`` row: a kernel request holds its
+#: lanes under its message id. Nothing can judge it: no state says it ended.
+UNVERIFIABLE_NO_TASK_ROW = "the holder has no task row, so nothing can attest it ended"
 
 #: ``(lane, holder_id)`` pairs whose remedy has already been printed. A sweep
 #: runs every maintenance tick and an unverifiable row stays unverifiable by
@@ -296,20 +222,17 @@ def _unverifiable_holders(cur: sqlite3.Cursor, *, scope: str) -> list[dict]:
     """
     # A LEFT JOIN, and no gpu_leases exemption: both of those filters belong to
     # reclamation, and either would silence exactly the rows an operator most
-    # needs to see. An inner join drops a row whose holder was pruned
-    # (bus/db_maintenance.py prune_tasks does not spare a task that still holds
-    # a lease), and the exemption drops the GPU path -- the one
-    # dispatcher.py's release_resources() fails on, i.e. the shape of the
-    # 2026-09-21 incident.
+    # needs to see. An inner join drops a row whose holder has no task row (a
+    # kernel request holds its lanes under its message id), and the exemption
+    # drops the GPU path -- the one dispatcher.py's release_resources() fails
+    # on.
     rows = [
         dict(r)
         for r in cur.execute(
             "SELECT leases.lane AS lane, leases.holder_id AS holder_id, leases.task_id AS task_id, "
             "leases.owner_scope AS owner_scope, tasks.state AS holder_state, tasks.history AS holder_history, "
             "(SELECT 1 FROM gpu_leases WHERE gpu_leases.task_id = leases.task_id LIMIT 1) AS holds_gpu "
-            "FROM leases LEFT JOIN tasks ON tasks.task_id = leases.task_id "
-            "WHERE leases.lane != ?",
-            (BRINGUP_ROUND_LANE,),
+            "FROM leases LEFT JOIN tasks ON tasks.task_id = leases.task_id"
         )
     ]
     stuck: list[dict] = []
@@ -318,8 +241,8 @@ def _unverifiable_holders(cur: sqlite3.Cursor, *, scope: str) -> list[dict]:
         holds_gpu = row.pop("holds_gpu", None)
         history = row.pop("holder_history", None)
         if state is None:
-            # The task row is gone; its lease outlived it and no pass can judge it.
-            row["reason"] = UNVERIFIABLE_HOLDER_PRUNED
+            # No task row says whether this holder ended, so no pass can judge it.
+            row["reason"] = UNVERIFIABLE_NO_TASK_ROW
             stuck.append(row)
             continue
         if str(state) not in TERMINAL_STATES:
@@ -417,9 +340,10 @@ class Lease:
 class SqliteLeaseBackend:
     """Lane lease store; ``BEGIN IMMEDIATE`` + PK uniqueness gives atomic acquire-many."""
 
-    def __init__(self, db: SqliteConnection):
-        """Bind the backend to a SQLite connection."""
+    def __init__(self, db: SqliteConnection, *, research_lane_capacity: int = 1):
+        """Bind the backend to a SQLite connection and to the session's research-lane capacity."""
         self.db = db
+        self._capacities = {**DEFAULT_LANE_CAPACITIES, "research_lane": research_lane_capacity}
 
     async def acquire_many(
         self,
@@ -444,21 +368,7 @@ class SqliteLeaseBackend:
         expires_iso = _lease_iso(expires_ts)
 
         async with self.db.transaction() as cur:
-            # Resolve capacity per lane (fallback for unseeded DBs).
-            capacity_by_lane: dict[str, int] = {}
             placeholders = ",".join("?" * len(expanded))
-            cur.execute(
-                f"SELECT lane, capacity FROM lane_capacity WHERE lane IN ({placeholders})",  # nosec B608 - generated placeholders only.
-                expanded,
-            )
-            for row in cur.fetchall():
-                capacity_by_lane[row["lane"]] = int(row["capacity"])
-            for lane in expanded:
-                capacity_by_lane.setdefault(
-                    lane,
-                    int(DEFAULT_LANE_CAPACITIES.get(lane, 1)),
-                )
-
             cur.execute(
                 f"SELECT lane, holder_id FROM leases WHERE lane IN ({placeholders})",  # nosec B608 - generated placeholders only.
                 expanded,
@@ -469,7 +379,7 @@ class SqliteLeaseBackend:
 
             # A holder already on a lane refreshes it; a lane at capacity (0 disables it) refuses the batch.
             if any(
-                holder_id not in holders_per_lane[lane] and len(holders_per_lane[lane]) >= capacity_by_lane[lane]
+                holder_id not in holders_per_lane[lane] and len(holders_per_lane[lane]) >= self._capacities[lane]
                 for lane in expanded
             ):
                 return None
@@ -590,11 +500,6 @@ class SqliteLeaseBackend:
         _report_unverifiable(stuck, db_path=str(getattr(self.db, "db_path", "") or ""))
         return stuck
 
-    async def lane_holders(self) -> dict[str, int]:
-        """Return ``{lane: holder_count}`` for every retained ownership row."""
-        rows = await self.db.fetchall("SELECT lane, COUNT(*) AS n FROM leases GROUP BY lane")
-        return {r["lane"]: int(r["n"]) for r in rows}
-
     def lanes_by_task_sync(self) -> dict[str, tuple[list[str], str]]:
         """Return ``{task_id: (lanes, soonest_expiry)}`` for every retained row.
 
@@ -610,27 +515,16 @@ class SqliteLeaseBackend:
             by_task[task_id] = (lanes, expires if not soonest or expires < soonest else soonest)
         return by_task
 
-    async def lane_capacities(self) -> dict[str, int]:
-        """Return ``{lane: capacity}`` for every row in ``lane_capacity``."""
-        rows = await self.db.fetchall("SELECT lane, capacity FROM lane_capacity")
-        out: dict[str, int] = dict(DEFAULT_LANE_CAPACITIES)
-        for r in rows:
-            out[r["lane"]] = int(r["capacity"])
-        return out
-
 
 __all__ = [
-    "BRINGUP_ROUND_LANE",
     "CLEANUP_CONFIRMED_KEY",
     "CLEANUP_TREE_PGID_KEY",
+    "DEFAULT_LANE_CAPACITIES",
     "KNOWN_LANES",
     "LANE_CONFLICTS",
-    "ROUND_LEASE_PID",
     "UNVERIFIABLE_FOREIGN_SCOPE",
     "UNVERIFIABLE_CONFIRMED_BUT_HELD",
     "UNVERIFIABLE_CLEANUP_UNCONFIRMED",
     "Lease",
     "SqliteLeaseBackend",
-    "drop_round_lane",
-    "hold_round_lane",
 ]

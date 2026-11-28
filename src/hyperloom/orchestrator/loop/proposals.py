@@ -1,26 +1,30 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Turning a proposed action or a specialist's deliverable into a queued task, and the framework record of a grid."""
+"""Queuing the task an action or a specialist's deliverable asks for, and the framework record of a grid."""
 
 from __future__ import annotations
 import hashlib
 import json
-import uuid
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Mapping
 from hyperloom_common.coerce import to_float
+from hyperloom.inference_optimizer.protocol.intent import IntentType
 from hyperloom.orchestrator.lever import LEVER_CONFIG
 from ..actions.executors.benchmark_result import is_valid_measurement
 from ..actions.executors.integrate._integrate_vocabulary import RESULT_BENCHED
 from ..phases import machine_state as _phase_state
-from ..bus.message_bus import Message
-from ..policy.gate import SPECIALIST_ACTION_NAME
-from ..specialists.domains import gap_backfilled_domain
+from ..policy.denial import PolicyDenied
+from ..policy.gate import SPECIALIST_ACTION_NAME, SPECIALIST_FROM_AGENT_PREFIX
 from ..state.shared_state import inject_stack_base_params
-from ..state.task_registry import TERMINAL_STATES, Task, TaskSpec, create_on_free_key
+from ..state.task_registry import (
+    TERMINAL_STATES,
+    Task,
+    TaskSpec,
+    UnspentKey,
+    confirmed_result,
+    first_unspent_key,
+)
 from ..collaborator import CoordinatorCollaborator
-from ._integrate_promotion import _confirmed_task_outcome
 
 if TYPE_CHECKING:
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import FrameworkEventRecorder
@@ -30,22 +34,13 @@ import logging as _logging
 log = _logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class ProposedAction:
-    """An admitted ``propose_action``: who proposed which action, and the payload it came in."""
-
-    source: str
-    action_name: str
-    payload: Mapping[str, Any]
-
-
 def record_config_proposal(
     recorder: FrameworkEventRecorder | None,
     proposal_id: str,
     action_name: str,
     payload: Mapping[str, Any],
     *,
-    outcome: str = "submitted",
+    outcome: str,
 ) -> None:
     """Record one config-arm grid on the framework event ``recorder`` writes, as its task is queued.
 
@@ -103,16 +98,17 @@ def twin_answers(action_name: str, twin: Task) -> bool:
     if twin.state not in TERMINAL_STATES:
         return True
     # A twin that measured answers a repeat; the row state is ``succeeded`` for any result.
-    outcome = _confirmed_task_outcome(twin)
+    outcome = confirmed_result(twin)
     if action_name == "baseline":
-        return is_valid_measurement(outcome)
+        # A baseline that dropped its measured round holds a cold figure PRELUDE does not anchor on.
+        return is_valid_measurement(outcome) and not (outcome or {}).get("measure_round_dropped")
     return action_name == "integrate_patch" and bool((outcome or {}).get(RESULT_BENCHED))
 
 
 class ProposalsCollaborator(CoordinatorCollaborator):
-    """Queues the task a proposed action or a finished specialist's deliverable asks for."""
+    """Queues the task a delegated action or a finished specialist's deliverable asks for."""
 
-    def _idempotency_key(self, action_name: str, params: dict[str, Any]) -> str:
+    def action_key(self, action_name: str, params: dict[str, Any]) -> str:
         """One key per piece of work: a specialist's deliverable, a baseline's launch, else the params themselves."""
         specialist_task_id = str(params.get("specialist_task_id") or "")
         if action_name == "integrate_patch" and specialist_task_id:
@@ -147,7 +143,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         params["keep_threshold_pct"] = session_pct if proposed is None else max(proposed, session_pct)
 
     def inject_explore_runtime_params(self, params: dict) -> None:
-        """Inject explore-task operational knobs from SharedState into ``params`` (single source of truth for the propose and the delegate path). setdefault preserves LLM overrides, except the KEEP bar, which an agent may only raise."""
+        """Inject explore-task operational knobs from SharedState into ``params``. setdefault preserves LLM overrides, except the KEEP bar, which an agent may only raise."""
         br = float(self.shared_state.baseline_runtime_sec or 0.0)
         if br > 0:
             params.setdefault("baseline_runtime_sec", br)
@@ -164,72 +160,71 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         cursor = int((self.shared_state.explore_search or {}).get("cursor") or 0)
         params.setdefault("explore_search_cursor", cursor)
 
-    async def materialize(self, proposal: ProposedAction) -> None:
-        """Queue the task an admitted ``propose_action`` asks for, unless a task of the same content holds or answers it.
+    def deliverable_path_denial(self, params: dict[str, Any]) -> PolicyDenied | None:
+        """Refuse a specialist deliverable whose ``integrate_patch`` params name a path outside the session directory.
 
-        Stack-aware actions get current_best's anchor and the base config it was measured on.
+        Asked where the deliverable becomes task params, on every route to its task, so a refusal leaves no row.
+
+        Args:
+            params: The deliverable's ``integrate_patch`` params, carrying ``specialist_task_id``.
         """
-        action = proposal.action_name
-        params = dict(proposal.payload.get("params") or {})
-        # Carry the proposer's predicted gain onto the task for predicted-vs-realized calibration.
-        predicted_gain_pct = float(proposal.payload.get("predicted_gain_pct") or 0.0)
-        if predicted_gain_pct:
-            params.setdefault("predicted_gain_pct", predicted_gain_pct)
-        self._seed_params(action, params)
-        # Read before the grid's join id goes in, so two proposals for identical grids still collapse to one task.
-        key = self._idempotency_key(action, params)
-        proposal_id = uuid.uuid4().hex if action == "explore" else ""
-        if proposal_id:
-            params["proposal_msg_id"] = proposal_id
-        created = await self._create_task(action, params, key)
-        if created is None:
-            await self._record_materialize_skipped(proposal, "idempotency_key_exhausted", idempotency_key=key)
-            return
-        task, was_existing = created
-        if was_existing:
-            if task.state not in TERMINAL_STATES:
-                reason = "duplicate_proposal_content"
-            else:
-                reason = "baseline_already_succeeded" if action == "baseline" else "integrate_patch_already_measured"
-            await self._record_materialize_skipped(proposal, reason, task_id=task.task_id, task_state=task.state)
-            return
-        # The round the authoring specialist opened runs on under this task id.
-        await self._coord.enablement_lane.handoff_enablement_round(task)
-        record_config_proposal(
-            self._coord.phase_framework.timeline(), proposal_id, action, {**proposal.payload, "params": params}
-        )
-        await self.bus.append_and_seq(
-            Message.new(
-                "coordinator",
-                "*",
-                "event",
-                {"kind": "task_queued", "task_id": task.task_id, "source": proposal.source, "action": action},
+        try:
+            self.policy.validate_payload_paths(
+                f"{SPECIALIST_FROM_AGENT_PREFIX}{params['specialist_task_id']}",
+                IntentType.DELEGATE,
+                {"action_name": "integrate_patch", "params": params},
             )
-        )
+        except PolicyDenied as denied:
+            return denied
+        return None
 
     async def enqueue_integrate_patch(self, params: dict[str, Any]) -> Task | None:
         """Queue the ``integrate_patch`` that measures a finished specialist's deliverable.
 
-        ``None`` when a task under the deliverable's key already holds it or has measured it.
+        ``None`` when a task under the deliverable's key already holds it or has measured it, or when the
+        deliverable is refused for a path it carries.
         """
-        self.seed_integrate_patch_params(params)
-        created = await self._create_task("integrate_patch", params, integrate_patch_key(params["specialist_task_id"]))
-        if created is None or created[1]:
+        refused = self.deliverable_path_denial(params)
+        if refused is not None:
+            log.warning("specialist %s: deliverable not queued: %s", params["specialist_task_id"], refused)
+            await self.bus.record_observation(
+                "coordinator",
+                "observation",
+                {
+                    "kind": "specialist_patch_integrate_refused",
+                    "specialist_task_id": params["specialist_task_id"],
+                    "rule": refused.rule,
+                    "error": str(refused),
+                },
+            )
             return None
-        task = created[0]
+        self.seed_integrate_patch_params(params)
+        unspent = await self.unspent_key("integrate_patch", integrate_patch_key(params["specialist_task_id"]))
+        if unspent is None or unspent.holder is not None:
+            return None
+        task = await self.create_task("integrate_patch", params, unspent.key)
         # The round the authoring specialist opened runs on under this task id.
         await self._coord.enablement_lane.handoff_enablement_round(task)
         return task
 
-    async def _create_task(self, action_name: str, params: dict[str, Any], key: str) -> tuple[Task, bool] | None:
-        """Create the task under ``key``, or return the twin that answers it.
+    async def unspent_key(self, action_name: str, key: str) -> UnspentKey | None:
+        """Where the work under ``key`` stands: the free key its task takes, or the twin that answers it.
 
-        A batch of proposals that would launch identical work collapses to one task. An ended twin leaves a fresh
-        key to a retry, unless it measured what is asked for; ``None`` once every retry key is spent.
+        Requests that would launch identical work collapse to one task. An ended twin leaves a fresh key to a
+        retry, unless it measured what is asked for; ``None`` once every retry key is spent.
         """
-        lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(action_name)
-        return await create_on_free_key(
-            self.tasks,
+        return await first_unspent_key(self.tasks, key, spent=lambda twin: not twin_answers(action_name, twin))
+
+    async def create_task(self, action_name: str, params: dict[str, Any], key: str) -> Task:
+        """Create the task under ``key``, a free key of :meth:`unspent_key`.
+
+        Intents are routed and completions booked one after the other, so nothing takes the key between the two.
+        """
+        if action_name == SPECIALIST_ACTION_NAME:
+            lanes, ttl = self._coord.specialist_dispatch.lanes_ttl(params)
+        else:
+            lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(action_name)
+        task, _existing = await self.tasks.create_or_return_existing(
             TaskSpec(
                 kind=action_name,
                 params=params,
@@ -238,35 +233,9 @@ class ProposalsCollaborator(CoordinatorCollaborator):
                 lease_ttl_sec=ttl,
                 # One class for every route to a key: a key holds one class.
                 dispatch_class="llm",
-            ),
-            spent=lambda twin: not twin_answers(action_name, twin),
+            )
         )
-
-    def _seed_params(self, action_name: str, params: dict[str, Any]) -> None:
-        """Seed a proposed action's params with what its executor reads from the session."""
-        if action_name == "explore":
-            self.inject_explore_runtime_params(params)
-            self.credit_predictor_proposals(params)
-            inject_stack_base_params(params, self.shared_state, anchor=True)
-        elif action_name == "integrate_patch":
-            self.seed_integrate_patch_params(params)
-        elif action_name == SPECIALIST_ACTION_NAME:
-            if backfilled := gap_backfilled_domain(params, self.shared_state.find_gap):
-                params["domain"] = backfilled
-
-    async def _record_materialize_skipped(self, proposal: ProposedAction, reason: str, **fields: Any) -> None:
-        """Record that a proposed action was not turned into a task, and why."""
-        await self.bus.record_observation(
-            "coordinator",
-            "observation",
-            {
-                "kind": "proposal_materialize_skipped",
-                "reason": reason,
-                **fields,
-                "action_name": proposal.action_name,
-                "from_agent": proposal.source,
-            },
-        )
+        return task
 
     def seed_integrate_patch_params(self, params: dict[str, Any]) -> None:
         """Default an integrate_patch's grading context and its patched-eval server."""

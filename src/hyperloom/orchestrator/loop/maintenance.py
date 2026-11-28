@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Periodic Coordinator maintenance: lease reaping, DB retention, disk trim."""
+"""Periodic Coordinator maintenance: the lease cleanup report and the disk trim."""
 
 from __future__ import annotations
 import shutil
@@ -16,13 +16,13 @@ import logging as _logging
 log = _logging.getLogger(__name__)
 
 
-async def run_lease_and_db_reclaim(
+async def report_lease_cleanup(
     host: Any,
     summary: dict[str, Any],
     *,
     reason: str,
 ) -> None:
-    """Report confirmed-dead cleanup and prune retained database history.
+    """Report confirmed-dead cleanup.
 
     Shared by periodic maintenance and cycle soft-restart. Resource ownership
     is resolved by the reconciler: owners it proved dead, and lanes whose holder
@@ -38,7 +38,7 @@ async def run_lease_and_db_reclaim(
     the remedy for each one is logged once by the diagnostic.
 
     Args:
-        host: Coordinator exposing ``reconciler``, ``locks`` and ``db``.
+        host: Coordinator exposing ``reconciler`` and ``locks``.
         summary: Mutated in place with the per-step counts.
         reason: Log prefix identifying the maintenance caller.
     """
@@ -58,14 +58,6 @@ async def run_lease_and_db_reclaim(
         summary["running_tasks_reclaimed"] = len(report.failed_tasks)
     except sqlite3.Error:
         log.exception("%s: reading the reconciler's cleanup report failed", reason)
-    try:
-        from ..bus import db_maintenance as _db_maint
-
-        res = await _db_maint.run_db_retention(host.db)
-        summary["events_pruned"] = res.events_deleted
-        summary["tasks_pruned"] = res.tasks_deleted
-    except sqlite3.Error:
-        log.exception("%s: DB retention failed", reason)
 
 
 class MaintenanceCollaborator(CoordinatorCollaborator):
@@ -83,9 +75,9 @@ class MaintenanceCollaborator(CoordinatorCollaborator):
         *,
         tick: int,
     ) -> dict[str, Any] | None:
-        """Report ownership cleanup, prune the DB, and trim ``runs/`` when disk is low."""
+        """Report ownership cleanup and trim ``runs/`` when disk is low."""
         summary: dict[str, Any] = {"tick": tick}
-        await run_lease_and_db_reclaim(self._coord, summary, reason="maintenance_watchdog")
+        await report_lease_cleanup(self._coord, summary, reason="maintenance_watchdog")
         disk = self._maybe_prune_runs_for_disk(await self._workspaces_in_use())
         if disk is not None:
             summary["disk"] = disk

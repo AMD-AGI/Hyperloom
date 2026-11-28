@@ -80,9 +80,7 @@ def test_syncs_standard_roofline_fallback_into_live_coordinator_state(tmp_path):
         "roofline_snapshot_id": 3,
     }
     persisted.roofline_snapshots = [{"snapshot_id": 3}]
-    persisted.baseline_eager_fallback = False
     persisted.save(tmp_path)
-    coord.shared_state.baseline_eager_fallback = True
 
     coord.phase_kernel._sync_profile_state_after_gemm_roofline(
         {
@@ -97,7 +95,6 @@ def test_syncs_standard_roofline_fallback_into_live_coordinator_state(tmp_path):
     assert coord.shared_state.last_profile_workload == persisted.last_profile_workload
     assert coord.shared_state.last_trace_analyze == persisted.last_trace_analyze
     assert coord.shared_state.roofline_snapshot_id == 3
-    assert coord.shared_state.baseline_eager_fallback is False
 
 
 def test_sync_unions_lifecycle_instead_of_overwriting(tmp_path, monkeypatch):
@@ -177,10 +174,7 @@ async def test_gemm_roofline_refresh_survives_terminal_lifecycle_save(
             "steady_state_trace": selected_trace,
             "roofline_snapshot_id": 7,
         }
-        state.baseline_eager_fallback = False
         state.save(coord_session_dir)
-
-        coord.shared_state.baseline_eager_fallback = True
 
         result = {
             "status": "ok",
@@ -197,7 +191,6 @@ async def test_gemm_roofline_refresh_survives_terminal_lifecycle_save(
 
         assert coord.shared_state.last_trace_analyze.get("steady_state_trace") == selected_trace
         assert coord.shared_state.last_profile_status == "succeeded"
-        assert coord.shared_state.baseline_eager_fallback is False
         # It must also survive on disk so the next run can reuse the trace.
         reloaded = SharedState.load_or_init(coord_session_dir)
         assert reloaded.last_trace_analyze.get("steady_state_trace") == selected_trace
@@ -1037,17 +1030,15 @@ class TestHandleGemmTuningResult:
             }
         )
 
-        attempts = coord.shared_state.gemm_tuning_attempts
-        assert len(attempts) == 1
-        assert attempts[0]["engine"] == "forge"
-        assert attempts[0]["e2e_validated"] is True
-        assert attempts[0]["decision"] == "REVERT"
-        assert attempts[0]["best_speedup"] == 1.5
-        assert coord.shared_state.last_gemm_tuning["decision"] == "REVERT"
+        last = coord.shared_state.last_gemm_tuning
+        assert last["engine"] == "forge"
+        assert last["e2e_validated"] is True
+        assert last["decision"] == "REVERT"
+        assert last["best_speedup"] == 1.5
 
     @pytest.mark.asyncio
     async def test_forge_e2e_keep_names_the_artifact_the_stack_recorded(self, tmp_path, monkeypatch):
-        """The history row and the stack entry must name the same artifact."""
+        """The recorded result and the stack entry must name the same artifact."""
         coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
         fake = _make_integrate([{"decision": "KEEP", "new_tput": 130.0, "gain_pct": 30.0}])
         monkeypatch.setattr(krh_mod, "integrate_handler", fake)
@@ -1069,10 +1060,10 @@ class TestHandleGemmTuningResult:
         stack = coord.shared_state.optimization_stack
         assert stack, "a KEEP must land on the stack"
         assert stack[-1]["action"] == "gemm_tuning"
-        attempts = coord.shared_state.gemm_tuning_attempts
-        assert attempts[0]["decision"] == "KEEP"
-        assert attempts[0]["tuned_file"], "history row must name the artifact"
-        assert attempts[0]["tuned_file"] == stack[-1]["tuned_file"]
+        last = coord.shared_state.last_gemm_tuning
+        assert last["decision"] == "KEEP"
+        assert last["tuned_file"], "the recorded result must name the artifact"
+        assert last["tuned_file"] == stack[-1]["tuned_file"]
 
     @pytest.mark.asyncio
     async def test_a_second_round_claims_its_own_artifact(self, tmp_path, monkeypatch):
@@ -1106,7 +1097,7 @@ class TestHandleGemmTuningResult:
         )
         await coord.phase_kernel._handle_gemm_tuning_result(_result("/round1.json"))
 
-        first_file = coord.shared_state.gemm_tuning_attempts[-1]["tuned_file"]
+        first_file = coord.shared_state.last_gemm_tuning["tuned_file"]
         assert first_file, "round one must name its artifact"
         stack_len = len(coord.shared_state.optimization_stack)
 
@@ -1119,7 +1110,7 @@ class TestHandleGemmTuningResult:
 
         # Same (action, variant_name): the append is skipped by design.
         assert len(coord.shared_state.optimization_stack) == stack_len
-        second_file = coord.shared_state.gemm_tuning_attempts[-1]["tuned_file"]
+        second_file = coord.shared_state.last_gemm_tuning["tuned_file"]
         assert second_file and second_file != first_file
 
     @pytest.mark.asyncio
@@ -1143,7 +1134,7 @@ class TestHandleGemmTuningResult:
         )
 
         assert coord.shared_state.optimization_stack == []
-        assert not coord.shared_state.gemm_tuning_attempts[0].get("tuned_file")
+        assert not coord.shared_state.last_gemm_tuning.get("tuned_file")
 
     @pytest.mark.asyncio
     async def test_promotes_on_the_measured_tput_not_the_micro_speedup(self, tmp_path, monkeypatch):

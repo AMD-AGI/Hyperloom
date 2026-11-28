@@ -24,6 +24,7 @@ from hyperloom.orchestrator.state.task_registry import Task
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 from .conftest import silent_backends
+from ._lease_helpers import lane_holders
 
 
 @pytest.fixture
@@ -245,9 +246,10 @@ async def test_request_response_visible_in_next_prompt(session_dir, monkeypatch)
         },
     )
     c = Coordinator(session_dir, backends=_orchestration_turn(MockTurn(intents=[request])))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
-        await c.reactor_pass("orchestration")
-        assert "trace_analyze_done" in (await c.conversation.compose_prompt("orchestration")).text
+        await c.reactor_pass()
+        assert "trace_analyze_done" in (await c.conversation.compose_prompt()).text
     finally:
         await c.stop()
 
@@ -256,14 +258,15 @@ async def test_request_response_visible_in_next_prompt(session_dir, monkeypatch)
 async def test_no_intent_turn_advances_cursor(session_dir):
     """A reply carrying no parseable intent still consumes what its prompt rendered."""
     c = Coordinator(session_dir, backends=_orchestration_turn(MockTurn(raise_error=NoIntentEmitted("no envelope"))))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         alert = Message.new("robustness", "*", "alert", {"kind": "stall_warning"})
         await c.bus.append_and_seq(alert)
-        await c.reactor_pass("orchestration")
+        await c.reactor_pass()
 
         cur = await c.cursors.load("orchestration")
         assert cur.last_processed_seq >= alert.seq
-        assert "stall_warning" not in (await c.conversation.compose_prompt("orchestration")).text
+        assert "stall_warning" not in (await c.conversation.compose_prompt()).text
     finally:
         await c.stop()
 
@@ -271,8 +274,9 @@ async def test_no_intent_turn_advances_cursor(session_dir):
 @pytest.mark.asyncio
 async def test_a_turn_without_intents_is_recorded_as_an_observation(session_dir):
     c = Coordinator(session_dir, backends=_orchestration_turn(MockTurn(raw_text="thinking out loud")))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
-        await c.reactor_pass("orchestration")
+        await c.reactor_pass()
 
         observations = await c.bus.tail(n=50, topic="observation")
         assert any((o.payload or {}).get("kind") == "no_intent_emitted" for o in observations)
@@ -284,34 +288,43 @@ async def test_a_turn_without_intents_is_recorded_as_an_observation(session_dir)
 async def test_backend_error_turn_does_not_advance_cursor(session_dir):
     """A failed backend call leaves the messages its prompt rendered unread."""
     c = Coordinator(session_dir, backends=_orchestration_turn(MockTurn(raise_error=BackendError("gateway down"))))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         alert = Message.new("robustness", "*", "alert", {"kind": "stall_warning"})
         await c.bus.append_and_seq(alert)
-        await c.reactor_pass("orchestration")
+        await c.reactor_pass()
 
         cur = await c.cursors.load("orchestration")
         assert cur.last_processed_seq == 0
-        assert "stall_warning" in (await c.conversation.compose_prompt("orchestration")).text
+        assert "stall_warning" in (await c.conversation.compose_prompt()).text
     finally:
         await c.stop()
 
 
 @pytest.mark.asyncio
 async def test_failing_backend_keeps_each_inbox_page_within_budget(session_dir, monkeypatch):
-    """Every failed turn adds to the unread inbox, yet each prompt renders one budgeted page of it."""
+    """Each prompt renders one budgeted page of the unread inbox, and a failed turn adds nothing to it.
+
+    A row for a turn that failed on its prompt's length would make the next prompt longer.
+    """
     monkeypatch.setattr(conversation, "_INBOX_PROMPT_CHARS", 1_000)
     failing = ScriptedPlan(turns=[MockTurn(raise_error=BackendError("Prompt is too long"))], loop_last=True)
     backends = silent_backends()
     backends["orchestration"] = MockBackend(failing, name="o")
     c = Coordinator(session_dir, backends=backends)
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
-        await c.bus.append_and_seq(Message.new("robustness", "*", "alert", {"kind": "stall_warning"}))
+        for i in range(8):
+            await c.bus.append_and_seq(
+                Message.new("robustness", "*", "alert", {"kind": f"stall_warning_{i}", "note": "x" * 300})
+            )
         for _ in range(20):
-            await c.reactor_pass("orchestration")
+            await c.reactor_pass()
 
-        inbox = backends["orchestration"].calls[-1]["prompt"].split("=== Inbox for orchestration")[1]
+        assert c.bus.count_sync() == 8
+        inbox = backends["orchestration"].calls[-1]["prompt"].split("=== Inbox for orchestration")[1].split("\n===")[0]
         assert len(inbox) < 1_200
-        assert "stall_warning" in inbox
+        assert "stall_warning_0" in inbox
         assert "held for the next turn" in inbox
     finally:
         await c.stop()
@@ -322,15 +335,16 @@ async def test_turn_consumes_only_the_inbox_page_it_rendered(session_dir, monkey
     """Messages past the inbox budget stay unread and lead the next prompt."""
     monkeypatch.setattr(conversation, "_INBOX_PROMPT_CHARS", 1_000)
     c = Coordinator(session_dir, backends=_orchestration_turn(MockTurn(raise_error=NoIntentEmitted("no envelope"))))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         alerts = [Message.new("robustness", "*", "alert", {"kind": f"stall_{i}", "note": "x" * 300}) for i in range(4)]
         for alert in alerts:
             await c.bus.append_and_seq(alert)
-        await c.reactor_pass("orchestration")
+        await c.reactor_pass()
 
         cur = await c.cursors.load("orchestration")
         assert alerts[0].seq <= cur.last_processed_seq < alerts[-1].seq
-        next_prompt = (await c.conversation.compose_prompt("orchestration")).text
+        next_prompt = (await c.conversation.compose_prompt()).text
         assert "stall_0" not in next_prompt
         assert "stall_3" in next_prompt
     finally:
@@ -411,7 +425,7 @@ async def test_integrate_executes_and_releases_lanes_when_free(session_dir, monk
         lanes = list(ACTION_CATALOGUE["integrate"].requires_lanes)
 
         # Verify lanes are free before the request.
-        holders_before = await c.locks.lane_holders()
+        holders_before = await lane_holders(c.locks)
         for lane in lanes:
             assert int(holders_before.get(lane, 0)) == 0
 
@@ -430,7 +444,7 @@ async def test_integrate_executes_and_releases_lanes_when_free(session_dir, monk
         )
 
         # Lanes must be free after the handler returned.
-        holders_after = await c.locks.lane_holders()
+        holders_after = await lane_holders(c.locks)
         for lane in lanes:
             assert int(holders_after.get(lane, 0)) == 0, f"lane {lane!r} still held after integrate"
     finally:

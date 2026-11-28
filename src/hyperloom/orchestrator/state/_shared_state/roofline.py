@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections.abc import Mapping
-from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -175,12 +175,7 @@ class _RooflineStateMixin:
         task_groups = result.get("task_groups")
         # Monotonic snapshot counter: read previous value + 1.
         recorded = self.last_trace_analyze if isinstance(self.last_trace_analyze, dict) else {}
-        analysis_md_path = result.get("trace_report_path") or ""
-        analysis_md_text = ""
-        if analysis_md_path:
-            # Stored verbatim; the prompt path strips base64 data-URLs.
-            with suppress(OSError, ValueError):
-                analysis_md_text = Path(analysis_md_path).read_text(encoding="utf-8", errors="replace")
+        analysis_md_path = str(result.get("trace_report_path") or "")
         self.last_trace_analyze = {
             "trace_input": str(task.get("trace_input") or task.get("trace_dir") or ""),
             "steady_state_trace": str(steady_state_trace),
@@ -192,8 +187,9 @@ class _RooflineStateMixin:
             "task_groups": task_groups if isinstance(task_groups, list) else [],
             "reusable_native_kernel_ids": reusable_ids,
             "trace_health_warnings": [dict(e) for e in warning_rows if isinstance(e, dict) and e.get("code")],
-            "analysis_md_path": str(analysis_md_path),
-            "analysis_md_text": analysis_md_text,
+            "analysis_md_path": analysis_md_path,
+            # The path can outlive its file; this is whether the report held anything when this roofline was recorded.
+            "has_analysis_md": os.path.isfile(analysis_md_path) and os.path.getsize(analysis_md_path) > 0,
             **_tracelens_findings(analysis_md_path),
             "roofline_snapshot_id": to_int(recorded.get("roofline_snapshot_id"), 0) + 1,
             "roofline_baseline_gain_at_snapshot": float(self.cumulative_gain_validated),

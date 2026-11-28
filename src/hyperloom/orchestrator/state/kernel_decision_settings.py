@@ -59,6 +59,3 @@ def effective_hot_kernel_min_gpu_pct(candidate: dict, min_gpu_pct: float) -> flo
 
 # Only the top-N reusable hot kernels are enforced.
 _DEFAULT_HOT_KERNEL_GATE_TOP_N = 5
-
-# Per-action audit history cap (``<action>_attempts`` lists keep most recent N).
-_DEFAULT_ATTEMPTS_HISTORY = 20

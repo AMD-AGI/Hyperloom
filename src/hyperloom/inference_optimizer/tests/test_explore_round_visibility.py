@@ -72,7 +72,7 @@ async def test_a_proposal_in_a_running_round_is_named_not_offered_as_untested(co
     in_round = [row for row in coord.shared_state.untested_proposal_rows() if row["name"] == "in-round"]
     await _running_round(coord, _grid_of(in_round))
 
-    out = (await coord.conversation.compose_prompt("orchestration")).text
+    out = (await coord.conversation.compose_prompt()).text
     queue = out.split("=== Untested proposals (current cycle) ===", 1)[1]
 
     offered = [line.split()[1] for line in queue.splitlines() if line.startswith("• ")]
@@ -88,7 +88,7 @@ async def test_a_proposal_a_finished_automatic_round_carried_is_named_not_offere
     task = await _running_round(coord, _grid_of(in_round))
     await coord.tasks.transition(task.task_id, "failed")
 
-    out = (await coord.conversation.compose_prompt("orchestration")).text
+    out = (await coord.conversation.compose_prompt()).text
     queue = out.split("=== Untested proposals (current cycle) ===", 1)[1]
 
     offered = [line.split()[1] for line in queue.splitlines() if line.startswith("• ")]
@@ -146,7 +146,7 @@ async def test_every_turn_lists_a_queued_round_with_its_grid(coord):
         TaskSpec(kind="explore", params={"grid": [{"name": "mem_090"}]}, idempotency_key="explore:0123456789")
     )
 
-    out = (await coord.conversation.compose_prompt("orchestration")).text
+    out = (await coord.conversation.compose_prompt()).text
     in_flight = out.split("=== Tasks in flight ===", 1)[1]
     line = next(line for line in in_flight.splitlines() if task.task_id in line)
 

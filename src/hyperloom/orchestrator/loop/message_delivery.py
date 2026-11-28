@@ -14,7 +14,7 @@ from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
-from ..bus.message_bus import TOPIC_ALLOWLIST, Message, MessageBus
+from ..bus.message_bus import Message, MessageBus
 from ..policy.gate import SPECIALIST_FROM_AGENT_PREFIX
 
 log = logging.getLogger(__name__)
@@ -30,14 +30,14 @@ def recipients(to: Any) -> list[str]:
 
 
 async def publish_send_message(bus: MessageBus, session_dir: Path, source: str, intent: Intent) -> None:
-    """Publish a free-form message onto the bus, once per recipient, and into each specialist recipient's inbox."""
-    topic = intent.payload.get("topic", "observation")
-    if topic not in TOPIC_ALLOWLIST:
-        # Soft-degrade unknown topic.
-        topic = "observation"
+    """Publish a free-form message onto the bus, once per recipient, and into each specialist recipient's inbox.
+
+    The row's topic is always ``observation`` and the topic the agent named stays in the payload: the Coordinator
+    reads ``delegated_result`` and ``response`` rows back as its own record, so an agent's message never lands on one.
+    """
     body = {k: v for k, v in intent.payload.items() if k != "to"}
     for to_agent in recipients(intent.payload.get("to")):
-        await bus.append_and_seq(Message.new(source, to_agent, topic, dict(body)))
+        await bus.append_and_seq(Message.new(source, to_agent, "observation", dict(body)))
         if to_agent.startswith(SPECIALIST_FROM_AGENT_PREFIX):
             deliver_specialist_inbox(session_dir, source, to_agent, intent.payload)
 

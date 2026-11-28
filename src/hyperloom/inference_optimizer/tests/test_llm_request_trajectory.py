@@ -123,11 +123,6 @@ def test_a_cut_off_request_is_recorded_failed_under_the_open_call(tmp_path):
     assert request["start_ts"] < request["ts"]
 
 
-class _FakeOptions:
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
-
-
 def _emit_block():
     return sdk_types.ToolUseBlock(
         id="tu1",
@@ -137,7 +132,7 @@ def _emit_block():
 
 
 @pytest.mark.asyncio
-async def test_claude_backend_streams_partials_and_shares_the_scope_call_id(tmp_path):
+async def test_claude_backend_streams_partials_and_shares_the_scope_call_id(claude_sdk, tmp_path):
     seen_options: list = []
 
     async def _query(*, prompt, options):
@@ -155,11 +150,8 @@ async def test_claude_backend_streams_partials_and_shares_the_scope_call_id(tmp_
             usage={"input_tokens": 10, "output_tokens": 40},
         )
 
-    backend = cl.ClaudeBackend(
-        sdk_query_factory=_query,
-        sdk_options_cls=_FakeOptions,
-        model="claude-x",
-    )
+    claude_sdk.query = _query
+    backend = cl.ClaudeBackend(model="claude-x")
     with tt.trajectory_scope(session_dir=tmp_path, component="orchestration", call_id="c-7"):
         result = await backend.run("hello")
 
@@ -180,6 +172,7 @@ async def test_each_reactor_turn_is_an_llm_call_span_under_the_session(session_d
         session_dir,
         backends={"orchestration": MockBackend(silent, name="o")},
     )
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         await c.run(options=RunOptions(max_ticks=1))
     finally:

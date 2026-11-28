@@ -19,7 +19,7 @@ class CursorState:
 
 
 class CursorStore:
-    """SQLite-backed store of per-agent bus-processing cursors."""
+    """SQLite-backed store of the bus-processing cursor, one row per reader name."""
 
     def __init__(self, db: SqliteConnection):
         """Bind the store to a SQLite connection."""

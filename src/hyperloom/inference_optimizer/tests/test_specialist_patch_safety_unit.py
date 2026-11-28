@@ -265,7 +265,7 @@ def test_forbidden_fields_are_stripped_from_the_payload_and_every_proposal():
 
 
 def test_a_gain_claim_under_the_coordinators_own_field_name_is_stripped_too():
-    """``predicted_gain_pct`` is the Coordinator's estimate on a propose_action intent, which is exactly what made it a convenient place for a specialist to put a number the guard was meant to strip."""
+    """``predicted_gain_pct`` is the name a delegator's own estimate travels under, which is exactly what made it a convenient place for a specialist to put a number the guard was meant to strip."""
     payload = {"proposal_set": [{"name": "v1", "predicted_gain_pct": 12.0, "reason": "keep me"}]}
 
     removed = ps.strip_forbidden_proposal_fields(payload)

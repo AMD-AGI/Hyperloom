@@ -38,7 +38,7 @@ def phase_status_summary(
     *,
     now_unix: float | None = None,
 ) -> str:
-    """Render the per-tick ``=== Phase ===`` block (≤7 lines). The mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable, and a phase held for its initial roofline a ``hold`` line."""
+    """Render the per-tick ``=== Phase ===`` block (≤7 lines). The ``entered`` line carries the reason of the transition into the phase. The mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable, and a phase held for its initial roofline a ``hold`` line."""
     phase = (state.phase or "").strip().upper() or "UNSET"
     elapsed = int(_phase_state.phase_elapsed_seconds(state, now_unix=now_unix))
     # ``remaining`` paces this entry; ``cumulative`` totals every entry.
@@ -56,6 +56,8 @@ def phase_status_summary(
     entered = (
         time.strftime("%FT%TZ", time.gmtime(t0)) if (t0 := _phase_state.phase_started_unix(state)) > 0 else "(unset)"
     )
+    if entry_reason := _phase_state.phase_entry_reason(state):
+        entered += f" reason={entry_reason}"
     actions_in_phase = allowed_actions_for(phase)
     allowed_line = f"allowed   : {', '.join(actions_in_phase) if actions_in_phase else '(none)'}"
     lines = [

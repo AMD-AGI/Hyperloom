@@ -23,6 +23,7 @@ from hyperloom.orchestrator.loop.sub_agent_runner import (
     ExecutionCleanupUnconfirmed,
     SubAgentRunner,
 )
+from hyperloom.orchestrator.state.round_store import RoundStore
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.inference_optimizer.trace import task_progress
 from hyperloom.inference_optimizer.trace.task_progress import (
@@ -31,13 +32,14 @@ from hyperloom.inference_optimizer.trace.task_progress import (
     progress_scope,
     report_progress,
 )
+from ._lease_helpers import lane_holders
 
 
 def _runner(tmp_path: Path, monkeypatch) -> SubAgentRunner:
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
     db = SqliteConnection(tmp_path / "coord.db")
-    return SubAgentRunner(SqliteLeaseBackend(db), TaskRegistry(db), session_dir=sd)
+    return SubAgentRunner(SqliteLeaseBackend(db), TaskRegistry(db), RoundStore(db), session_dir=sd)
 
 
 def _progress_notes(task) -> list[dict]:
@@ -176,11 +178,11 @@ async def test_dead_task_requires_local_owner_evidence(tmp_path, monkeypatch, ow
     )
     async with sub.tasks.db.transaction() as cur:
         cur.execute("UPDATE leases SET owner_scope=?, pid=12345", (owner_scope,))
-    reclaimed = await sub.tasks.reclaim_dead_running(reason="test_dead")
+    reclaimed = await sub.tasks.reclaim_dead_running()
     if owner_scope == "test-node" and dead:
         assert reclaimed == [task.task_id]
         row = await sub.tasks.get(task.task_id)
-        assert row.history[-1]["evidence"] == {"reason": "test_dead", "dead_pid": 12345}
+        assert row.history[-1]["evidence"] == {"reason": "reconciler_dead_holder", "dead_pid": 12345}
     else:
         assert reclaimed == []
         assert (await sub.tasks.get(task.task_id)).state == "running"
@@ -204,7 +206,7 @@ async def test_worker_cleanup_precedes_lane_release(tmp_path, monkeypatch, confi
         return {"ok": True}
 
     async def cleanup():
-        assert (await sub.locks.lane_holders())["research_lane"] == 1
+        assert (await lane_holders(sub.locks))["research_lane"] == 1
         if not confirmed:
             raise OSError("release failed")
 
@@ -223,7 +225,7 @@ async def test_worker_cleanup_precedes_lane_release(tmp_path, monkeypatch, confi
             assert "executor failed" in row.history[-1]["evidence"]["error"]
         # Cleanup runs first and its answer lands on the row, but the row is
         # terminal either way, so the lane goes back either way.
-        assert not await sub.locks.lane_holders()
+        assert not await lane_holders(sub.locks)
         retained = await sub.tasks.db.fetchone("SELECT task_id FROM leases WHERE task_id=?", (task.task_id,))
         assert retained is None
     finally:
@@ -262,7 +264,7 @@ async def test_direct_cancel_during_cleanup_releases_capacity_and_warns(tmp_path
         # task is terminal, so the lane is returned and the warning is what
         # tells an operator a worker may be running without one.
         assert (await sub.tasks.get(task.task_id)).state == "succeeded"
-        assert not await sub.locks.lane_holders()
+        assert not await lane_holders(sub.locks)
         assert "cleanup cancelled" in caplog.text
     finally:
         finish.set()

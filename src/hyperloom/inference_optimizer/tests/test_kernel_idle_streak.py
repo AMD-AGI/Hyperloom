@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -138,6 +139,29 @@ async def test_inline_kernel_request_never_winds_down(kernel_coordinator):
     assert st.phase == ps.PHASE_KERNEL_AGENT
     assert st.kernel_idle_ticks == 0
     assert not await c.phase_kernel._inflight_task_ids()
+
+
+@pytest.mark.asyncio
+async def test_inline_step_is_stamped_per_beat_and_writes_no_bus_row(kernel_coordinator, monkeypatch):
+    """The stamp is the heartbeat: set on entry, refreshed per beat, cleared on exit, with nothing on the bus."""
+    from hyperloom.orchestrator.loop.kernel_request import kernel_step_heartbeat
+
+    c = kernel_coordinator
+    st = c.shared_state
+    monkeypatch.setattr(ps, "KERNEL_HEARTBEAT_SEC", 0.01)
+    rows_before = c.bus.count_sync()
+
+    async with kernel_step_heartbeat(c.router):
+        entered = st.kernel_inline_step_seen_unix
+        assert entered > 0.0
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if st.kernel_inline_step_seen_unix > entered:
+                break
+        assert st.kernel_inline_step_seen_unix > entered
+
+    assert st.kernel_inline_step_seen_unix == 0.0
+    assert c.bus.count_sync() == rows_before
 
 
 @pytest.mark.asyncio

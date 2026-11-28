@@ -108,6 +108,10 @@ class SpecialistGpuPool:
         """Return the number of GPUs the pool manages."""
         return len(self.gpu_ids)
 
+    def can_fund(self, count: int) -> bool:
+        """Whether the pool could lease ``count`` cards at once; waiting never satisfies a request it cannot."""
+        return 0 < count <= self.capacity
+
     async def try_acquire(
         self,
         *,
@@ -117,7 +121,7 @@ class SpecialistGpuPool:
     ) -> GpuLease | None:
         """Acquire ``count`` GPU ids or return ``None`` if the pool is full."""
         n = int(count or 0)
-        if n <= 0 or n > self.capacity:
+        if not self.can_fund(n):
             return None
         async with self.db.transaction() as cur:
             # Same-holder/task acquire is idempotent when the existing lease already satisfies the request: same count

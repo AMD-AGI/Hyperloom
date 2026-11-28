@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Specialist dispatch helpers: warmup, auto-retry, wave fan-out, and round-entry construction."""
+"""Specialist dispatch helpers: warmup, ownership and lane sizing, auto-retry, and round-entry construction."""
 
 from __future__ import annotations
 
@@ -13,17 +13,13 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 
 from hyperloom_common.env import env_flag
-from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.orchestrator.lever import patch_lever_kind, patch_owner_phase
 
 from ..collaborator import CoordinatorCollaborator
 from ..measurement.runtime_findings import render_runtime_findings
 from ..state.shared_state import KbInjection
 from ..state.task_registry import TaskSpec
 from ..phases import machine_state as _phase_state
-from ..policy.gate import (
-    PolicyDenied,
-    validate_freeform_wave_task,
-)
 from hyperloom.inference_optimizer.trace.trajectory_trace import EVENT_TASK_RETRY, record_event, trajectory_scope
 from .failure_class import SpecialistFailureType, classify_specialist_failure
 from .runner import specialist_patch_preflight_error
@@ -167,18 +163,18 @@ def _round_entry_extras(
 
 
 class SpecialistDispatchCollaborator(CoordinatorCollaborator):
-    """Specialist dispatch: warmup, auto-retry, wave fan-out, and round-entry construction."""
+    """Specialist dispatch: warmup, ownership and lane sizing, auto-retry, and round-entry construction."""
 
     def __init__(self, coordinator: "Coordinator") -> None:
         super().__init__(coordinator)
         # Key of the custom dispatch admission last refused; it is not requested again until the key changes.
         self.refused_custom_key = ""
 
-    def refuse_patch_without_source(self, params: dict[str, Any], *, task_id: str) -> bool:
+    def refuse_patch_without_source(self, params: dict[str, Any]) -> bool:
         """Whether a warmed patch specialist must be refused because no git source tree backs it.
 
         A refusal ``last_action_failures`` already lists is not recorded again: Orchestration can re-send the
-        delegate under a new idempotency key.
+        delegate, and no task exists to name in the record.
         """
         state = self.shared_state
         error = specialist_patch_preflight_error(params, framework_repo_path=state.framework_repo_path)
@@ -187,11 +183,51 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         if not any(
             row.get("action") == "specialist" and row.get("error_class") == error for row in state.last_action_failures
         ):
-            state.record_action_failure(
-                action="specialist", task_id=task_id, result={"error_class": error, "error": error}
-            )
+            state.record_action_failure(action="specialist", task_id="", result={"error_class": error, "error": error})
             log.error("specialist: refused a source-patch dispatch: %s", error)
         return True
+
+    def stamp_owner(self, params: dict[str, Any]) -> str:
+        """Freeze patch ownership when a specialist task is created."""
+        lever = patch_lever_kind(params)
+        if lever:
+            params["lever_kind"] = lever
+        owner = patch_owner_phase(params)
+        if not owner:
+            from .profile import MODE_PATCH, resolve_specialist_profile
+
+            gap_layer = str(params.get("gap_layer") or "").strip().lower()
+            active_phase = str(self.shared_state.phase or "").strip().upper()
+            # Layer first, phase last: both lanes share one phase, so the live phase does not say which lever a
+            # specialist moves.
+            if gap_layer == "framework":
+                owner = "FRAMEWORK_AGENT"
+            elif gap_layer in {"explore", "perf_explore"} or params.get("domain"):
+                owner = "EXPLORE"
+            # A patch-mode dispatch with no layer names no phase of its own, and integrate_patch is
+            # booked to the framework agent, so that is the owner its patch would be attributed to.
+            elif resolve_specialist_profile(params).mode == MODE_PATCH or active_phase in {
+                "FRAMEWORK",
+                "FRAMEWORK_AGENT",
+            }:
+                owner = "FRAMEWORK_AGENT"
+        if owner:
+            params["source_phase"] = owner
+        return owner
+
+    def lanes_ttl(self, params: dict[str, Any]) -> tuple[list[str], int]:
+        """The lanes a specialist with ``params`` holds while it runs, and its lease.
+
+        A GPU specialist holds ``gpu_research_lane`` and a bench specialist ``benchmark_lane`` as well, so neither
+        runs beside a serving benchmark; a GPU specialist's lease covers its deadline.
+        """
+        from .profile import requires_gpu, specialist_lanes
+
+        lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("specialist")
+        lanes = list(specialist_lanes(params, list(lanes)))
+        if requires_gpu(params):
+            ttl = self._coord.dispatcher.gpu_lease_ttl_sec(int(ttl or 0), params=params)
+        return lanes, ttl
 
     async def warm_specialist_params(self, params: dict[str, Any]) -> None:
         """Fill specialist task params with KnowledgePlane data before enqueue (mutates in place); missing fields stay empty.
@@ -234,7 +270,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         # analysis.md still names where device time goes.
         last_ta = getattr(state, "last_trace_analyze", None) or {}
         has_evidence = isinstance(last_ta, dict) and bool(
-            last_ta.get("analysis_md_text") or last_ta.get("hot_kernels_top15")
+            last_ta.get("has_analysis_md") or last_ta.get("hot_kernels_top15")
         )
         if has_evidence and "roofline_evidence" not in params:
             from hyperloom.inference_optimizer.roofline_snapshot import extract_workload_summary
@@ -357,10 +393,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 if not isinstance(evidence, dict) or not evidence:
                     attempts = list(gap.get("attempts") or [])[-5:]
                     if attempts:
-                        params["gap_evidence"] = {
-                            "recent_attempts": attempts,
-                            "severity": str(gap.get("severity") or ""),
-                        }
+                        params["gap_evidence"] = {"recent_attempts": attempts}
 
     def _warm_progress(self, params: dict[str, Any]) -> None:
         """Warm the session's current throughput, keep threshold and applied stack."""
@@ -464,14 +497,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         retry_params["_auto_retry_attempt"] = next_attempt
         retry_params["_auto_retry_reason"] = f"{ftype.value}: {error}"[:300]
 
-        # Mirror handle_delegate lane/ttl resolution so the retry task holds the
-        # same pools as the original and cannot run concurrently with serving.
-        lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("specialist")
-        from .profile import requires_gpu, specialist_lanes
-
-        lanes = list(specialist_lanes(retry_params, list(lanes)))
-        if requires_gpu(retry_params):
-            ttl = self._coord.dispatcher.gpu_lease_ttl_sec(int(ttl or 0), params=retry_params)
+        lanes, ttl = self.lanes_ttl(retry_params)
 
         retry_key = _auto_retry_key(task, next_attempt)
 
@@ -590,80 +616,13 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             detail,
         )
 
-    async def fan_out_specialist_wave(
-        self,
-        source: str,
-        intent: Intent,
-        params: dict[str, Any],
-    ) -> None:
-        """Fan a specialist delegate carrying ``params.tasks=[...]`` into N
-        standard free-form specialist dispatches (scope=freeform, mode=research
-        defaults). Each fanned task is re-dispatched through the
-        normal ``handle_delegate`` path. Per-task idempotency keys derive from
-        the wave key. Each entry must pass the same structural checks as
-        :func:`validate_freeform_wave_task` (the PolicyGate runs these first).
-
-        Args:
-            source: The agent issuing the wave delegate.
-            intent: The originating specialist DELEGATE intent.
-            params: The delegate params carrying the ``tasks`` list to fan out.
-        """
-        tasks = params.get("tasks") or []
-        shared = {k: v for k, v in params.items() if k != "tasks"}
-        base_key = str(intent.payload.get("idempotency_key") or "").strip()
-        pending: list[Intent] = []
-        for idx, task in enumerate(tasks):
-            desc = validate_freeform_wave_task(task, index=idx)
-            sub_params = dict(shared)
-            sub_params["scope"] = "freeform"
-            sub_params["task_description"] = desc
-            summary = str(task.get("task_summary") or "").strip()
-            if summary:
-                sub_params["task_summary"] = summary
-            for carry in (
-                "mode",
-                "bench",
-                "model",
-                "priority",
-                "timeout_minutes",
-                "max_turns",
-            ):
-                if isinstance(task, dict) and carry in task:
-                    sub_params[carry] = task[carry]
-            sub_params.setdefault("mode", "research")
-            sub_payload = dict(intent.payload)
-            sub_payload["params"] = sub_params
-            if base_key:
-                sub_payload["idempotency_key"] = f"{base_key}-w{idx}"
-            else:
-                sub_payload.pop("idempotency_key", None)
-            sub_intent = Intent(type=intent.type, payload=sub_payload)
-            try:
-                self.policy.validate_intent(source, sub_intent)
-            except PolicyDenied as denied:
-                await self._coord.router.record_policy_denied(source, sub_intent, denied)
-                raise
-            pending.append(sub_intent)
-        for sub_intent in pending:
-            await self._coord.router.handle_delegate(source, sub_intent)
-
-    async def ensure_custom_specialist(self) -> None:
-        """Dispatch the operator-defined specialist once per macro cycle in FRAMEWORK_AGENT.
-
-        Coordinator-owned: it bypasses the policy gate, which denies every custom delegate from Orchestration.
-        """
-        state = self.shared_state
-        prompt = str(state.custom_specialist_prompt or "").strip()
-        if not prompt or str(getattr(state, "phase", "") or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
-            return
-        from .domains import CUSTOM_SPECIALIST_KEY, custom_specialist_key
-        from .profile import MODE_RESEARCH, NO_LEASE_EXTENSION
-
-        key = custom_specialist_key(int(state.macro_cycle or 0), prompt)
-        if key == self.refused_custom_key or await self.tasks.find_by_idempotency_key(key) is not None:
-            return
+    def _custom_specialist_params(self) -> dict[str, Any]:
+        """The operator-defined dispatch before warm-up: its domain, and the most actionable gap or the session's own."""
         from ..state._shared_state.phase_state import gap_actionability_key
+        from .domains import CUSTOM_SPECIALIST_KEY
+        from .profile import NO_LEASE_EXTENSION
 
+        state = self.shared_state
         params: dict[str, Any] = {
             "domain": CUSTOM_SPECIALIST_KEY,
             "scope": "domain",
@@ -679,6 +638,25 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             params["gap_canonical_id"] = CUSTOM_SESSION_GAP_ID
             params["gap_symptom"] = "No profiled gap; follow the operator-defined focus."
             params["gap_layer"] = "operator-defined"
+        return params
+
+    async def ensure_custom_specialist(self) -> None:
+        """Dispatch the operator-defined specialist once per macro cycle in FRAMEWORK_AGENT.
+
+        Coordinator-owned: the policy gate denies every custom delegate from Orchestration. The admission chain
+        still decides whether the session can afford it; a refusal stands for the rest of the cycle.
+        """
+        state = self.shared_state
+        prompt = str(state.custom_specialist_prompt or "").strip()
+        if not prompt or str(getattr(state, "phase", "") or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
+            return
+        from .domains import custom_specialist_key
+        from .profile import MODE_RESEARCH
+
+        key = custom_specialist_key(int(state.macro_cycle or 0), prompt)
+        if key == self.refused_custom_key or await self.tasks.find_by_idempotency_key(key) is not None:
+            return
+        params = self._custom_specialist_params()
         await self.warm_specialist_params(params)
 
         research_reason = specialist_patch_preflight_error(params, framework_repo_path=state.framework_repo_path)
@@ -689,17 +667,30 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 "observation",
                 {"kind": "custom_specialist_research_only", "reason": research_reason},
             )
-        intent = Intent(
-            type=IntentType.DELEGATE,
-            payload={"action_name": "specialist", "params": params, "idempotency_key": key},
-        )
-        await self._coord.router.handle_delegate("orchestration", intent)
-        if await self.tasks.find_by_idempotency_key(key) is None:
+        denied = self._coord.dispatcher.admission_denial_for_action("specialist", params=params)
+        if denied is not None:
             self.refused_custom_key = key
-            log.warning("custom specialist: dispatch %s refused (see the policy denial); not retried this cycle", key)
+            await self.bus.record_observation(
+                "coordinator",
+                "observation",
+                {"kind": "custom_specialist_refused", "rule": denied.rule, "reason": str(denied)},
+            )
+            log.warning("custom specialist: dispatch %s refused (%s); not retried this cycle", key, denied.rule)
             return
+        self.stamp_owner(params)
+        lanes, ttl = self.lanes_ttl(params)
+        await self.tasks.create_or_return_existing(
+            TaskSpec(
+                kind="specialist",
+                params=params,
+                idempotency_key=key,
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
+                dispatch_class="coordinator",
+            )
+        )
         log.info(
-            "custom specialist: requested key=%s gap=%s mode=%s",
+            "custom specialist: queued key=%s gap=%s mode=%s",
             key,
             params["gap_canonical_id"],
             params.get("mode") or "default",
@@ -845,7 +836,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
     ) -> None:
         """Hand a recorded specialist round to the gap ledger and the phases that consume what it produced."""
         domain = round_entry["domain"].strip()
-        # Harvest specialist findings (hints, gap seeds, PR dedup) from any domain.
+        # Harvest specialist findings (research hints) from any domain.
         if done_payload.get("new_findings"):
             await self._harvest_specialist_findings(done_payload)
 
@@ -854,13 +845,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         if domain == "static_recon_specialist":
             self._coord.phase_internal.consume_static_recon(done_payload)
 
-        # Aggregate research evidence from any research domain that
-        # self-reports a ``research`` block, so FRAMEWORK / explore lanes
-        # reuse the session-wide seen-set. Idempotent for research_scout
-        # (already harvested above).
-        self._aggregate_research_evidence(done_payload)
-
-        # Refresh the gaps ledger after a specialist round closes; record the verdict as a gap attempt.
         gap_cid = str(done_payload.get("gap_canonical_id") or "").strip()
         if gap_cid:
             self.shared_state.append_gap_attempt(
@@ -872,9 +856,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                     "proposals_total": round_entry["proposals_total"],
                 },
             )
-        await self._coord.gap_refresh.refresh_gaps(
-            reason="specialist_done", workload_id=self._coord.recipe_journal.workload_canonical_id()
-        )
         if bool((task.params or {}).get("enablement")) and isinstance(done_payload.get("needs_targeted_build"), dict):
             await self._coord.enablement_build.maybe_enqueue_specialist_requested_build(
                 task_id=str(task.task_id or ""),
@@ -882,33 +863,8 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             )
         await self._coord.phase_framework.integrate_specialist_deliverable(task=task, done_payload=done_payload)
 
-    def _aggregate_research_evidence(self, done_payload: dict[str, Any]) -> None:
-        """Aggregate research evidence (PR ids / diffs / NVIDIA refs) into the
-        session-wide seen-set, de-duped across the session.
-
-        Applies to every domain that self-reports a ``research`` block
-        (candidate discovery + research_scout), so FRAMEWORK / explore lanes
-        do not re-fetch the same references.
-        """
-        block = done_payload.get("research")
-        if not isinstance(block, dict):
-            return
-        pr_ids: list[Any] = []
-        for key in ("prs_fetched", "pr_diffs_read", "nvidia_refs"):
-            vals = block.get(key)
-            if isinstance(vals, list):
-                pr_ids.extend(vals)
-        if not pr_ids:
-            return
-        added = self.shared_state.register_seen_pr_ids(pr_ids)
-        if added:
-            log.info(
-                "depth: aggregated %d new research reference(s) into seen-set",
-                added,
-            )
-
     async def _harvest_specialist_findings(self, done_payload: dict[str, Any]) -> None:
-        """Persist top-level specialist findings and re-seed Orchestration.
+        """Persist a specialist round's sourced findings as research hints.
 
         Any ``competitor_target`` numbers emitted are intentionally ignored here:
         measured competitor baselines are sourced from InferenceX, not authored
@@ -932,25 +888,4 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 "research-scout: dropped %d sourceless hint(s)",
                 dropped,
             )
-        # Share inspected PR ids with the FRAMEWORK dedup set.
-        pr_ids: list[Any] = []
-        for hint in hints:
-            if isinstance(hint, dict) and hint.get("source"):
-                pr_ids.append(hint["source"])
-        proposals = done_payload.get("proposal_set") or []
-        if isinstance(proposals, list):
-            for proposal in proposals:
-                if not isinstance(proposal, dict):
-                    continue
-                for key in ("pr_evidence", "source_evidence"):
-                    refs = proposal.get(key)
-                    if isinstance(refs, list):
-                        pr_ids.extend(refs)
-        self.shared_state.register_seen_pr_ids(pr_ids)
-        # Seed high-priority hints as gaps[] so the config arm tries them early.
-        self._coord.gap_refresh.seed_gaps_from_research_hints()
-        log.info(
-            "specialist findings harvested: hints_added=%d seen_pr_ids=%d",
-            added,
-            len(self.shared_state.research_scout_seen_pr_ids or []),
-        )
+        log.info("specialist findings harvested: hints_added=%d", added)

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""MessageBus — the ``events`` table is the source of truth; ``seq`` (AUTOINCREMENT) gives a monotonic id. Topics validated against an allowlist."""
+"""MessageBus — the ``events`` table is the source of truth; ``seq`` (AUTOINCREMENT) gives a monotonic id. A row's topic is one the Coordinator's own code names."""
 
 from __future__ import annotations
 
@@ -12,15 +12,15 @@ from typing import Any
 
 from hyperloom_common.timeutil import now_iso
 
-from .db_maintenance import DEFAULT_EVENTS_KEEP_RECENT
 from .storage.connection import SqliteConnection
 
 
+# Every topic a row is written under. Each is a literal in the Coordinator's code: an agent's free-form message is
+# always an ``observation``, whatever topic the agent names.
 TOPIC_ALLOWLIST = frozenset(
     {
         "observation",
         "event",
-        "decision",
         "alert",
         "delegated_result",
         "request",
@@ -32,20 +32,11 @@ TOPIC_ALLOWLIST = frozenset(
 # The ``source`` of the reply to a request deferred because the bench lanes are busy. The reply asks nothing of its
 # reader: the same request is deferred the same way until the lanes free.
 LANES_BUSY_SOURCE = "lanes_busy"
-# Per-role inbox subscriptions; a role absent from this map receives nothing.
-ROLE_SUBSCRIPTIONS: dict[str, frozenset[str]] = {
-    "orchestration": frozenset(
-        {
-            "delegated_result",
-            "observation",
-            "event",
-            "decision",
-            "alert",
-            "strategy_change",
-            "response",
-        }
-    ),
-}
+# An agent's inbox past a sequence id. Its own rows stay out: they would repeat in its next prompt what it just said,
+# and a turn would wake the next one.
+_INBOX_WHERE = "seq > ? AND from_agent != ?"
+# The most one inbox replay reads.
+_REPLAY_LIMIT = 5000
 
 
 @dataclass
@@ -57,7 +48,6 @@ class Message:
     to_agent: str
     topic: str
     payload: dict[str, Any]
-    in_reply_to: str | None = None
     ts: str = field(default_factory=now_iso)
     seq: int | None = None  # DB-assigned on insert
 
@@ -68,8 +58,6 @@ class Message:
         to_agent: str,
         topic: str,
         payload: dict[str, Any],
-        *,
-        in_reply_to: str | None = None,
     ) -> "Message":
         """Construct a new message with a fresh ``msg_id``."""
         return cls(
@@ -78,7 +66,6 @@ class Message:
             to_agent=to_agent,
             topic=topic,
             payload=payload,
-            in_reply_to=in_reply_to,
         )
 
     @classmethod
@@ -90,7 +77,6 @@ class Message:
             to_agent=row["to_agent"],
             topic=row["topic"],
             payload=json.loads(row["payload"]),
-            in_reply_to=row["in_reply_to"],
             ts=row["ts"],
             seq=row["seq"],
         )
@@ -102,7 +88,6 @@ class Message:
             self.from_agent,
             self.to_agent,
             self.topic,
-            self.in_reply_to,
             json.dumps(self.payload),
             self.ts,
         )
@@ -123,37 +108,22 @@ class MessageBus:
             raise ValueError(f"to_agent must be a string, got {type(msg.to_agent).__name__}")
         async with self.db.transaction() as cur:
             cur.execute(
-                "INSERT INTO events (msg_id, from_agent, to_agent, topic, "
-                "in_reply_to, payload, ts) VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO events (msg_id, from_agent, to_agent, topic, payload, ts) VALUES (?,?,?,?,?,?)",
                 msg.to_db_row(),
             )
             msg.seq = int(cur.lastrowid)
         return msg.seq
 
     async def record_observation(self, source: str, topic: str, payload: dict) -> None:
-        """Broadcast one ``source`` message under ``topic`` to every agent."""
+        """Append one ``source`` message under ``topic``, addressed to ``*``."""
         await self.append_and_seq(Message.new(source, "*", topic, payload))
 
-    async def tail(
-        self,
-        n: int = 200,
-        *,
-        to_agent: str | None = None,
-        topic: str | None = None,
-    ) -> list[Message]:
-        """Return the most recent messages matching the given filters."""
-        clauses: list[str] = []
-        params: list[Any] = []
-        if to_agent is not None:
-            clauses.append("(to_agent = ? OR to_agent = '*')")
-            params.append(to_agent)
-        if topic is not None:
-            clauses.append("topic = ?")
-            params.append(topic)
-        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        sql = f"SELECT * FROM events{where} ORDER BY seq DESC LIMIT ?"  # nosec B608 - clauses are selected from fixed templates.
-        params.append(n)
-        rows = await self.db.fetchall(sql, params)
+    async def tail(self, n: int = 200, *, topic: str | None = None) -> list[Message]:
+        """Return the ``n`` most recent messages, newest first; ``topic`` keeps only that topic's."""
+        if topic is None:
+            rows = await self.db.fetchall("SELECT * FROM events ORDER BY seq DESC LIMIT ?", (n,))
+        else:
+            rows = await self.db.fetchall("SELECT * FROM events WHERE topic = ? ORDER BY seq DESC LIMIT ?", (topic, n))
         return [Message.from_row(r) for r in rows]
 
     def count_sync(self) -> int:
@@ -176,49 +146,25 @@ class MessageBus:
         )
         return [Message.from_row(row) for row in rows]
 
-    async def replay_for(
-        self,
-        to_agent: str,
-        *,
-        after_seq: int,
-        limit: int = DEFAULT_EVENTS_KEEP_RECENT,
-    ) -> list[Message]:
-        """Inbox for one agent: subscribed topics only, never its own messages.
+    async def replay_for(self, agent: str, *, after_seq: int) -> list[Message]:
+        """Inbox for ``agent``: the oldest messages past ``after_seq`` it did not send itself, at most the replay limit.
 
-        Raw-DB readers (``tail``, ``inbox_context_sync``, ``recent_outcomes_context_sync``) bypass both rules.
+        Raw-DB readers (``tail``, ``inbox_context_sync``, ``recent_outcomes_context_sync``) show its own rows too.
         """
-        inbox = _inbox_filter(to_agent, after_seq)
-        if inbox is None:
-            return []
-        where, params = inbox
         rows = await self.db.fetchall(
-            f"SELECT * FROM events WHERE {where} ORDER BY seq ASC LIMIT ?",  # nosec B608 - fixed templates.
-            (*params, limit),
+            f"SELECT * FROM events WHERE {_INBOX_WHERE} ORDER BY seq ASC LIMIT ?",  # nosec B608 - fixed template.
+            (after_seq, agent, _REPLAY_LIMIT),
         )
         return [Message.from_row(r) for r in rows]
 
-    async def has_actionable_inbox(self, to_agent: str, *, after_seq: int) -> bool:
-        """Whether ``to_agent``'s inbox past ``after_seq`` holds a message that asks something of it."""
-        inbox = _inbox_filter(to_agent, after_seq)
-        if inbox is None:
-            return False
-        where, params = inbox
+    async def has_actionable_inbox(self, agent: str, *, after_seq: int) -> bool:
+        """Whether ``agent``'s inbox past ``after_seq`` holds a message that asks something of it."""
         row = await self.db.fetchone(
-            f"SELECT EXISTS(SELECT 1 FROM events WHERE {where}"  # nosec B608 - fixed templates.
+            f"SELECT EXISTS(SELECT 1 FROM events WHERE {_INBOX_WHERE}"  # nosec B608 - fixed template.
             " AND NOT (topic = 'response' AND json_extract(payload, '$.source') IS ?)) AS found",
-            (*params, LANES_BUSY_SOURCE),
+            (after_seq, agent, LANES_BUSY_SOURCE),
         )
         return bool(row and row["found"])
 
 
-def _inbox_filter(to_agent: str, after_seq: int) -> tuple[str, tuple[Any, ...]] | None:
-    """The WHERE clause and its parameters selecting ``to_agent``'s inbox past ``after_seq``; None when it has none."""
-    subscribed = ROLE_SUBSCRIPTIONS.get(to_agent, frozenset())
-    if not subscribed:
-        return None
-    placeholders = ",".join("?" * len(subscribed))
-    where = f"seq > ? AND (to_agent = ? OR to_agent = '*') AND from_agent != ? AND topic IN ({placeholders})"
-    return where, (after_seq, to_agent, to_agent, *subscribed)
-
-
-__all__ = ["LANES_BUSY_SOURCE", "Message", "MessageBus", "ROLE_SUBSCRIPTIONS", "TOPIC_ALLOWLIST"]
+__all__ = ["LANES_BUSY_SOURCE", "Message", "MessageBus", "TOPIC_ALLOWLIST"]

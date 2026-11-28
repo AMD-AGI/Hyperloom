@@ -120,19 +120,11 @@ _VARIANT_FIELDS: tuple[str, ...] = (
     "args_mode",
 )
 LOSER_FIELDS: tuple[str, ...] = (*_VARIANT_FIELDS, "provenance", "gain_pct", "tput", "reason", "workspace")
-REJECTED_FIELDS: tuple[str, ...] = (
-    *LOSER_FIELDS,
-    "round_id",
-    "ts",
-    "stage",
-    "error_class",
-    "error_excerpt",
-    "server_log_path",
-)
 
 
-def outcome_row(te: dict[str, Any], fingerprint: str, reason: str, task_id: str) -> dict[str, Any]:
+def outcome_row(te: dict[str, Any], fingerprint: str, task_id: str) -> dict[str, Any]:
     name = str(te.get("name") or "")
+    reason = str(te.get("reason") or "")
     outcome = str(te.get("outcome") or "")
     return {
         "variant_name": name,

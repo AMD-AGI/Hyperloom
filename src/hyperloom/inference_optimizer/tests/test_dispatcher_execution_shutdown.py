@@ -26,9 +26,11 @@ from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop import dispatcher as dispatcher_module
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
-from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
+from hyperloom.orchestrator.state.round_store import RoundStore
+from hyperloom.orchestrator.state.task_registry import TaskOutcome, TaskRegistry, TaskSpec
 
 from ._dispatch_helpers import pump_until_settled, stub_gpu_pool
+from ._lease_helpers import lane_holders
 
 
 def _dispatcher(tmp_path):
@@ -49,11 +51,10 @@ def _dispatcher(tmp_path):
         tasks=tasks,
         shared_state=state,
         bus=MessageBus(db),
-        sub=SubAgentRunner(locks, tasks),
+        sub=SubAgentRunner(locks, tasks, RoundStore(db)),
         gpu_specialist_pool=stub_gpu_pool(),
         _stop=stop,
         stop_requested=stop.is_set,
-        reconciler=SimpleNamespace(take_failed_tasks=list),
         writeback=writeback_ns,
         recipe_journal=SimpleNamespace(fact_write_hook=AsyncMock()),
         specialist_dispatch=SimpleNamespace(
@@ -153,7 +154,7 @@ def test_shutdown_requests_scope_and_keeps_unconfirmed_database_open(tmp_path, m
         await _close(dispatcher)
         assert scopes[0].cancelled
         assert (await dispatcher.tasks.get(task.task_id)).state == "running"
-        assert await dispatcher.locks.lane_holders()
+        assert await lane_holders(dispatcher.locks)
         finish.set()
         return action
 
@@ -179,6 +180,57 @@ def test_normal_pump_completion_is_not_reaped_twice(tmp_path, monkeypatch):
         assert len(events) == 1
         assert dispatcher._coord.writeback.promote_to_shared_state.await_count == 1
         assert not dispatcher._executions
+        await _close(dispatcher)
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.db.close()
+
+
+def test_a_booked_result_is_announced_by_name_and_read_from_its_task_row(tmp_path):
+    """The event says which task was booked; what the task returned is on its row, for whoever reads it."""
+    dispatcher = _dispatcher(tmp_path)
+    returned = {"status": "ok", "gain_pct": 2.5}
+
+    async def run():
+        dispatcher.sub.register_executor("shutdown_test", AsyncMock(return_value=returned))
+        booked, _ = await dispatcher.tasks.create_or_return_existing(
+            TaskSpec(kind="shutdown_test", params={}, idempotency_key="announced")
+        )
+        await pump_until_settled(dispatcher)
+        queued, _ = await dispatcher.tasks.create_or_return_existing(
+            TaskSpec(kind="shutdown_test", params={}, idempotency_key="still-queued")
+        )
+        (event,) = await dispatcher.bus.tail(topic="delegated_result")
+        assert event.payload == {"task_id": booked.task_id, "kind": "shutdown_test", "state": "succeeded"}
+        asked = [booked.task_id, queued.task_id, "no-such-task"]
+        outcome = TaskOutcome(result=returned, error=None, cleanup_confirmed=True)
+        assert await dispatcher.tasks.outcomes(asked) == {booked.task_id: outcome}
+        assert dispatcher.tasks.outcomes_sync(asked) == {booked.task_id: outcome}
+        await _close(dispatcher)
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.db.close()
+
+
+def test_an_attempt_that_is_retried_instead_of_booked_is_not_announced(tmp_path):
+    """Its row holds what it returned, like any ended task; only a booked result gets the event readers follow."""
+    dispatcher = _dispatcher(tmp_path)
+
+    async def run():
+        dispatcher.sub.register_executor("specialist", AsyncMock(side_effect=RuntimeError("subprocess died")))
+        retried, _ = await dispatcher.tasks.create_or_return_existing(
+            TaskSpec(kind="specialist", params={}, idempotency_key="retried", requires_lanes=["research_lane"])
+        )
+        booking = partial(dispatcher.reap_dispatched_task, retried)
+        assert (await dispatcher.run_task_registered(retried, on_complete=booking)).state == "failed"
+        assert dispatcher._coord.specialist_dispatch.maybe_auto_retry_specialist.await_count == 1
+        assert await dispatcher.bus.tail(topic="delegated_result") == []
+        (outcome,) = (await dispatcher.tasks.outcomes([retried.task_id])).values()
+        assert outcome.error == "RuntimeError('subprocess died')"
         await _close(dispatcher)
 
     try:
@@ -221,7 +273,7 @@ def test_cancelled_shutdown_drain_retains_live_execution(tmp_path, monkeypatch):
         with pytest.raises(asyncio.CancelledError):
             await shutdown
         assert (await dispatcher.tasks.get(task.task_id)).state == "running"
-        assert await dispatcher.locks.lane_holders()
+        assert await lane_holders(dispatcher.locks)
         finish.set()
         await action
         await _close(dispatcher)
@@ -345,7 +397,7 @@ def test_cleanup_unconfirmed_preserves_outcome_without_completion(tmp_path, outc
         # The row is terminal, so the lane it was admitted on goes back -- the
         # unconfirmed cleanup is the evidence above and the raise, not a lane
         # held against a task that is over.
-        assert await dispatcher.locks.lane_holders() == {}
+        assert await lane_holders(dispatcher.locks) == {}
         assert not await dispatcher.bus.tail(topic="delegated_result")
         await _close(dispatcher)
         assert dispatcher.db.fetchone_sync("SELECT 1")[0] == 1
@@ -379,7 +431,7 @@ def test_executor_cleanup_unconfirmed_keeps_result_and_frees_lanes(tmp_path):
             await dispatcher.sub.run_task(task, prebound_lease=lease, release_resources=close)
         assert caught.value.result is result
         assert close.await_count == 0
-        assert await dispatcher.locks.lane_holders() == {}
+        assert await lane_holders(dispatcher.locks) == {}
         stored = await dispatcher.tasks.get(task.task_id)
         assert stored.history[-1]["evidence"]["outcome"] == asdict(result)
         assert stored.history[-1]["evidence"]["cleanup_confirmed"] is False
@@ -423,7 +475,7 @@ def test_an_unconfirmed_cleanup_records_the_group_for_the_operator(tmp_path, nam
         )
         with pytest.raises(ExecutionCleanupUnconfirmed):
             await dispatcher.sub.run_task(task, prebound_lease=lease, release_resources=AsyncMock(return_value=True))
-        assert await dispatcher.locks.lane_holders() == {}
+        assert await lane_holders(dispatcher.locks) == {}
         evidence = (await dispatcher.tasks.get(task.task_id)).history[-1]["evidence"]
         assert evidence["cleanup_confirmed"] is False
         assert evidence.get("cleanup_tree_pgid") == (4242 if named_tree else None)
@@ -457,7 +509,7 @@ def test_confirmed_cleanup_unregisters_even_when_completion_raises(tmp_path, out
         assert completed.await_count == 1
         assert completed.await_args.args[0].state == outcome
         assert not dispatcher._executions and not dispatcher._inflight_actions
-        assert not await dispatcher.locks.lane_holders()
+        assert not await lane_holders(dispatcher.locks)
         await _close(dispatcher)
         with pytest.raises(sqlite3.ProgrammingError):
             dispatcher.db.fetchone_sync("SELECT 1")
@@ -490,7 +542,7 @@ def test_confirmed_cancellation_records_once_without_promotion_or_retry(tmp_path
         assert dispatcher._coord.writeback.promote_to_shared_state.await_count == 0
         assert dispatcher._coord.recipe_journal.fact_write_hook.await_count == 0
         assert not dispatcher._executions and not dispatcher._inflight_actions
-        assert not await dispatcher.locks.lane_holders()
+        assert not await lane_holders(dispatcher.locks)
 
     try:
         asyncio.run(run())
@@ -577,7 +629,7 @@ def test_unknown_runner_exit_retains_execution_ownership(tmp_path, monkeypatch, 
             await dispatcher.run_task_registered(task, on_complete=completed)
         assert completed.await_count == 0
         assert len(dispatcher._executions) == len(dispatcher._inflight_actions) == 1
-        assert await dispatcher.locks.lane_holders() == {"research_lane": 1}
+        assert await lane_holders(dispatcher.locks) == {"research_lane": 1}
         await _close(dispatcher)
         assert dispatcher.db.fetchone_sync("SELECT 1")[0] == 1
 
@@ -612,7 +664,7 @@ def test_local_unknown_cleanup_cannot_use_empty_gpu_release_ack(tmp_path, monkey
             await dispatcher.run_task_registered(task, on_complete=completed)
         assert release.await_count == 0
         assert completed.await_count == 0
-        assert await dispatcher.locks.lane_holders() == {"research_lane": 1}
+        assert await lane_holders(dispatcher.locks) == {"research_lane": 1}
         assert len(dispatcher._executions) == 1
         await _close(dispatcher)
         assert dispatcher.db.fetchone_sync("SELECT 1")[0] == 1

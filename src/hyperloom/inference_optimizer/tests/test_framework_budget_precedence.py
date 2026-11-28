@@ -143,7 +143,7 @@ async def test_phase_expiry_drains_running_measurement_without_cancelling_it(coo
     cancel.assert_not_awaited()
 
 
-async def _idle_reactor_pass(name: str, **_kwargs) -> None:
+async def _idle_reactor_pass(**_kwargs) -> None:
     return None
 
 

@@ -17,7 +17,7 @@ from hyperloom.orchestrator.actions.executors.benchmark_run.accuracy import ACCU
 from hyperloom.orchestrator.actions.executors.benchmark_run.records import record_eval_score
 from hyperloom.orchestrator.actions.executors.benchmark_run.rounds import _record_accuracy_round
 from hyperloom.orchestrator.kernel.integrate_accuracy import _integrate_eval_score
-from hyperloom.orchestrator.loop._baseline_promotion import BaselinePromotionMixin, _adopt_eval_trigger
+from hyperloom.orchestrator.loop._baseline_promotion import BaselinePromotionMixin
 from hyperloom.orchestrator.state.shared_state import SharedState
 from inference_suite.contracts import RunLayout
 from inference_suite.contracts.base_launch import DIGEST_PREFIX
@@ -225,13 +225,6 @@ def test_a_scored_eval_failure_keeps_the_digest_of_its_score(tmp_path):
         }
     )
     assert result[ag.ACCURACY_DEFINITION_DIGEST_KEY] == BASELINE_DIGEST
-
-
-def test_the_enablement_trigger_keeps_the_digest_its_eval_failure_ran_under():
-    state = SharedState()
-    _adopt_eval_trigger(state, {ag.ACCURACY_DEFINITION_DIGEST_KEY: BASELINE_DIGEST})
-    assert state.enablement.eval_definition_digest == BASELINE_DIGEST
-    assert SharedState.from_dict(state.to_dict()).enablement.eval_definition_digest == BASELINE_DIGEST
 
 
 def test_a_session_without_a_measured_baseline_grades_against_the_proposed_score_with_no_digest():

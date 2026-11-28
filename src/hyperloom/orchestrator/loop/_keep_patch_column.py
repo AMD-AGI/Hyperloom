@@ -20,7 +20,6 @@ from hyperloom.orchestrator.lever import (
 
 from ..knowledge.agent_kb import OverlayProvenance, PatchKB
 from ..knowledge.remote_recipe.sanitize import HOST_ORIGIN_KEY
-from ..state.task_registry import Task
 
 log = logging.getLogger(__name__)
 
@@ -70,38 +69,12 @@ def _patch_member_list(raw: Any) -> list[Any]:
     return []
 
 
-def _declared_patch_members(result: Mapping[str, Any], params: Mapping[str, Any]) -> list[Any] | None:
-    if "patches_applied" in result:
-        return _patch_member_list(result.get("patches_applied"))
-    declared: list[Any] = []
-    named = "patches" in params
-    for key in ("patches", "prior_patches", "patch_path", "patch"):
-        if key in result:
-            named = True
-            declared.extend(_patch_member_list(result.get(key)))
-    declared.extend(_patch_member_list(params.get("patches")))
-    return declared if named else None
-
-
-def _workspace_patch_files(workspace: str) -> list[Path]:
-    root = Path(workspace) if workspace else None
-    if root is None or not root.is_dir():
-        return []
-    found: list[Path] = []
-    for base in (root, root / "patches", root / "worktree" / "patches"):
-        if base.is_dir():
-            found.extend(sorted(base.glob("*.patch")))
-            found.extend(sorted(base.glob("*.diff")))
-    return found
-
-
 def _existing_patch_paths(candidates: list[Any]) -> tuple[list[Path], list[str]]:
+    """The canonical path of every candidate that is a file, and the name of every one that is not."""
     resolved: list[Path] = []
     missing: list[str] = []
     seen: set[Path] = set()
     for raw in candidates:
-        if isinstance(raw, Mapping):
-            raw = raw.get("patch_path") or raw.get("patch_ref") or raw.get("patch_file") or ""
         raw_text = str(raw or "").strip()
         if not raw_text:
             missing.append("<empty-patch-member>")
@@ -122,12 +95,9 @@ def _existing_patch_paths(candidates: list[Any]) -> tuple[list[Path], list[str]]
 
 def _unstageable_patch_sources(row: Mapping[str, Any]) -> list[str]:
     missing = [str(path) for path in (row.get("missing_patch_sources") or []) if str(path).strip()]
-    if row.get("include_patches"):
-        missing.extend(
-            str(path)
-            for path in (row.get("patch_sources") or [])
-            if str(path).strip() and not Path(str(path)).is_file()
-        )
+    missing.extend(
+        str(path) for path in (row.get("patch_sources") or []) if str(path).strip() and not Path(str(path)).is_file()
+    )
     return list(dict.fromkeys(missing))
 
 
@@ -200,18 +170,6 @@ class AgentKeepStagingMixin:
     """Staging a settled KEEP into the patch column."""
 
     @staticmethod
-    def _keep_patch_sources(
-        result: Mapping[str, Any],
-        task: "Task | None",
-    ) -> tuple[list[Path], list[str]]:
-        """Locate authoritative patch files without reconstructing their diff."""
-        params = (getattr(task, "params", None) or {}) if task is not None else {}
-        declared = _declared_patch_members(result, params)
-        workspace = str(result.get("workspace") or "").strip()
-        candidates = declared if declared is not None else _workspace_patch_files(workspace)
-        return _existing_patch_paths(candidates)
-
-    @staticmethod
     def _provenance_with_apply_roots(
         provenance: Mapping[str, Any],
         refs: list[str],
@@ -237,28 +195,17 @@ class AgentKeepStagingMixin:
         Returns ``False`` when staging must be retried. The overlay bytes are
         captured now rather than at CLOSE because the worktree they were
         harvested from does not outlive the round. Config and kernel are
-        published once from the settled stack at CLOSE.
+        published once from the settled stack at CLOSE. The drain has already
+        dead-lettered a row whose sources are gone, so every source named here
+        was a file a moment ago; one that vanishes since is refused by the
+        store and the row is retried.
         """
-        owner = str(row.get("owner") or "")
         stack_index = int(row.get("stack_index") or 0)
-        result = {"patches": list(row.get("patch_sources") or [])}
-        include_patches = bool(row.get("include_patches"))
         provenance = row.get("provenance")
-        if not owner.strip():
-            return False
         patch_kb = PatchKB.open()
         if not patch_kb.active:
             return False
-        sources, missing = self._keep_patch_sources(result, None)
-        if include_patches and missing:
-            log.warning(
-                "patch kb: KEEP at stack index %d references missing patch members: %s",
-                stack_index,
-                missing,
-            )
-            return False
-        if not include_patches:
-            return True
+        sources = list(row.get("patch_sources") or [])
         refs: list[str] = []
         if sources:
             refs = patch_kb.stage_patches(sources, stack_index=stack_index)
@@ -279,8 +226,6 @@ class AgentKeepStagingMixin:
         *,
         stack_index: int,
         result: Mapping[str, Any],
-        task: "Task | None",
-        include_patches: bool,
     ) -> None:
         """Persist an idempotent section handoff to run after state durability.
 
@@ -296,28 +241,26 @@ class AgentKeepStagingMixin:
             or KnowledgeSections.from_env() is None
         ):
             return
-        sources, missing = self._keep_patch_sources(result, task) if include_patches else ([], [])
+        sources, missing = _existing_patch_paths(_patch_member_list(result.get("patches_applied")))
         # The realized diff is what the tree ended up holding, so it replaces the
         # delivered patch rather than joining it -- staging both would apply the
         # same change twice. It is chosen here, not at drain, because drain only
         # ever sees the row.
-        realized = Path(str(result.get("source_realized_patch") or "").strip() or ".")
-        realized_supersedes = include_patches and realized.is_file()
-        if realized_supersedes:
-            sources, missing = [realized], []
+        realized, _ = _existing_patch_paths([result.get("source_realized_patch")])
+        if realized:
+            sources, missing = realized, []
         row = {
             "id": f"{_PATCH_KEEP_OWNER}:{int(stack_index)}",
             "owner": _PATCH_KEEP_OWNER,
             "stack_index": int(stack_index),
-            "include_patches": bool(include_patches),
             "patch_sources": [str(path) for path in sources],
             "missing_patch_sources": missing,
-            "provenance": _keep_origin_provenance(result, sources, realized=realized_supersedes),
+            "provenance": _keep_origin_provenance(result, sources, realized=bool(realized)),
         }
         outbox = list(self.shared_state.kb_stage_outbox or [])
         if not any(isinstance(existing, dict) and existing.get("id") == row["id"] for existing in outbox):
             outbox.append(row)
-        if include_patches and (sources or missing):
+        if sources or missing:
             self._claim_patch_section(int(stack_index))
         self.shared_state.kb_stage_outbox = outbox
 
@@ -355,7 +298,6 @@ class AgentKeepStagingMixin:
             return
         retained: list[dict[str, Any]] = []
         dead_letter = [dict(row) for row in (self.shared_state.kb_stage_dead_letter or []) if isinstance(row, dict)]
-        stack = list(self.shared_state.optimization_stack or [])
         for row in pending:
             if not isinstance(row, dict):
                 continue
@@ -366,5 +308,4 @@ class AgentKeepStagingMixin:
                 retained.append(row)
         self.shared_state.kb_stage_outbox = retained
         self.shared_state.kb_stage_dead_letter = dead_letter[-200:]
-        self.shared_state.optimization_stack = stack
         self.shared_state.save(self.session_dir)

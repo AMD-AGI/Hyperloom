@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity
@@ -49,7 +48,6 @@ def _make_coordinator(tmp_path: Path) -> Coordinator:
     coord = Coordinator(
         session_dir=session_dir,
         backends=backends,
-        role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=KnowledgePlane(recipe_kb=kb)),
     )
     ss = coord.shared_state

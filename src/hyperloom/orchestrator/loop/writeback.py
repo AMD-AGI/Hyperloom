@@ -9,8 +9,6 @@ import time
 from ..actions.executors.workload._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS
 from ..actions.executors.benchmark_result import is_valid_measurement
 from ..phases.machine_state import LifecycleMark, record_lifecycle_event
-from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
-from ..state.shared_state import ActionAttempt
 from ..state.task_registry import Task
 from ._baseline_failures import BaselineFailureMixin
 from ._baseline_promotion import BaselinePromotionMixin
@@ -175,8 +173,8 @@ class WritebackCollaborator(
         Args:
             task_kind: The settled task's kind, selecting the promote branch.
             result: The task result dict.
-            task: The originating task, used for audit fingerprints and
-                pending-roofline gating.
+            task: The originating task; the promote branches read its id and
+                params.
 
         Returns:
             The promotion outcome; its ``verdict`` is the settlement verdict.
@@ -200,19 +198,6 @@ class WritebackCollaborator(
             return _PromoteOutcome(verdict=Verdict.RECORDED)
         outcome = _PromoteOutcome(verdict=Verdict.RECORDED)
         await getattr(self, handler_name)(result, task, outcome)
-        # Audit trail: one succeeded-attempt record with branch-supplied decision/extras.
-        if outcome.audit_decision is not None and task_kind in _AUDIT_ACTIONS:
-            self.shared_state.record_action_attempt(
-                action=task_kind,
-                attempt=ActionAttempt(
-                    task_id=getattr(task, "task_id", "") if task is not None else "",
-                    status="succeeded",
-                    decision=outcome.audit_decision,
-                    result=result,
-                    extras=outcome.audit_extras,
-                ),
-            )
-            outcome.changed = True
         if outcome.changed:
             self.shared_state.save(self.session_dir)
             self._drain_agent_keep_outbox()

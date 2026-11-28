@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from hyperloom_common.jsonio import read_jsonl
+from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
 from hyperloom.orchestrator.collaborator import OrchestrationPrompt
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
@@ -76,12 +78,12 @@ async def test_the_handoff_turn_is_billed_like_any_reactor_turn(session_dir, mon
     billed: list[str] = []
     monkeypatch.setattr(
         "hyperloom.orchestrator.loop.coordinator.trace_reactor_llm_call",
-        lambda _session_dir, _state, agent, result, **_: billed.append(agent),
+        lambda _session_dir, _state, result, **_: billed.append(result.raw_text),
     )
 
     await coord.phase_cycle_end.pump()
 
-    assert billed == ["orchestration"]
+    assert billed == [_DIRECTIVE]
 
 
 @pytest.mark.asyncio
@@ -129,8 +131,6 @@ async def test_a_failed_transition_save_still_enters_the_next_cycle_and_then_rai
     assert st.phase == ps.PHASE_FRAMEWORK_AGENT
     assert entered.await_args.kwargs["to_phase"] == ps.PHASE_FRAMEWORK_AGENT
     restarted.assert_awaited_once()
-    events = await coord.bus.tail(n=20, topic="event")
-    assert any((e.payload or {}).get("kind") == "phase_transition" for e in events)
 
 
 @pytest.mark.asyncio
@@ -148,8 +148,11 @@ async def test_a_failed_handoff_turn_records_the_error_and_leaves_no_directive(s
 
     assert coord.shared_state.orchestration_memory["for_cycle"] == 0
     assert coord.shared_state.orchestration_memory["next_cycle_directive"] == ""
-    observations = await coord.bus.tail(n=50, topic="observation")
-    assert any((o.payload or {}).get("kind") == "backend_error" for o in observations)
+    failed_calls = read_jsonl(llm_calls_path(session_dir))
+    assert [row["error_message"] for row in failed_calls if row["status"] == "error"] == [
+        "Claude backend timed out: turn exceeded its 1500s wall-clock bound"
+    ]
+    assert await coord.bus.tail(n=50, topic="observation") == []
 
 
 @pytest.mark.asyncio

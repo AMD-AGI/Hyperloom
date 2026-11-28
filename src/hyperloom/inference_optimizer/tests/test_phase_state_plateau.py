@@ -27,30 +27,13 @@ from hyperloom.orchestrator.state._shared_state import run_signals
 from hyperloom.orchestrator.state.shared_state import (
     ESCALATE_HINT_SKIP_TO_KERNEL,
     ESCALATE_HINT_SKIP_TO_SWEEP,
-    ESCALATE_HINT_VOCAB,
     SharedState,
-    is_valid_escalate_hint,
 )
 
 
 def _config_dry(state, overrides):
     evidence = _config_lever_evidence(state, overrides)
     return framework_plateau(evidence).config_dry, evidence
-
-
-def test_escalate_hint_vocab_closed():
-    assert ESCALATE_HINT_VOCAB == frozenset(
-        {
-            "skip_to_kernel",
-            "skip_to_sweep",
-        }
-    )
-
-
-def test_is_valid_escalate_hint_accepts_vocab():
-    assert is_valid_escalate_hint("skip_to_kernel")
-    assert not is_valid_escalate_hint("garbage")
-    assert not is_valid_escalate_hint("")
 
 
 def test_config_lever_dry_empty_attempts_returns_false():
@@ -191,7 +174,6 @@ def test_config_lever_dry_supports_threshold_overrides():
 
 def test_reset_per_cycle_plateau_state_preserves_durable_ledgers():
     state = SharedState(session_id="t")
-    state.params_no_promote_streak = 4
     state.framework_agent_phase_done = True
     state.framework_agent_discover_failures = 2
     state.framework_agent_empty_discoveries = 2
@@ -200,7 +182,6 @@ def test_reset_per_cycle_plateau_state_preserves_durable_ledgers():
 
     state.reset_per_cycle_plateau_state()
 
-    assert state.params_no_promote_streak == 0
     assert state.framework_agent_phase_done is False
     assert state.framework_agent_discover_failures == 0
     assert state.framework_agent_empty_discoveries == 0
@@ -292,7 +273,6 @@ def _skip_to_sweep_state(phase: str) -> SharedState:
         macro_cycle=0,
         attempts=[],
         specialist_rounds=[],
-        params_no_promote_streak=0,
         rejected_kernel_ids=[],
         optimization_stack=[],
         pending_escalate_hint=ESCALATE_HINT_SKIP_TO_SWEEP,
@@ -438,31 +418,6 @@ def test_a_whitespace_padded_target_file_still_matches():
     assert kernel_work_pending(state) is False
 
 
-def test_set_pending_escalate_hint_accepts_vocab():
-    s = SharedState()
-    assert s.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_KERNEL) == "skip_to_kernel"
-    assert s.pending_escalate_hint == "skip_to_kernel"
-
-
-def test_set_pending_escalate_hint_drops_unknown():
-    s = SharedState()
-    assert s.set_pending_escalate_hint("garbage") == ""
-    assert s.pending_escalate_hint == ""
-
-
-def test_consume_pending_escalate_hint_clears_and_returns_hint():
-    s = SharedState()
-    s.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_KERNEL)
-    consumed = s.consume_pending_escalate_hint()
-    assert consumed == "skip_to_kernel"
-    assert s.pending_escalate_hint == ""
-
-
-def test_consume_pending_escalate_hint_noop_when_empty():
-    s = SharedState()
-    assert s.consume_pending_escalate_hint() == ""
-
-
 def test_set_stop_reason_accepts_vocab():
     s = SharedState()
     assert s.set_stop_reason("target_reached") == "target_reached"
@@ -548,7 +503,6 @@ def test_compute_next_phase_advances_on_plateau():
             for _ in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
         ],
         specialist_rounds=[],
-        params_no_promote_streak=0,
         optimization_stack=[],
         pending_escalate_hint="",
         stop_reason="",
@@ -577,7 +531,6 @@ def test_compute_next_phase_honors_explore_plateau_overrides():
             {"lever_kind": LEVER_CONFIG, "outcome": "REVERT", "adopted": False, "cycle": 0},
         ],
         specialist_rounds=[],
-        params_no_promote_streak=0,
         optimization_stack=[],
         pending_escalate_hint="",
         stop_reason="",

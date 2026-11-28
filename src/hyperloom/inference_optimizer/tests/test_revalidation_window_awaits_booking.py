@@ -26,7 +26,6 @@ from hyperloom.orchestrator.state.task_registry import TaskSpec
 @pytest.fixture
 def coord(tmp_path: Path):
     from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
-    from hyperloom.orchestrator.roles.agent_role import default_role_registry
     from hyperloom.orchestrator.state.shared_state import SharedState
     from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 
@@ -37,7 +36,6 @@ def coord(tmp_path: Path):
     coord = Coordinator(
         session_dir=tmp_path,
         backends={"orchestration": MockBackend(idle)},
-        role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )
     yield coord

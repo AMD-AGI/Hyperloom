@@ -46,7 +46,6 @@ def _bridge_candidate_gap(cand: dict[str, Any], idx: int) -> dict[str, Any] | No
         "canonical_id": f"gap.static_recon.{slug}",
         "symptom": _bridge_symptom(cand, predicate_file, why),
         "layer": "static_recon",
-        "severity": "medium",
         "domain_hint": str(cand.get("domain_hint") or "freeform").strip() or "freeform",
         "source": "static_recon",
         "provenance": predicate_file,
@@ -59,19 +58,12 @@ class InternalTasksPhase(CoordinatorCollaborator):
     def _research_scout_already_proven(self) -> list[dict[str, str]]:
         """Priors this session has already validated, so the scout does not re-propose them."""
         proven = list(self._coord.phase_prelude.warm_recipe_proven_items())
-        search = self.shared_state.explore_search or {}
-        accepted = search.get("accepted") if isinstance(search, dict) else []
-        if not isinstance(accepted, list):
-            return proven
-        for variant in accepted:
-            if not isinstance(variant, dict):
+        for entry in self.shared_state.optimization_stack:
+            if entry.get("action") != "explore":
                 continue
-            name = str(variant.get("name") or variant.get("fingerprint") or "").strip()
-            if not name:
-                continue
-            sources = variant.get("source_evidence") or variant.get("pr_evidence") or []
-            source = str(sources[0]).strip() if isinstance(sources, list) and sources else ""
-            proven.append({"name": name, "source": source})
+            name = str(entry.get("variant_name") or entry.get("fingerprint") or "").strip()
+            if name:
+                proven.append({"name": name, "source": ""})
         return proven
 
     def _research_scout_residual_questions(self) -> str:
@@ -88,9 +80,6 @@ class InternalTasksPhase(CoordinatorCollaborator):
 
     def _research_scout_params(self, *, reason: str, round_id: int) -> dict[str, Any]:
         """The specialist params for one research-scout round."""
-        seen = sorted(
-            {str(item).strip() for item in (self.shared_state.research_scout_seen_pr_ids or []) if str(item).strip()}
-        )
         params: dict[str, Any] = {
             "domain": "research_scout_specialist",
             "source_phase": str(self.shared_state.phase or "PRELUDE").strip().upper(),
@@ -105,7 +94,6 @@ class InternalTasksPhase(CoordinatorCollaborator):
             # Depth bounded by wall-clock budget, not turns (max_turns omitted).
             "source": "coordinator_internal",
             "reason": str(reason),
-            "seen_pr_ids": seen,
             "mode": "research",
         }
         proven = self._research_scout_already_proven()

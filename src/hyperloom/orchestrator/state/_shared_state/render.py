@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import time
 from collections.abc import Collection
 from datetime import datetime
 from typing import Any, NamedTuple
@@ -18,10 +17,7 @@ from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
     REBENCH_FAILED_STATUSES,
     REBENCH_UNMEASURED_GIVEN_UP,
 )
-from ...mcp_tool_names import qualified_context_tool_name
 from . import gap_rows, variant_line, warm_start
-from .attempt_audit import _AUDIT_ACTIONS
-from .phase_state import GAP_SEVERITY_RANK
 
 # Failure rows rendered into the prompt, and per-row excerpt budget.
 _FAILURES_RENDERED = 10
@@ -76,7 +72,6 @@ class _ProposalRound(NamedTuple):
     """The attribution a specialist round stamps onto every proposal it produced."""
 
     domain: str
-    severity: str
     priority: int
     task_id: str
     provenance: str
@@ -84,14 +79,13 @@ class _ProposalRound(NamedTuple):
     kb_rendered_refs: list[str]
 
 
-def _round_attribution(entry: dict[str, Any], severity_of: dict[str, str]) -> _ProposalRound:
+def _round_attribution(entry: dict[str, Any]) -> _ProposalRound:
     """Read one specialist round's attribution. ``provenance`` defaults to its domain: a proposal cannot choose it."""
     from hyperloom_common.coerce import to_int
 
     domain = str(entry.get("domain") or "?").removesuffix("_specialist")
     return _ProposalRound(
         domain=domain,
-        severity=severity_of.get(str(entry.get("gap_canonical_id") or ""), ""),
         priority=to_int(entry.get("priority"), default=0),
         task_id=str(entry.get("task_id") or "")[:8],
         provenance=str(entry.get("provenance") or f"specialist:{domain}"),
@@ -109,7 +103,6 @@ def _stamp_round_attribution(
     """Stamp a normalized proposal with the identity its round gives it, naming it when it named itself nothing."""
     row["name"] = row["name"] or f"{attribution.domain or 'specialist'}-{attribution.task_id}-{index}"
     row["domain"] = attribution.domain
-    row["severity"] = attribution.severity
     row["provenance"] = attribution.provenance
     # Already checked against the read this round's dispatch was shown, which travels with them.
     row["experience_citations"] = list(proposal.get("experience_citations") or [])
@@ -149,7 +142,7 @@ def untested_proposal_line(row: dict[str, Any], *, why_chars: int | None = 80) -
 
     ``why_chars`` bounds the reason; ``None`` shows a reason its producer has already bounded in full.
     """
-    parts = [f"• {row['name']} [{row['domain']}·{row['severity'] or 'sev?'}]"]
+    parts = [f"• {row['name']} [{row['domain']}]"]
     if row["atomic"]:
         parts.append("ATOMIC")
     if row["extra_args"]:
@@ -383,7 +376,7 @@ class _RenderMixin:
         """Executable proposals from this cycle that no explore round has benched.
 
         Ordered by round ``priority`` (predictor rounds set one, specialist rounds
-        do not), then gap severity, then most recent. A row's ``provenance`` is its
+        do not), then most recent. A row's ``provenance`` is its
         round's, ``specialist:<domain>`` unless the round's recorder set one; a
         proposal cannot choose it, since a specialist writes its own proposals.
         """
@@ -393,17 +386,12 @@ class _RenderMixin:
 
         cycle = to_int(self.macro_cycle, default=0)
         benched = self.benched_fingerprints()
-        severity_of = {
-            str(g.get("canonical_id") or ""): str(g.get("severity") or "").strip().lower()
-            for g in (self.gaps or [])
-            if isinstance(g, dict)
-        }
-        ranked: list[tuple[int, int, int, dict[str, Any]]] = []
+        ranked: list[tuple[int, int, dict[str, Any]]] = []
         seen: set[str] = set()
         for order, entry in enumerate(self.specialist_rounds or []):
             if not isinstance(entry, dict) or to_int(entry.get("cycle"), default=0) != cycle:
                 continue
-            attribution = _round_attribution(entry, severity_of)
+            attribution = _round_attribution(entry)
             for index, proposal in enumerate(entry.get("proposal_set") or []):
                 if not isinstance(proposal, dict):
                     continue
@@ -416,9 +404,9 @@ class _RenderMixin:
                 seen.add(fingerprint)
                 row["fingerprint"] = fingerprint
                 _stamp_round_attribution(row, proposal, index, attribution)
-                ranked.append((attribution.priority, GAP_SEVERITY_RANK.get(attribution.severity, 0), order, row))
-        ranked.sort(key=lambda r: (-r[0], -r[1], -r[2]))
-        return [row for _, _, _, row in ranked]
+                ranked.append((attribution.priority, order, row))
+        ranked.sort(key=lambda r: (-r[0], -r[1]))
+        return [row for _, _, row in ranked]
 
     def to_untested_proposals_summary(
         self, *, skip_provenance: str = "", in_grids: Collection[str] = (), carried: Collection[str] = ()
@@ -443,7 +431,7 @@ class _RenderMixin:
             out.extend(
                 [
                     "Executable specialist proposals from this cycle that no explore round has benched or has in its grid.",
-                    "Ranked by gap severity, then most recent. Once no explore is queued or running, the Coordinator",
+                    "Most recent round first. Once no explore is queued or running, the Coordinator",
                     "benches the head of this list; dispatch `explore` only for variants not listed here.",
                     "",
                 ]
@@ -509,9 +497,7 @@ class _RenderMixin:
                 else []
             ),
             f"profiler_digest={self._format_profiler_digest()}",
-            # Full TraceLens analysis.md.
             f"analysis_md={self._format_analysis_md_pointer()}",
-            f"params_no_promote_streak={self.params_no_promote_streak}",
             f"explore_search={self._format_search_state(self.explore_search)}",
             # Pending KEEPs the integrate gate will drain.
             (f"pending_keep_kernels={kernel_decisions.pending_keep_kernel_ids(self) or '(none)'}"),
@@ -519,12 +505,8 @@ class _RenderMixin:
             f"rejected_kernel_patches={self._format_rejected_kernel_patches()}",
             f"rejected_kernel_ids={self.rejected_kernel_ids or '(none)'}",
             f"last_baseline={self._format_attempt(self.last_baseline)}",
-            f"last_profile={self._format_attempt(self.last_profile)}",
             f"last_gemm_tuning={self._format_attempt(self.last_gemm_tuning)}",
-            f"last_explore={self._format_attempt(self.last_explore)}",
-            f"attempts_history={self._format_attempts_history()}",
             f"last_action_failures={self._format_last_action_failures()}",
-            f"gain_gated_action_count={int(self.gain_gated_action_count or 0)}",
             f"macro_cycle={int(self.macro_cycle or 0)}",
             f"stop_reason={self.stop_reason or '(none)'}",
             f"closing_phase={self.closing_phase}  "
@@ -533,29 +515,10 @@ class _RenderMixin:
         ]
         return "\n".join(lines)
 
-    def to_tick_summary(self) -> str:
-        """The per-tick counters of the prompt summary: the tick number and each agent's last pass."""
-        return f"tick={int(self.tick or 0)}\nagent_last_active={self._format_agent_last_active()}"
-
-    def _format_agent_last_active(self) -> str:
-        """Render each agent's last completed reactor pass as a relative age.
-
-        Returns:
-            str: ``orchestration=2s ago``, or ``(none)`` when no
-                agent has run yet.
-        """
-        now = time.time()
-        parts = [
-            f"{agent}={int(max(0.0, now - ts))}s ago"
-            for agent, ts in sorted((self.agent_last_active or {}).items())
-            if isinstance(ts, (int, float)) and ts > 0
-        ]
-        return ", ".join(parts) or "(none)"
-
-    # Audit-trail renderers (per-action attempts + global failure log).
+    # Renderers of the latest-attempt snapshots and the global failure log.
     @staticmethod
     def _format_attempt(entry: dict[str, Any] | None) -> str:
-        """Render one ``last_<action>`` snapshot or ``attempts[-1]`` entry."""
+        """Render ``last_baseline`` or ``last_gemm_tuning``."""
         if not isinstance(entry, dict) or not entry:
             return "(none)"
         metric = entry.get("key_metric")
@@ -569,20 +532,6 @@ class _RenderMixin:
             f"{metric_str} err={err} ws={ws} "
             f"task_id={entry.get('task_id', '?')} ts={entry.get('ts', '?')}"
         )
-
-    def _format_attempts_history(self) -> str:
-        """One-line summary across the audit actions (``baseline:total(s<succ>,f<fail>) ...``)."""
-        parts: list[str] = []
-        for action in sorted(_AUDIT_ACTIONS):
-            attempts_attr = f"{action}_attempts"
-            history = getattr(self, attempts_attr, None) or []
-            if not history:
-                continue
-            total = len(history)
-            succ = sum(1 for e in history if isinstance(e, dict) and e.get("status") == "succeeded")
-            fail = sum(1 for e in history if isinstance(e, dict) and e.get("status") == "failed")
-            parts.append(f"{action}:{total}(s{succ},f{fail})")
-        return " ".join(parts) if parts else "(no attempts recorded)"
 
     def _format_last_action_failures(self) -> str:
         """Render the most-recent global failures, each with its excerpt tail and log path."""
@@ -611,17 +560,16 @@ class _RenderMixin:
         suffix = f"\n[+{earlier} earlier failures]" if earlier > 0 else ""
         return "\n".join(rows) + suffix if rows else "(none)"
 
-    def _format_rejected_kernel_patches(self) -> str:
+    def _format_rejected_kernel_patches(self) -> list[str] | str:
         """Render the most recent rejected kernel patches for the prompt."""
-        if not self.rejected_kernel_patches:
-            return "(none)"
+        from ...kernel import kernel_decisions
+
         return [
             (
                 f"{r.get('kernel_id', '?')}: attempts={r.get('attempt_count', '?')} "
                 f"best_gain={r.get('best_gain_pct', '?')} reason={r.get('reason', '?')}"
             )
-            for r in self.rejected_kernel_patches[-5:]
-            if isinstance(r, dict)
+            for r in kernel_decisions.rejected_kernel_patches(self)[-5:]
         ] or "(none)"
 
     @staticmethod
@@ -652,12 +600,7 @@ class _RenderMixin:
         if not search:
             return "(none)"
         tested: dict[str, Any] = search.get("tested") or {}
-        head = (
-            f"    cursor={search.get('cursor', 0)}"
-            f"  accepted={len(search.get('accepted') or [])}"
-            f"  rejected={len(search.get('rejected') or [])}"
-            f"  tested={len(tested)}"
-        )
+        head = f"    cursor={search.get('cursor', 0)}  tested={len(tested)}"
         out: list[str] = ["", head]
         rows = [(fp, e) for fp, e in tested.items() if isinstance(e, dict)]
         if not rows:
@@ -670,14 +613,10 @@ class _RenderMixin:
         return "\n".join(out)
 
     def _format_current_best(self) -> str:
-        """Render ``current_best`` without its ``optimization_stack`` and ``measurement``.
-
-        The stack, which grows with every stacked KEEP, has its own line; the
-        measurement is launch evidence (paths, identity hashes) no decision reads.
-        """
+        """Render ``current_best`` without its ``measurement``: launch evidence (paths, identity hashes) no decision reads."""
         if not self.current_best:
             return "(none)"
-        return str({k: v for k, v in self.current_best.items() if k not in ("optimization_stack", "measurement")})
+        return str({k: v for k, v in self.current_best.items() if k != "measurement"})
 
     def _format_current_launch_flags(self) -> str:
         """The server flags ``current_best`` launched with, as its measurement recorded them."""
@@ -686,7 +625,7 @@ class _RenderMixin:
         flags = str(evidence.get("requested_server_args") or "") if isinstance(evidence, dict) else ""
         return _flatten_for_prompt(dedupe_extra_server_args(flags.strip())) or "(unknown)"
 
-    def _format_optimization_stack(self) -> str:
+    def _format_optimization_stack(self) -> list[str] | str:
         """Render the optimization stack as ``action:variant`` parts."""
         if not self.optimization_stack:
             return "(none)"
@@ -698,26 +637,25 @@ class _RenderMixin:
         return parts or "(none)"
 
     def _format_analysis_md_pointer(self) -> str:
-        """Point the prompt at the ``show_analysis_md`` tool once a TraceLens snapshot exists. Empty cache → one-line hint to propose ``roofline``."""
+        """Name the TraceLens report's file once a snapshot exists; before that, say the Coordinator owns the analysis."""
         cached = self.last_trace_analyze or {}
-        if not cached.get("analysis_md_text"):
+        if not cached.get("has_analysis_md"):
             return (
                 "(no TraceLens snapshot yet — analysis is auto-enqueued "
                 "by the Coordinator at the end of PRELUDE and on every "
                 "+10% validated-gain crossing; wait for the pending "
                 "task to land, or continue with specialist / explore "
                 "work that does not need analysis.md. `roofline` and "
-                "`profile` are Coordinator-managed; you may also propose "
-                "them directly if the situation warrants it.)"
+                "`profile` are Coordinator-managed; a delegate for either "
+                "is denied.)"
             )
         snap = cached.get("roofline_snapshot_id", "?")
         gain = to_float(cached.get("roofline_baseline_gain_at_snapshot", 0.0))
         gain_str = "?" if gain is None else f"{gain:.2f}"
-        show_analysis_md = qualified_context_tool_name("show_analysis_md")
         return (
             f"(TraceLens snapshot #{snap}, gain at snapshot = {gain_str}% — "
-            "full report not inlined; see profiler_digest above or call the "
-            f"{show_analysis_md} context tool for the TraceLens report.)"
+            "full report not inlined; see profiler_digest above. "
+            f"Report file: {cached.get('analysis_md_path')})"
         )
 
     def _format_profiler_digest(self) -> str:

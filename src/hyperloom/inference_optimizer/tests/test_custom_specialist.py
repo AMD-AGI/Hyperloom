@@ -31,7 +31,6 @@ from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.specialists.dispatch import SpecialistDispatchCollaborator
 from hyperloom.orchestrator.specialists.domains import get_domain
 from hyperloom.orchestrator.specialists.runner import SpecialistRunner, SpecialistSubprocessConfig
@@ -136,7 +135,6 @@ def _coordinator(session_dir: Path, state: SharedState):
     coord = Coordinator(
         session_dir=session_dir,
         backends={"orchestration": MockBackend(idle)},
-        role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )
     coord.shared_state.phase = "FRAMEWORK_AGENT"
@@ -194,7 +192,6 @@ def _delegate(params: dict[str, Any]) -> Intent:
     return Intent(type=IntentType.DELEGATE, payload={"action_name": "specialist", "params": params})
 
 
-@pytest.mark.parametrize("configured", [True, False])
 @pytest.mark.parametrize(
     "params",
     [
@@ -204,18 +201,14 @@ def _delegate(params: dict[str, Any]) -> Intent:
         {"scope": "freeform", "domain": "custom_specialist", "task_description": "do it"},
     ],
 )
-def test_gate_denies_every_custom_specialist_delegate(params, configured):
-    gate = PolicyGate(role_registry=default_role_registry())
-    gate.shared_state = SharedState(custom_specialist_prompt=_PROMPT if configured else "")
+def test_gate_denies_every_custom_specialist_delegate(params):
     with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", _delegate(params))
+        PolicyGate().validate_intent("orchestration", _delegate(params))
     assert exc.value.rule == "specialist_custom_coordinator_owned"
 
 
 def test_gate_allows_a_builtin_dispatch_with_the_generic_custom_tag():
-    gate = PolicyGate(role_registry=default_role_registry())
-    gate.shared_state = SharedState()
-    gate.validate_intent(
+    PolicyGate().validate_intent(
         "orchestration",
         _delegate({"domain": "serving_specialist", "tags": ["framework", "custom"], "gap_canonical_id": "gap.x"}),
     )
@@ -338,34 +331,32 @@ def _custom_key(cycle: int = 0, prompt: str = _PROMPT) -> str:
 
 @pytest.fixture
 def custom_coord(tmp_path: Path, monkeypatch):
-    """Coordinator stand-in with a configured custom specialist and a mocked router."""
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-
-    c = Coordinator.__new__(Coordinator)
-    c.session_dir = tmp_path
-    c.shared_state = SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_description=_DESCRIPTION)
-    c.shared_state.phase = "FRAMEWORK_AGENT"
+    """A Coordinator with a configured custom specialist, a git framework tree and a warm-up that names the framework."""
+    state = SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_description=_DESCRIPTION)
+    state.max_minutes = 600
     source_root = tmp_path / "framework"
     (source_root / ".git").mkdir(parents=True)
-    c.shared_state.framework_repo_path = str(source_root)
-    c.tasks = SimpleNamespace(find_by_idempotency_key=AsyncMock(return_value=None))
-    c.bus = SimpleNamespace(record_observation=AsyncMock())
+    state.framework_repo_path = str(source_root)
     monkeypatch.setattr(
         SpecialistDispatchCollaborator,
         "warm_specialist_params",
         AsyncMock(side_effect=lambda params: params.setdefault("framework", "sglang")),
     )
-    c.router.handle_delegate = AsyncMock()  # type: ignore[assignment]
-    c.router.handle_intent = AsyncMock()  # type: ignore[assignment]
-    return c
+    return _coordinator(tmp_path, state)
 
 
-def _dispatched(coord) -> tuple[dict[str, Any], str]:
-    coord.router.handle_delegate.assert_awaited_once()
-    coord.router.handle_intent.assert_not_awaited()
-    src, intent = coord.router.handle_delegate.call_args.args
-    assert src == "orchestration"
-    return intent.payload["params"], intent.payload["idempotency_key"]
+async def _dispatched(coord) -> tuple[dict[str, Any], str]:
+    """The params and key of the one task the dispatch queued, which the Coordinator created itself."""
+    from hyperloom.orchestrator.state.task_registry import task_dispatch_class
+
+    (task,) = await coord.tasks.queued()
+    assert (task.kind, task_dispatch_class(task)) == ("specialist", "coordinator")
+    return task.params, task.idempotency_key
+
+
+async def _custom_observations(coord) -> list[dict[str, Any]]:
+    tail = await coord.bus.tail(topic="observation", n=50)
+    return [m.payload for m in reversed(tail) if str(m.payload.get("kind") or "").startswith("custom_specialist")]
 
 
 _BASE_PARAMS = {
@@ -374,26 +365,31 @@ _BASE_PARAMS = {
     "source": "coordinator_internal",
     "reason": "custom_specialist",
     "framework": "sglang",
+    # The owner a specialist that names a domain is frozen with when its task is created.
+    "source_phase": "EXPLORE",
 }
 
 
 async def test_dispatch_targets_the_most_actionable_gap(custom_coord):
     state = custom_coord.shared_state
-    state.upsert_gap({"canonical_id": "gap.low", "severity": "low"})
-    state.upsert_gap({"canonical_id": "gap.high", "severity": "high"})
+    state.upsert_gap({"canonical_id": "gap.tried"})
+    state.upsert_gap({"canonical_id": "gap.untried"})
+    state.append_gap_attempt("gap.tried", {"action": "explore", "variant_name": "v1", "outcome": "REVERT"})
 
     await custom_coord.specialist_dispatch.ensure_custom_specialist()
 
-    params, key = _dispatched(custom_coord)
-    assert params == {**_BASE_PARAMS, "gap_canonical_id": "gap.high"}
+    params, key = await _dispatched(custom_coord)
+    assert params == {**_BASE_PARAMS, "gap_canonical_id": "gap.untried"}
     assert key == _custom_key()
-    custom_coord.bus.record_observation.assert_not_awaited()
+    assert await _custom_observations(custom_coord) == []
+    # Orchestration sent nothing, so nothing is announced to it or charged to it.
+    assert await custom_coord.bus.tail(topic="event") == []
 
 
 async def test_dispatch_without_gaps_uses_the_session_gap(custom_coord):
     await custom_coord.specialist_dispatch.ensure_custom_specialist()
 
-    params, _ = _dispatched(custom_coord)
+    params, _ = await _dispatched(custom_coord)
     assert params == {
         **_BASE_PARAMS,
         "gap_canonical_id": "gap.custom.session",
@@ -408,7 +404,7 @@ async def test_dispatch_key_names_the_cycle_and_the_definition(custom_coord):
 
     await custom_coord.specialist_dispatch.ensure_custom_specialist()
 
-    _, key = _dispatched(custom_coord)
+    _, key = await _dispatched(custom_coord)
     assert key == _custom_key(2, "other focus")
 
 
@@ -436,16 +432,14 @@ async def test_dispatch_falls_back_to_research_when_patches_are_impossible(custo
 
     await custom_coord.specialist_dispatch.ensure_custom_specialist()
 
-    params, _ = _dispatched(custom_coord)
+    params, _ = await _dispatched(custom_coord)
     assert params["mode"] == "research"
-    custom_coord.bus.record_observation.assert_awaited_once_with(
-        "coordinator",
-        "observation",
-        {"kind": "custom_specialist_research_only", "reason": NO_GIT_FRAMEWORK_SOURCE_ROOT},
-    )
+    assert await _custom_observations(custom_coord) == [
+        {"kind": "custom_specialist_research_only", "reason": NO_GIT_FRAMEWORK_SOURCE_ROOT}
+    ]
 
 
-async def test_dispatch_enqueues_one_task_per_cycle_through_the_real_router(tmp_path):
+async def test_dispatch_enqueues_one_task_per_cycle(tmp_path):
     state = SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_description=_DESCRIPTION)
     state.max_minutes = 30
     state.framework = "sglang"
@@ -488,25 +482,21 @@ async def test_the_coordinator_custom_task_passes_the_dispatch_time_gate_and_run
     assert ran == ["custom_specialist"]
 
 
-async def test_a_refused_custom_dispatch_is_requested_once_per_cycle(tmp_path, monkeypatch):
+async def test_a_refused_custom_dispatch_is_recorded_once_per_cycle_and_not_as_orchestrations_denial(tmp_path):
     state = SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_description=_DESCRIPTION)
     # Below the research-mode base, so admission refuses it.
     state.max_minutes = 5
     state.framework = "sglang"
     coord = _coordinator(tmp_path, state)
-    denials: list[tuple[int, str]] = []
-    record = coord.router.record_policy_denied
-
-    async def _record(source, intent, denied, **kwargs):
-        denials.append((coord.shared_state.macro_cycle, denied.rule))
-        await record(source, intent, denied, **kwargs)
-
-    monkeypatch.setattr(coord.router, "record_policy_denied", _record)
     for cycle in (0, 0, 0, 1, 1):
         coord.shared_state.macro_cycle = cycle
         await coord.specialist_dispatch.ensure_custom_specialist()
 
-    assert [cycle for cycle, _ in denials] == [0, 1]
+    refusals = [p for p in await _custom_observations(coord) if p["kind"] == "custom_specialist_refused"]
+    assert [p["rule"] for p in refusals] == ["time_budget", "time_budget"]
+    assert all("specialist" in p["reason"] for p in refusals)
+    tail = await coord.bus.tail(topic="observation", n=50)
+    assert [m.payload for m in tail if m.payload.get("kind") == "policy_denied"] == []
     assert await coord.tasks.queued() == []
     assert coord.specialist_dispatch.refused_custom_key == _custom_key(1)
 
@@ -814,44 +804,6 @@ def test_resume_turns_only_mode_on_and_never_off(passed, stored, expected):
     assert state.custom_specialist_only is expected
 
 
-def _only_gate(*, phase: str = "FRAMEWORK_AGENT", only: bool = True) -> PolicyGate:
-    gate = PolicyGate(role_registry=default_role_registry())
-    gate.shared_state = SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_only=only)
-    gate.shared_state.phase = phase
-    return gate
-
-
-_FRAMEWORK_SEARCH_INTENTS = [
-    _delegate({"domain": "serving_specialist", "gap_canonical_id": "gap.x"}),
-    Intent(type=IntentType.DELEGATE, payload={"action_name": "explore", "params": {"grid": []}}),
-    Intent(type=IntentType.DELEGATE, payload={"action_name": "integrate_patch", "params": {"specialist_task_id": "s"}}),
-    Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={"action_name": "explore", "params": {"grid": []}, "predicted_gain_pct": 1.0},
-    ),
-]
-
-
-@pytest.mark.parametrize("intent", _FRAMEWORK_SEARCH_INTENTS)
-def test_only_mode_gate_denies_every_framework_search_orchestration_emits(intent):
-    with pytest.raises(PolicyDenied) as exc:
-        _only_gate().validate_intent("orchestration", intent)
-    assert exc.value.rule == "custom_specialist_only"
-
-
-@pytest.mark.parametrize(("phase", "only"), [("FRAMEWORK_AGENT", False), ("CYCLE_END", True)])
-@pytest.mark.parametrize("intent", _FRAMEWORK_SEARCH_INTENTS)
-def test_the_framework_search_denial_is_scoped_to_only_mode_in_framework(intent, phase, only):
-    try:
-        _only_gate(phase=phase, only=only).validate_intent("orchestration", intent)
-    except PolicyDenied as denied:
-        assert denied.rule != "custom_specialist_only"
-
-
-def test_only_mode_lets_the_custom_bench_row_through_the_dispatch_time_gate():
-    _only_gate().validate_dispatched_task("explore", {"grid": [], "operator_priority": True})
-
-
 def _recorder(calls: list[str]):
     def _rec(name: str):
         async def _call(*args, **kwargs):
@@ -992,8 +944,8 @@ async def test_only_mode_framework_ticks_without_an_orchestration_turn(tmp_path,
     async def _noop(*args, **kwargs):
         return None
 
-    async def _turn(name, **kwargs):
-        turns.append(name)
+    async def _turn(**kwargs):
+        turns.append("orchestration")
 
     monkeypatch.setattr(coord, "reactor_pass", _turn)
     monkeypatch.setattr(coord.reconciler, "run", _noop)

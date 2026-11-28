@@ -10,7 +10,7 @@ from typing import Any
 
 from ..collaborator import CoordinatorCollaborator
 from . import machine_state as _phase_state
-from ..loop.maintenance import run_lease_and_db_reclaim
+from ..loop.maintenance import report_lease_cleanup
 
 log = _logging.getLogger(__name__)
 
@@ -26,12 +26,9 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
         prior_cycle: int,
         new_cycle: int,
     ) -> None:
-        """Medium-intensity soft restart at a macro-cycle boundary.
+        """Log the reconciler's last cleanup report and record it as the ``cycle_soft_restart`` observation.
 
-        Recycles transient/per-cycle resources (fresh leases, pruned DB, cleared
-        caches, re-scoped system prompt) without losing accumulated optimization state;
-        ``current_best`` / ``optimization_stack`` / ``explore_search`` are
-        preserved. Idempotent.
+        Runs on each loop-back into a new macro-cycle. It releases no lease and changes no state.
 
         Args:
             prior_cycle: The macro-cycle number that just finished.
@@ -41,8 +38,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             "prior_cycle": int(prior_cycle),
             "new_cycle": int(new_cycle),
         }
-        # Reap leases, reclaim orphaned running tasks, prune DB.
-        await run_lease_and_db_reclaim(self._coord, summary, reason="cycle_soft_restart")
+        await report_lease_cleanup(self._coord, summary, reason="cycle_soft_restart")
         log.info(
             "cycle soft-restart %d → %d: %s",
             int(prior_cycle),

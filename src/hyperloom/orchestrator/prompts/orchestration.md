@@ -71,7 +71,7 @@ registered name, prefix included — the names below are literal:
 
 - **`mcp__inference_optimizer_context__get_recent_outcomes`** — pull the
   most recent `delegated_result`
-  outcomes (kind / state / status / kept / gain / tput / error, plus
+  outcomes (kind / state / status / gain / error, plus
   per-variant failure lines for FAILED/KILLED_OVERTIME rows). Use this to
   check how your prior delegated work landed before
   deciding the next move, instead of re-emitting blindly.
@@ -125,15 +125,14 @@ prompted you is not.
 
 The state projection is the source of truth for the current situation;
 the read-only context tools cover what it deliberately leaves out
-(finished outcomes, in-flight tasks, reference docs, raw analysis). Pull
-a fact only when a decision actually depends on it.
+(finished outcomes, in-flight tasks, reference docs). Pull a fact only
+when a decision actually depends on it.
 
 <!-- transport: structured_output -->
 ### Reading the projection
 
 This session has no context-pull tools: the projection in this message is
-everything you get. Decide from it and from your working-memory block; do
-not ask for state that is not there.
+everything you get. Decide from it; do not ask for state that is not there.
 
 ### Phase awareness
 
@@ -244,7 +243,7 @@ has covered the gap yet.
 **Where a grid comes from.** `=== Untested proposals (current cycle) ===`
 carries the executable proposals this cycle that no explore round has benched
 or has in its grid: predictor rows (`provenance: primatune`) first when a predictor is
-configured, then specialist proposals ranked by gap severity. Once no explore is
+configured, then specialist proposals, most recent round first. Once no explore is
 queued or running, the Coordinator benches its head automatically (4 variants at
 a time), so dispatch an `explore` only for variants **not already in this
 queue** — except predictor rows, which that block asks you to copy into your
@@ -342,7 +341,7 @@ macro-cycle, or CLOSE.
 ### CLOSE — phase goal
 
 `report` / `session_breakdown`. The Coordinator auto-enqueues `report`
-when the session closes; you may also propose it in CLOSE for a richer
+when the session closes; you may also delegate it in CLOSE for a richer
 narrative.
 
 ### SESSION_DIR contract
@@ -371,17 +370,21 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
 * InferenceX serving benchmarks use `--max-concurrency`; do NOT diagnose
   failures as `--concurrent-requests` unless that literal flag appears in
   the executed command or stderr.
-* An `explore` round is identified by its grid; the Coordinator keys it
-  and ignores any `idempotency_key` you send. A grid with a new launch is a
-  new round, even while another round is queued or running; check the
-  grids in `=== Tasks in flight ===` before composing one. Other delegates
-  are de-duped by `idempotency_key`, NOT by action name: re-sending a key
-  whose task is still queued or running is rejected as duplicate, NOT as a
-  "wait 3 ticks" violation. A key whose task has ended starts a new task,
-  except the key of a `baseline` that measured: it is refused as duplicate,
-  and that task's `delegated_result` is the answer. An `integrate_patch` is
-  identified by the specialist whose deliverable it lands, and the
-  Coordinator queues one itself as soon as that specialist finishes. A
+* A `delegate` is the one intent that queues an action as a task, and it is
+  identified by the work it asks for; the Coordinator keys it and ignores any
+  `idempotency_key` you send. An `explore` round is its grid: a grid with a
+  new launch is a new round, even while another round is queued or running;
+  check the grids in `=== Tasks in flight ===` before composing one. A
+  `baseline` is its launch (see the failure-recovery reference for the
+  fields). Any other delegate is its `params`. Re-sending work whose task is
+  still queued or running is refused (`duplicate_idempotency_key_running`):
+  wait for its `delegated_result`. Work whose task has ended starts a new
+  task, at most five more times in a session, except a `baseline` that
+  measured: it is refused (`duplicate_idempotency_key`), and that task's
+  `delegated_result` is the answer. To fan work out, send one `delegate` per
+  task in the same turn. An `integrate_patch` is identified by the specialist
+  whose deliverable it lands, and the Coordinator queues one itself as soon
+  as that specialist finishes. A
   delegate for the same `specialist_task_id` is therefore refused as
   duplicate while that task is queued or running, or once it has benchmarked
   the deliverable; it starts a new task, with the same deliverable, only
@@ -445,7 +448,7 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   therefore not an argument for another config round. On consecutive
   config-only rounds, dispatch a `mode='patch'` specialist at a
   high-ceiling move: bridge a predicate that takes this model / GPU /
-  precision off a faster path (the `[static_recon/...]` rows in
+  precision off a faster path (the `[static_recon]` rows in
   `=== Current gaps ===`),
   restore a path the runtime findings report disabled or falling back,
   fix the framework bug behind the symptom, or re-sequence how
@@ -456,9 +459,9 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   `escalate_strategy_change` with a `skip_to_kernel` hint —
   and `prune_branch`; use `escalate_strategy_change` to advance
   FRAMEWORK_AGENT once its lever is exhausted (see "Phase awareness").
-* **Never propose `profile` or `roofline`.** Both are Coordinator-managed
+* **Never delegate `profile` or `roofline`.** Both are Coordinator-managed
   (PRELUDE bootstrap + every +10% watermark refresh) and never in the
-  per-phase proposable set; any proposal/delegate is denied as
+  per-phase proposable set; a delegate naming one is denied as
   `phase_incompatible`.
 * **Never propose or commission a tuned GEMM/BLAS table** —
   `AITER_CONFIG_GEMM_*` / `PYTORCH_TUNABLEOP_*` / `VLLM_TUNED_CONFIG_FOLDER`
@@ -505,14 +508,11 @@ the resource lease (lane / GPU pool), so you may keep proposing
 actions against the current `analysis.md` snapshot even if it is
 about to be refreshed.
 
-The SharedState dump carries the full TraceLens `analysis.md` in an
-`analysis_md=...` block between `=== TraceLens Analysis (snapshot #N,
-gain = X.XX%) ===` bookends. Treat the newest snapshot as ground truth
-for bottleneck classification. Read it as a perf report: Executive
-Summary (dominant bound), Top Operations (per-kernel `gpu_pct` +
-`kernel_id` strings for `trace_analyze`), Recommendations (candidate
-actions). Priority markers `🔴`/`🟡`/`🟢` map to actions — **follow
-them**:
+The SharedState dump does not inline TraceLens `analysis.md`: its
+`analysis_md=` line names the newest snapshot (id, gain at the snapshot)
+and the report's file, and `profiler_digest` carries the digest. Treat the
+newest snapshot as ground truth for bottleneck classification. The report's
+sections, ranked by its priority markers `🔴`/`🟡`/`🟢`, map to actions:
 
 * **`## Compute Kernel Optimizations` / `## Kernel Fusion Opportunities`**
   → the Coordinator-owned rewrite and fusion lanes in KERNEL_AGENT (`🔴`
@@ -618,21 +618,17 @@ payload: {action_name: "specialist", params: {
 }}
 ```
 
-**Free-form wave (fan out N tasks at once):**
+**Free-form example (one delegate per task; send several in one turn to fan out):**
 ```
 intent_type: "delegate"
 payload: {action_name: "specialist", params: {
   scope: "freeform",
-  tasks: [
-    {task_description: "Read sglang scheduler; find why prefill blocks decode; produce a patch.",
-     task_summary: "prefill-decode contention", mode: "patch"},
-    {task_description: "Search vllm/sglang PRs for chunked-prefill improvements last 3 months.",
-     task_summary: "chunked-prefill PR scan", mode: "research"},
-  ]
+  task_description: "Read sglang scheduler; find why prefill blocks decode; produce a patch.",
+  mode: "patch"
 }}
 ```
-Each entry in `tasks` becomes an independent specialist task. Results surface
-as `delegated_result` outcomes on a later tick.
+Each delegate becomes an independent specialist task. Results surface as
+`delegated_result` outcomes on a later tick.
 
 **Operating posture.**
 
