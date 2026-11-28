@@ -252,10 +252,7 @@ async def revalidate_source(coord: Any, params: dict[str, Any]) -> None:
     result = await coord.sub.execute_covered(task)
     measurement = result.get("bench_result") or result
     stack_before = len(coord.shared_state.optimization_stack or [])
-    if coord.writeback.is_promotable_result(_INTEGRATE_PATCH, result):
-        await coord.writeback.promote_to_shared_state(_INTEGRATE_PATCH, result, task=task)
-    else:
-        await coord.writeback.handle_unpromotable_result(task, result)
+    await coord.writeback.settle_covered_result(task, result)
     kept = result.get("status") == "kept" and len(coord.shared_state.optimization_stack or []) > stack_before
     if kept:
         _record_canonical_adoption(coord, params, measurement)

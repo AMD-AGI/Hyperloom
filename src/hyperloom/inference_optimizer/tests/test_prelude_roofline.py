@@ -439,7 +439,7 @@ async def test_enable_roofline_false_picks_profile_kind(coord: Coordinator):
 
 
 class _StubSub:
-    """Records tasks handed to ``execute_covered``; optionally lands a fresh snapshot to simulate a completed reprofile."""
+    """Records tasks handed to ``execute_covered``; optionally lands a roofline as its executor does (snapshot + trace)."""
 
     def __init__(self, state: Any = None, landed_tput: float | None = None) -> None:
         self.tasks_run: list[Any] = []
@@ -448,11 +448,11 @@ class _StubSub:
 
     async def execute_covered(self, task: Any) -> dict[str, Any]:
         self.tasks_run.append(task)
-        if self._state is not None and self._landed_tput is not None:
-            self._state.roofline_snapshots.append(
-                {"achieved_tok_per_sec": self._landed_tput},
-            )
-        return {}
+        if self._state is None or self._landed_tput is None:
+            return {}
+        self._state.roofline_snapshots.append({"achieved_tok_per_sec": self._landed_tput})
+        self._state.last_profile_trace = f"/runs/roofline/{task.task_id}/torch_trace"
+        return {"status": "succeeded", "last_profile_trace": self._state.last_profile_trace}
 
 
 def _kernel_agent_ctx() -> Any:
@@ -467,6 +467,7 @@ async def test_kernel_agent_reprofiles_on_change(coord: Coordinator, monkeypatch
     coord.sub = _StubSub(coord.shared_state, landed_tput=120.0)
     monkeypatch.setattr(coord.phase_kernel, "geak_enabled", lambda: False)
     monkeypatch.setattr(coord.phase_kernel, "_gemm_tuning_required_before_kernel_opt", lambda: False)
+    monkeypatch.setattr(coord.phase_kernel, "_fusion_required_before_kernel_opt", lambda: False)
     coord.shared_state.cumulative_gain_validated = 20.0  # cur = 100 * 1.20 = 120
 
     await coord.phase_kernel.run_agent(_kernel_agent_ctx())
@@ -800,6 +801,88 @@ async def test_kernel_entry_reprofile_swallows_failure(coord: Coordinator, error
     await coord.phase_kernel._maybe_reprofile_for_kernel()  # must not raise
 
     assert coord.shared_state.last_roofline_tput == 100.0
+
+
+class _ProfileSub:
+    """``execute_covered`` returning what ``ProfileExecutor`` returns for a usable trace."""
+
+    def __init__(self, result: dict[str, Any]) -> None:
+        self.tasks_run: list[Any] = []
+        self._result = result
+
+    async def execute_covered(self, task: Any) -> dict[str, Any]:
+        self.tasks_run.append(task)
+        return dict(self._result)
+
+
+@pytest.mark.asyncio
+async def test_kernel_entry_plain_profile_adopts_its_fresh_trace_at_unchanged_tput(coord: Coordinator):
+    """A plain-profile reprofile at the anchor tput is promoted: Forge reads the new trace, not the old analysis."""
+    state = coord.shared_state
+    state.enable_roofline = False
+    state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
+    state.last_roofline_tput = 100.0
+    state.last_profile_trace = "/runs/profile/old/rank0.pt.trace.json.gz"
+    state.last_trace_analyze = {"trace_input": state.last_profile_trace, "roofline_snapshot_id": 1}
+    state.last_profile_workload = {}  # the old trace predates the active workload
+    fresh = "/runs/profile/new/rank0.pt.trace.json.gz"
+    coord.sub = _ProfileSub(
+        {"status": "succeeded", "output_throughput": 100.0, "completed_requests": 8, "main_trace_path": fresh}
+    )
+
+    await coord.phase_kernel._maybe_reprofile_for_kernel()
+
+    assert [t.kind for t in coord.sub.tasks_run] == ["profile"]
+    assert state.last_profile_trace == fresh
+    assert state.last_profile_status == "succeeded"
+    assert state.last_trace_analyze == {}
+    assert state.last_profile_workload == state.profile_workload_context()
+
+
+_OLD_TRACE = "/runs/profile/old/rank0.pt.trace.json.gz"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result", "trace_after", "failures"),
+    [
+        # The round measured, but ProfileExecutor found no trace files: settled as a failed profile, which a queued
+        # profile also records by dropping the trace it could not certify.
+        (
+            {"status": "failed", "error_class": "no_trace_files", "output_throughput": 100.0, "completed_requests": 8},
+            "",
+            ["profile"],
+        ),
+        # The round measured nothing: unpromotable, the trace stays.
+        ({"status": "failed", "error_class": "server_start_failed"}, _OLD_TRACE, ["profile"]),
+        # A multi-node round that measured but whose trace dir held no fresh trace: succeeded, nothing to adopt.
+        (
+            {"status": "succeeded", "output_throughput": 120.0, "completed_requests": 8, "trace_files": []},
+            _OLD_TRACE,
+            [],
+        ),
+    ],
+    ids=["no-trace-files", "no-measurement", "measured-without-trace"],
+)
+async def test_kernel_entry_failed_plain_profile_does_not_land(
+    coord: Coordinator, result: dict[str, Any], trace_after: str, failures: list[str]
+):
+    """A plain-profile reprofile that yields no trace never re-anchors on the trace it lacks."""
+    state = coord.shared_state
+    state.enable_roofline = False
+    state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
+    state.last_roofline_tput = 100.0
+    state.last_profile_trace = _OLD_TRACE
+    state.last_profile_workload = {}
+    state.cumulative_gain_validated = 20.0  # cur = 120: a landed reprofile would re-anchor there
+    coord.sub = _ProfileSub(result)
+
+    await coord.phase_kernel._maybe_reprofile_for_kernel()
+
+    assert state.last_profile_trace == trace_after
+    assert state.last_roofline_tput == 100.0
+    assert not state.last_profile_workload
+    assert [f.get("action") for f in state.last_action_failures] == failures
 
 
 @pytest.mark.asyncio

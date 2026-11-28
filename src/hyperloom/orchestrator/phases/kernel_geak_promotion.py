@@ -169,10 +169,7 @@ class _GeakPromotionMixin:
             }
             state.save(self.session_dir)
             raise
-        if self._coord.writeback.is_promotable_result("explore", result):
-            await self._coord.writeback.promote_to_shared_state("explore", result, task=task)
-        else:
-            await self._coord.writeback.handle_unpromotable_result(task, result)
+        await self._coord.writeback.settle_covered_result(task, result)
 
     def _geak_win_already_recorded(self) -> bool:
         """Whether a GEAK e2e win is already in this session's state."""
