@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import shlex
+import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -33,6 +34,8 @@ from inference_suite.multinode import (
     SshError,
     cluster_commands,
     cluster_of,
+    engine_urls,
+    engines_gone,
     exportable_env_key,
     placed_launch,
     read_record,
@@ -41,6 +44,7 @@ from inference_suite.multinode import (
     restart,
     split_launcher_flags,
     stop,
+    worker_hosts,
     write_record,
 )
 
@@ -49,6 +53,8 @@ from ._internal.pd_handoff import (
     PD_BACKENDS,
     PODS_KEY,
     SSH_BACKENDS,
+    TRACE_SHARE_ERROR_KEY,
+    TRACE_SHARED_KEY,
     handed_node_list,
     is_pd_backend,
     is_pd_state,
@@ -63,6 +69,7 @@ PD_DIGEST_KEY = "pd_launch_digest"
 PREFILL_EXTRA_ENV = "PD_PREFILL_EXTRA_ARGS"
 DECODE_EXTRA_ENV = "PD_DECODE_EXTRA_ARGS"
 SERVER_LOG_DIR_ENV = "HYPERLOOM_MN_SERVER_LOG_DIR"
+TRACE_SHARE_PROBE_TIMEOUT_S = 30
 
 _SUITE_ERRORS = (LaunchError, NodeListError, PdRecordError, PdResolveError, SshError, OSError, ValueError)
 
@@ -154,9 +161,11 @@ def _session_cluster(state: dict[str, Any]) -> _SessionCluster:
     return _SessionCluster(record, placed_launch(nodes, launch), cluster_of(nodes, record))
 
 
-def bind_launch(state: dict[str, Any], record: Path, digest: str) -> None:
-    """Record the launch frozen at ``record`` in ``state``: its path, its digest and the pod of every host it serves
-    on; refused when ``digest`` is set and names another launch.
+def bind_launch(state: dict[str, Any], record: Path, digest: str, trace_root: Path) -> str:
+    """Record the launch frozen at ``record`` in ``state``: its path, its digest, the pod of every host it serves on
+    and whether every engine host reads ``trace_root``; refused when ``digest`` is set and names another launch.
+
+    Returns why the engine hosts do not share ``trace_root`` (``""`` when they do).
 
     Raises:
         PdSessionError: no node list is handed over, or the launch cannot be read, verified or placed.
@@ -166,6 +175,7 @@ def bind_launch(state: dict[str, Any], record: Path, digest: str) -> None:
         session = _session_cluster(state)
     state[PD_DIGEST_KEY] = session.launch.digest()
     _stamp_launch_pods(state, session.launch, session.cluster.nodes)
+    return _record_trace_share(state, session, trace_root)
 
 
 def restart_round(state: dict[str, Any], shared_args: str, options: LaunchOptions) -> PdLaunch:
@@ -215,6 +225,29 @@ def stop_cluster(state: dict[str, Any]) -> None:
         stop(session.launch, session.cluster)
 
 
+def session_engine_urls(state: dict[str, Any]) -> dict[str, list[str]]:
+    """The HTTP base URL of every prefill and decode engine worker, as the frozen launch is placed on the node list.
+
+    Raises:
+        PdSessionError: no node list is handed over, or the frozen launch cannot be verified or placed.
+    """
+    with _as_session_error("the PD engines cannot be placed"):
+        session = _session_cluster(state)
+        return engine_urls(session.launch, session.cluster.nodes)
+
+
+def session_worker_hosts(state: dict[str, Any]) -> dict[str, list[tuple[str, ...]]]:
+    """The hosts of every engine worker per role, each its first host first, in the order of
+    :func:`session_engine_urls`.
+
+    Raises:
+        PdSessionError: no node list is handed over, or the frozen launch cannot be verified or placed.
+    """
+    with _as_session_error("the PD engines cannot be placed"):
+        launch = _session_cluster(state).launch
+        return {role.value: worker_hosts(launch.role(role)) for role in launch.served_roles}
+
+
 def _stamp_launch_pods(state: dict[str, Any], launch: PdLaunch, nodes: NodeList) -> None:
     """Record every host of ``launch``, placed on ``nodes``, in ``state``'s ``pods`` as a pod with the command it
     serves, the shape readers of the multi-node state such as GEAK take a cluster in.
@@ -232,14 +265,65 @@ def _stamp_launch_pods(state: dict[str, Any], launch: PdLaunch, nodes: NodeList)
     state[PODS_KEY] = pods
 
 
+def _host_reads_marker(cluster: Cluster, host: str, marker: Path, token: str) -> str:
+    """``""`` when ``host`` reads ``token`` from ``marker`` over SSH, else why it does not."""
+    result = cluster.client.run(host, f"cat {shlex.quote(str(marker))}", TRACE_SHARE_PROBE_TIMEOUT_S)
+    if result.returncode != 0:
+        detail = result.stderr.strip()[-200:]
+        return f"engine host {host}: cannot read {marker} (rc={result.returncode}) {detail}".strip()
+    if result.stdout.strip() != token:
+        return f"engine host {host}: {marker} is a different file there"
+    return ""
+
+
+def _record_trace_share(state: dict[str, Any], session: _SessionCluster, trace_root: Path) -> str:
+    """Record on ``state`` whether every engine host of ``session`` reads a marker written here under
+    ``trace_root``; returns why not (``""`` when shared)."""
+    token = uuid.uuid4().hex
+    marker = trace_root / f".share_probe-{token}"
+    try:
+        trace_root.mkdir(parents=True, exist_ok=True)
+        marker.write_text(token, encoding="utf-8")
+    except OSError as exc:
+        reason = f"cannot write {marker}: {exc}"
+    else:
+        try:
+            launch = session.launch
+            hosts = dict.fromkeys(host for role in launch.served_roles for host in launch.role(role).hosts)
+            reason = next(filter(None, (_host_reads_marker(session.cluster, h, marker, token) for h in hosts)), "")
+        except _SUITE_ERRORS as exc:
+            reason = f"the engine hosts cannot be probed: {exc}"
+        finally:
+            marker.unlink(missing_ok=True)
+    state[TRACE_SHARED_KEY] = not reason
+    if reason:
+        state[TRACE_SHARE_ERROR_KEY] = reason
+    else:
+        state.pop(TRACE_SHARE_ERROR_KEY, None)
+    return reason
+
+
+def engines_lost(state: dict[str, Any]) -> str:
+    """Why the session's engines are no longer served, or cannot be checked (``""`` when every one still runs)."""
+    try:
+        session = _session_cluster(state)
+        gone = engines_gone(session.launch, session.cluster)
+    except (*_SUITE_ERRORS, PdSessionError) as exc:
+        return f"the PD engines cannot be checked: {exc}"
+    return ", ".join(f"{command.role} engine on {command.host} is gone" for command in gone)
+
+
 __all__ = [
     "INFERA",
     "PD_BACKENDS",
     "PD_DIGEST_KEY",
     "PD_LAUNCH_KEY",
     "SSH_BACKENDS",
+    "TRACE_SHARED_KEY",
+    "TRACE_SHARE_ERROR_KEY",
     "PdSessionError",
     "bind_launch",
+    "engines_lost",
     "freeze_launch",
     "handed_node_list",
     "is_pd_backend",
@@ -247,5 +331,7 @@ __all__ = [
     "launch_options",
     "node_list_backend",
     "restart_round",
+    "session_engine_urls",
+    "session_worker_hosts",
     "stop_cluster",
 ]
