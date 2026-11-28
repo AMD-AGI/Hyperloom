@@ -325,17 +325,16 @@ def _cpu_selfcheck_block(inp: SpecialistPromptInputs) -> list[str]:
 
 def _freeform_block(inp: SpecialistPromptInputs) -> list[str]:
     """Free-form mandate appended when ``scope == 'freeform'``. The
-    specialist is NOT bound
-    to the domain catalogue — the Orchestration ``task_description`` is the
-    whole mandate. The single deliverable is still ONE ``specialist_done``.
+    specialist is NOT bound to the domain catalogue — the Orchestration task
+    rendered in §0 is the whole mandate. The single deliverable is still ONE
+    ``specialist_done``.
 
     Args:
-        inp: The specialist prompt inputs (reads ``task_description``).
+        inp: The specialist prompt inputs.
 
     Returns:
         The rendered free-form mandate lines.
     """
-    desc = (inp.task_description or "").strip() or "(no task description provided)"
     if _authors_patches(inp):
         reach = "upstream PRs, host probing, source patches"
         deliverable = "``proposal_set`` + ``patches_written``"
@@ -347,12 +346,8 @@ def _freeform_block(inp: SpecialistPromptInputs) -> list[str]:
         "### Free-form mandate (scope = freeform)",
         "",
         "You are dispatched as a **free-form** specialist: you are NOT bound to "
-        + "the domain catalogue above. The Orchestration mandate below is your "
-        + f"whole task — investigate it wherever it leads (framework internals, {reach}).",
-        "",
-        "Mandate from Orchestration:",
-        "",
-        f"> {desc}",
+        + "the domain catalogue above. The task from Orchestration in Section 0 is "
+        + f"your whole task — investigate it wherever it leads (framework internals, {reach}).",
         "",
         "Set ``scope='freeform'`` on each proposal. Your single deliverable is "
         + f"still ONE ``specialist_done`` carrying {deliverable}. Never "
@@ -400,7 +395,7 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
     """Render §0: deliverable contract, run status, and task-kind brief."""
     # Deliverable line based on scope × mode.
     if inp.scope == "freeform":
-        anchor = inp.task_description.split("\n")[0].strip()[:120]
+        anchor = ""
         deliverable = "freeform investigation — see task description"
     else:
         anchor = inp.gap_canonical_id
@@ -419,6 +414,7 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
     if anchor:
         rows.append(f"- anchor: `{anchor}`")
     rows.extend(_mandate_run_status(inp))
+    rows.extend(_mandate_task(inp))
 
     rows.extend(
         [
@@ -464,6 +460,15 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
             rows.append(f"  - {ref} [{status}]{gain_str}{why_str}")
 
     return rows
+
+
+def _mandate_task(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the dispatch's task from Orchestration as a quote; empty when none was given."""
+    task = inp.task_description.strip()
+    if not task:
+        return []
+    quoted = [f"> {line}" for line in task.splitlines()]
+    return ["", "Task from Orchestration (your target for this dispatch):", "", *quoted]
 
 
 def _mandate_run_status(inp: SpecialistPromptInputs) -> list[str]:
