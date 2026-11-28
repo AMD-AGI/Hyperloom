@@ -4,15 +4,15 @@
 """The shared compiled-code cache of the hosted toolbox: the directory named, the store it publishes accepted tests'
 compiles into, and the prune at the session's start.
 
-No hosted runner reads the directory. What is proved here is the host's side: which directory it publishes to, that it
-uses none another account could change and goes on, that a verified result's compiles reach it through the hosted
-executor and backend, and that its result records the cache states.
+No runner reads the directory: the host serves the runners from it (``hyperloom.measure.jit.serve``, proved in the
+measure package). What is proved here is the host's side: which directory it serves and publishes from, that it uses
+none another account could change and goes on, that a verified result's compiles reach it through the hosted executor
+and backend, and that its result records the cache states.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import stat
 from dataclasses import replace
@@ -29,7 +29,7 @@ from hyperloom.measure.tests.hosted_fixtures import make_rig, point_yaml
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
 from hyperloom_multibranch.toolbox.hosted_toolbox import HostedOptions
-from hyperloom_multibranch.toolbox.jit_store import JIT_STORE_ENV, JIT_STORE_NOTE, REFUSED_HOSTED
+from hyperloom_multibranch.toolbox.jit_store import JIT_STORE_ENV, REFUSED_HOSTED
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.tests.helpers import build, req
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import PointPlanner
@@ -77,7 +77,7 @@ def test_a_store_its_group_or_others_can_write_is_not_published_to_and_the_sessi
 ) -> None:
     """The runners load what it holds as compiled code: whoever else can write it could feed them. The toolbox is built
     inside the session, where a hosted run that raised would be started again into the same refusal: the session goes
-    on without publishing, and says so once in its log and in its directory."""
+    on without publishing, and says so once in its log."""
     store = tmp_path / "jit-store"
     store.mkdir()
     store.chmod(mode)
@@ -85,14 +85,11 @@ def test_a_store_its_group_or_others_can_write_is_not_published_to_and_the_sessi
 
     toolbox = _toolbox(None, tmp_path)
 
-    assert toolbox.backend._config.jit_store is None, "nothing is published"
+    assert toolbox.backend._config.jit_store is None, "nothing is served or published"
     assert stat.S_IMODE(store.stat().st_mode) == mode and not any(store.iterdir()), "and it is left as it is"
     (warning,) = [record.getMessage() for record in caplog.records if "jit cache" in record.getMessage()]
     assert f"runs without the compiled-code cache {store}" in warning and "only it can write" in warning
-    assert "this host publishes nothing to it" in warning
-    note = json.loads((tmp_path / "session" / JIT_STORE_NOTE).read_text())
-    assert note["store"] == str(store) and note["published"] is False and "only it can write" in note["reason"]
-    assert note["without"] == REFUSED_HOSTED
+    assert "neither serves it to the runners nor publishes to it" in warning and REFUSED_HOSTED in warning
 
 
 @pytest.mark.parametrize("error", [NotADirectoryError, PermissionError])
@@ -115,11 +112,9 @@ def test_a_store_that_cannot_be_made_is_refused_like_one_the_check_refuses_and_t
 
     toolbox = _toolbox(None, tmp_path)
 
-    assert toolbox.backend._config.jit_store is None, "nothing is published"
+    assert toolbox.backend._config.jit_store is None, "nothing is served or published"
     (warning,) = [record.getMessage() for record in caplog.records if "jit cache" in record.getMessage()]
     assert f"cannot be made or checked ({error.__name__}" in warning and REFUSED_HOSTED in warning
-    note = json.loads((tmp_path / "session" / JIT_STORE_NOTE).read_text())
-    assert note["published"] is False and error.__name__ in note["reason"] and note["without"] == REFUSED_HOSTED
 
 
 def test_building_the_toolbox_prunes_a_key_no_test_has_used_for_long(

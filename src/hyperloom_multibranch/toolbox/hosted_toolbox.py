@@ -216,11 +216,11 @@ class HostedOptions:
     session that lends none builds no branch leases (``HostedToolbox.leases`` is ``None``) and reads no ``dev`` template,
     whatever ``dev`` key the host gave. A hosted session sets it from its ``dev_leases`` and ``agents``
     (:class:`~hyperloom_multibranch.scheduling.hosted_peers.HostedSandboxes`).
-    ``jit_store`` (else ``HYPERLOOM_JIT_STORE``) is the shared compiled-code cache this host checks and prunes as the
-    session starts (:func:`~.jit_store.session_jit_store`, which says what happens to one it refuses). Nothing arrives
-    in it yet: no sandbox runner reads it or stages a contribution, so nothing is published. It belongs on this host's
-    own disk, where no sandbox can write it (a sandbox's code could put snapshots there that later tests load), and the
-    ``measurement`` template must neither mount it nor set ``HYPERLOOM_JIT_CACHE``.
+    ``jit_store`` (else ``HYPERLOOM_JIT_STORE``) is the shared compiled-code cache this host serves its runners from
+    before their server starts (:mod:`hyperloom.measure.jit.serve`), publishes accepted tests' compiles to and prunes as
+    the session starts (:func:`~.jit_store.session_jit_store`, which says what happens to one it refuses). No sandbox
+    reads it: it belongs on this host's own disk, where no sandbox can write it (a sandbox's code could put snapshots
+    there that later tests load), and the ``measurement`` template must neither mount it nor set ``HYPERLOOM_JIT_CACHE``.
     """
 
     policy: QueuePolicy | None = None
@@ -464,10 +464,10 @@ def _acceptance_with_prompts(
     return named
 
 
-def _session_jit_store(options: HostedOptions, session_dir: Path) -> DirJitStore | None:
+def _session_jit_store(options: HostedOptions) -> DirJitStore | None:
     """The compiled-code cache this host publishes to, checked and pruned; ``None`` when none is named or it is refused."""
     root = named_jit_store(options.jit_store, os.environ)
-    return session_jit_store(root, session_dir, REFUSED_HOSTED) if root is not None else None
+    return session_jit_store(root, REFUSED_HOSTED) if root is not None else None
 
 
 def build_hosted_toolbox(
@@ -536,7 +536,7 @@ def build_hosted_toolbox(
         archive=session_archive(options.archive, directory),
         max_parallel_tests=parallel,
         poll_interval_sec=options.poll_interval_sec,
-        jit_store=_session_jit_store(options, directory),
+        jit_store=_session_jit_store(options),
     )
     backend = started_backend(provider, config)
     executor = HostedExecutor(

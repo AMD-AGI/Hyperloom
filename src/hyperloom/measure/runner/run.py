@@ -54,6 +54,7 @@ from hyperloom.measure.phases import (
 from hyperloom.measure.pins import IMAGE_DIGEST_VAR
 from hyperloom.measure.jit.native.config import store_from_environment
 from hyperloom.measure.jit.native.laying import NamedBuild, NativeLayError, SheetBuilds, sheet_builds
+from hyperloom.measure.jit import serve as jit_serve
 from hyperloom.measure.jit.session import JitCacheSession
 from hyperloom.measure.runner import hardware
 from hyperloom.measure.runner.card_watch import BEFORE_TEST, CardWatch
@@ -73,7 +74,15 @@ from hyperloom.measure.farm import (
     server_python,
     verify_farm,
 )
-from hyperloom.measure.runner.jit import STAGING_DIR, ColdStart, Surroundings, build_session, card_arch, cold_start
+from hyperloom.measure.runner.jit import (
+    JIT_CACHE_ENV,
+    STAGING_DIR,
+    ColdStart,
+    Surroundings,
+    build_session,
+    card_arch,
+    cold_start,
+)
 from hyperloom.measure.runner.datasets_cache import DatasetsNeeded, datasets_needed, local_datasets_cache
 from hyperloom.measure.runner.import_outcome import clear_import_notes, install_import_watch, refine_imports
 from hyperloom.measure.runner.jit_outcome import refine_outcome
@@ -113,6 +122,8 @@ __all__ = ["run"]
 log = logging.getLogger(__name__)
 
 _START_FAILED = "runner_start_failed"
+#: Below the test's compile directory: what the host served of the compiled-code cache, read as the session's store.
+_SERVED_DIR = "jit-served"
 _SPEC_REJECTED = "spec_rejected"
 _NODE_FAULT = "node_fault"
 _FAILED = "failed"
@@ -606,10 +617,27 @@ def _jit_session(
     ctx: _Context, spec: MeasurementSpec, points: list[Path], farm: Farm | None, facts
 ) -> JitCacheSession | None:
     """The test's use of the shared compiled-code cache, or ``None`` when none is configured (``measure.runner.jit``);
-    its private directories lie in the test's compile directory, its staged contribution in the output."""
-    private = _compile_dir(ctx, spec.request_id) / "jit"
-    around = Surroundings(ctx.environ, private, ctx.out_dir / STAGING_DIR, ctx.read_blob, ctx.notes)
+    its private directories lie in the test's compile directory, its staged contribution in the output, and what the
+    host serves (:func:`_ask_host`) in a directory of the test's own the session reads as its store."""
+    compile_dir = _compile_dir(ctx, spec.request_id)
+    served = compile_dir / _SERVED_DIR if _served(ctx) else None
+    around = Surroundings(ctx.environ, compile_dir / "jit", ctx.out_dir / STAGING_DIR, ctx.read_blob, ctx.notes, served)
     return build_session(spec, points, farm, facts[0] if facts else None, around)
+
+
+def _served(ctx: _Context) -> bool:
+    """Whether the host offered to serve the cache and no ``HYPERLOOM_JIT_CACHE`` names a store to read directly."""
+    return not ctx.environ.get(JIT_CACHE_ENV, "").strip() and jit_serve.offered(ctx.in_dir)
+
+
+def _ask_host(ctx: _Context, spec: MeasurementSpec, session: JitCacheSession | None, progress: Progress) -> None:
+    """Ask the host that offered the cache for the keys of this test, now that they are known and before any server
+    starts (``measure.jit.serve``)."""
+    if session is None or not _served(ctx):
+        return
+    served = _compile_dir(ctx, spec.request_id) / _SERVED_DIR
+    ctx.notes.extend(jit_serve.ask(ctx.in_dir, ctx.out_dir, session.wanted, served, progress.phase))
+    progress.phase("preparing")
 
 
 def _own_directories(
@@ -658,6 +686,7 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     surface = _surface_sha256(points)
     _build_image_own_once()
     session = _jit_session(ctx, spec, points, farm, facts)
+    _ask_host(ctx, spec, session, progress)
     arch = card_arch(spec, facts[0] if facts else None)
     linking = time.monotonic()
     with local_datasets_cache(
