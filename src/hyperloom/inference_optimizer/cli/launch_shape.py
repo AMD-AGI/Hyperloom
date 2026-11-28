@@ -40,23 +40,13 @@ def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
     """Resolve planning context; native AgentX serving context remains in its YAML."""
     if getattr(args, "max_model_len", None):
         return int(args.max_model_len), "--max-model-len"
-    lengths_from_data = request_lengths_from_data()
     try:
-        resolved = resolve_run_max_model_len(
-            str(args.model or ""), args.isl, args.osl, lengths_from_data=lengths_from_data
+        return resolve_run_max_model_len(
+            str(args.model or ""), args.isl, args.osl, lengths_from_data=request_lengths_from_data()
         )
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         raise SystemExit(2)
-    if lengths_from_data and resolved[1] == "auto":
-        # Model not on disk yet (uncached HF id).
-        resolved_later = "The AgentX serving context is resolved from its workload configuration."
-        print(
-            "NOTE: Model context is unavailable locally; using a planning estimate. "
-            + (resolved_later if _agentx_enabled() else _DATASET_ESTIMATE_NOTE),
-            file=sys.stderr,
-        )
-    return resolved
 
 
 def resolve_run_max_model_len(model: str, isl: int, osl: int, *, lengths_from_data: bool) -> tuple[int, str]:
@@ -64,7 +54,8 @@ def resolve_run_max_model_len(model: str, isl: int, osl: int, *, lengths_from_da
     else the model's native context when ``lengths_from_data`` (an AgentX trace or a prompt dataset sets the requests'
     lengths, not ISL/OSL), else ISL+OSL+headroom clamped to that context (``"auto"``, also where it cannot be read).
     ``hyperloom optimize`` and ``hyperloom-multibranch run`` settle the context their servers are given and their
-    accuracy evaluation runs in here.
+    accuracy evaluation runs in here. When the requests' lengths come from data and the model's context cannot be read
+    (a model not on disk yet), a NOTE on stderr says the value is a planning estimate.
 
     Raises:
         ValueError: When ``$MAX_MODEL_LEN`` is not a positive integer.
@@ -82,6 +73,12 @@ def resolve_run_max_model_len(model: str, isl: int, osl: int, *, lengths_from_da
         native = _load_model_max_position_embeddings(model)
         if native:
             return int(native), "native-context"
+        resolved_later = "The AgentX serving context is resolved from its workload configuration."
+        print(
+            "NOTE: Model context is unavailable locally; using a planning estimate. "
+            + (resolved_later if _agentx_enabled() else _DATASET_ESTIMATE_NOTE),
+            file=sys.stderr,
+        )
     return _resolve_max_model_len(isl, osl, model), "auto"
 
 

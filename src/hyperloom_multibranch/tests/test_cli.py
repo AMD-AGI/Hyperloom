@@ -195,7 +195,9 @@ def test_reference_help_says_which_name_briefs_inferencex_reference_launches(
     assert f"is given as --reference {INFERENCEX_REFERENCE}=DIR;" in words
 
 
-def test_run_defaults() -> None:
+def test_run_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MAX_MODEL_LEN", raising=False)
+
     assert _settings() == RunSettings(
         Workload(
             "/models/Llama-3-8B",
@@ -342,16 +344,30 @@ def test_a_run_records_the_context_hyperloom_optimize_settles_for_the_model_its_
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / "Llama-3-8B").mkdir()
-    (tmp_path / "Llama-3-8B" / "config.json").write_text(json.dumps({"max_position_embeddings": 4096}))
+    (tmp_path / "Llama-3-8B" / "config.json").write_text(json.dumps({"max_position_embeddings": 32768}))
     monkeypatch.setenv("HL_MODEL_BASE", str(tmp_path))
     monkeypatch.delenv("MAX_MODEL_LEN", raising=False)
+    monkeypatch.delenv("DATASET_PATH", raising=False)
 
-    assert _settings().workload.inferencex.max_model_len == 4096
+    assert _settings().workload.inferencex.max_model_len == 1024 + 512 + 4096
+    monkeypatch.setenv("DATASET_PATH", "/data/prompts.jsonl")
+    assert _settings().workload.inferencex.max_model_len == 32768
     monkeypatch.setenv("MAX_MODEL_LEN", "10240")
     assert _settings().workload.inferencex.max_model_len == 10240
     monkeypatch.setenv("MAX_MODEL_LEN", "ten")
     with pytest.raises(ValueError, match="MAX_MODEL_LEN='ten' is invalid"):
         _settings()
+
+
+def test_a_dataset_session_whose_model_is_not_on_disk_yet_says_its_context_is_a_planning_estimate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("HL_MODEL_BASE", str(tmp_path))
+    monkeypatch.delenv("MAX_MODEL_LEN", raising=False)
+    monkeypatch.setenv("DATASET_PATH", "/data/prompts.jsonl")
+
+    assert _settings().workload.inferencex.max_model_len == 1024 + 512 + 4096
+    assert "using a planning estimate" in capsys.readouterr().err
 
 
 def test_a_manifest_written_before_the_prompt_dataset_and_context_were_recorded_reads_back_on_neither(
