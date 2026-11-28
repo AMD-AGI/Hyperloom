@@ -174,6 +174,27 @@ def test_consume_static_recon_seeds_gaps(tmp_path):
     assert "Bridge:" in gap["symptom"]
 
 
+def test_consume_static_recon_names_the_finding_each_bridge_clears(tmp_path):
+    stub = _stub_coord(tmp_path)
+    finding = "feature_disabled:HIP shared experts fusion"
+    base = {"predicate_file": "srt/models/glm5_next.py", "why_disabled_here": "TP4/TP8 only"}
+    payload = {
+        "recon": {
+            "bridge_candidates": [
+                {**base, "id": "fusion_gate", "resolves_finding": finding},
+                {**base, "id": "traceback", "resolves_finding": "runtime.traceback:TypeError"},
+                {**base, "id": "no_subject", "resolves_finding": "feature_disabled"},
+                {**base, "id": "none_named"},
+            ],
+        },
+    }
+    InternalTasksPhase.consume_static_recon(stub, payload)
+
+    gap = stub.shared_state.find_gap("gap.static_recon.fusion_gate")
+    assert f"Clears runtime finding {finding}." in gap["symptom"]
+    assert "Clears runtime finding" not in stub.shared_state.find_gap("gap.static_recon.traceback")["symptom"]
+
+
 def test_consume_static_recon_drops_incomplete_candidates(tmp_path):
     stub = _stub_coord(tmp_path)
     payload = {
