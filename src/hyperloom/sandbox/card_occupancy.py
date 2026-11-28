@@ -31,10 +31,14 @@ server and the processes it spawned, a rank of a server with several on each of 
 this path, the kernel's process ids being the host's and its records naming no process the container can see: a process
 of the test that no holder pairs with does not count against the card. Every rank of a server with several reports
 its memory on the render node of every card of the server, while the kernel lists it on its own card only, so each process
-of the test pairs with one holder across all the cards, and the lone holders of the other cards pair first. A holder that
-is not the test's still passes when its memory is within :data:`UNACCOUNTED_VRAM_TOLERANCE` of that of a process of the
-test on the card that no holder of any card pairs with (one the kernel does not list yet): a foreign holder of about the
-same memory cannot be told from it. A foreign holder of other memory is counted at any size.
+of the test pairs with one holder across all the cards, and the lone holders of the other cards pair first; the holders
+of a card passed by a launcher's place keep the processes they pair with as well. Memory alone leaves a window: while a
+process of the test is not paired with its own holder (the kernel does not list it yet, or lists it more than
+:data:`UNACCOUNTED_VRAM_TOLERANCE` from what its files say), one foreign holder within the tolerance of what that process
+reports on a card passes there, so while one rank of a server with several is unlisted or listed so, a foreign holder of
+about a rank's memory passes on any card of the server; and as the pairing may re-pair the test's own holders, the one
+that passes may sit on another card, further than the tolerance from the unpaired process, beside a process of the test
+reporting memory near its own. A foreign holder that no process of the test left free comes near is counted at any size.
 Beyond that pairing, what the test's processes report on a card's render node does not count as holders of that card: a rank of a server with
 several reports its whole memory on every render node of the server, while the kernel lists it on its own card only. A
 holder with almost no memory (:data:`NEGLIGIBLE_VRAM`) and no queue, such as a launcher that only initialised the GPU,
@@ -282,9 +286,15 @@ class CardReading:
         (:meth:`_own_memory`), to within :data:`UNACCOUNTED_VRAM_TOLERANCE` and one to one across all the cards (each
         process with one holder), with as many lone holders of the other cards and the holders of the cards that passed so
         before still matched (:func:`_pairs`): a server and the processes it spawned that each hold memory on the card,
-        ranks of a server with several among them, are the test's, whatever their memory. A holder of about the memory of
-        a process of the test on the card that no holder of any card pairs with passes too: memory alone cannot tell it
-        from the test's.
+        ranks of a server with several among them, are the test's, whatever their memory. The holders of a card that
+        passes by a launcher's place and pair keep their processes for the cards after it (:func:`_still_paired`), so a
+        rank there vouches for no holder elsewhere.
+
+        Memory alone cannot tell a foreign holder from a process of the test that no holder pairs with: while one is not
+        listed by the kernel, or listed more than the tolerance from what its files say, one foreign holder near what it
+        reports on a card passes there. A rank of a server with several reports its memory on every card of the server,
+        so while one rank is unlisted or listed so, a foreign holder of about a rank's memory passes on any card of the
+        server, and the matching may re-pair the test's own holders to let one pass on another card than that rank's.
 
         The test's open DRM files on a card's render node do not raise what is allowed there: each rank of a server with
         several reports its whole memory on every render node of the server, while the kernel lists it on its own card
@@ -308,6 +318,7 @@ class CardReading:
                 continue
             if spare and len(resident) == 2 and self._launcher_beside(card, resident, launchers):
                 spare -= 1
+                paired.extend(_still_paired(resident, [*alone, *paired], alone_paired + len(paired), memory))
                 continue
             named = ", ".join(f"host pid {h.pid} with {h.vram / _GIB:.1f} GiB" for h in resident)
             found.append(
@@ -460,6 +471,19 @@ def _pairs(holders: Sequence[Holder], memory: Mapping[int, Mapping[int, int]]) -
         return False
 
     return sum(pair(holder, set()) for holder in range(len(holders)))
+
+
+def _still_paired(
+    resident: Sequence[Holder], kept: Sequence[Holder], count: int, memory: Mapping[int, Mapping[int, int]]
+) -> list[Holder]:
+    """The holders of ``resident``, largest first, that pair (:func:`_pairs`) beside ``kept``, of which ``count`` pair,
+    and beside each other: what a card passed by a launcher's place takes from the test's processes, so that a process
+    whose holder is on that card cannot vouch for a holder of another card."""
+    taken: list[Holder] = []
+    for holder in sorted(resident, key=lambda h: -h.vram):
+        if _pairs([*kept, *taken, holder], memory) == count + len(taken) + 1:
+            taken.append(holder)
+    return taken
 
 
 def _descends(procfs: Path, pid: int, roots: frozenset[int]) -> bool:

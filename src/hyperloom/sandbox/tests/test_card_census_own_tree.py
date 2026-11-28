@@ -371,13 +371,14 @@ _SPAWN_COMMAND = (
 _SOLO_HOST, _SOLO_CHILD_HOST, _OTHER_HOST = 3600001, 3600002, 3700002
 
 
-def _kimi_round(tree: KernelTree, *, loaded: bool = False) -> OwnProcesses:
+def _kimi_round(tree: KernelTree, *, loaded: bool = False, child: bool = True) -> OwnProcesses:
     """The production Kimi round: its runner, the server under it, the eight ranks the server spawned (1153 on card 0 to
     1160 on card 7) and the spawn child 1336. Each rank is listed by the kernel on its own card only and has a DRM file on
     the render node of every card of the server, each saying its memory; 1336 holds its memory on card 0 through a file
     of its own. While loading (the record) every rank has 1.7 GiB, as rank 0 did; ``loaded``, every rank's files say the
     production figures and the kernel lists the rank with what its own card's file says (the kernel's figure for a loaded
-    rank is not in the record). The round owns what is under its runner."""
+    rank is not in the record). Without ``child`` the spawn child is not started. The round owns what is under its
+    runner."""
     tree.process(_KIMI_RUNNER, command=("python3", "-m", "hyperloom.measure.runner"))
     tree.process(_KIMI_SERVER, parent=_KIMI_RUNNER, command=("python3", "-m", "sglang.launch_server", "--tp", "8"))
     own_kib, peer_kib = (_RANK_OWN_KIB, _RANK_PEER_KIB) if loaded else (_RANK_LOADING_VRAM >> 10,) * 2
@@ -386,9 +387,10 @@ def _kimi_round(tree: KernelTree, *, loaded: bool = False) -> OwnProcesses:
         tree.holds(host, card, vram=own_kib << 10, queues=4)
         for node in _KIMI_CARDS:
             tree.renders(rank, node, kib=own_kib if node == card else peer_kib, descriptor=10 + node)
-    tree.process(_KIMI_CHILD, parent=_KIMI_SERVER, command=_SPAWN_COMMAND)
-    tree.holds(_KIMI_CHILD_HOST, _SPAWN_CARD, vram=_CHILD_VRAM, queues=2)
-    tree.renders(_KIMI_CHILD, _SPAWN_CARD, kib=_CHILD_VRAM >> 10)
+    if child:
+        tree.process(_KIMI_CHILD, parent=_KIMI_SERVER, command=_SPAWN_COMMAND)
+        tree.holds(_KIMI_CHILD_HOST, _SPAWN_CARD, vram=_CHILD_VRAM, queues=2)
+        tree.renders(_KIMI_CHILD, _SPAWN_CARD, kib=_CHILD_VRAM >> 10)
     return OwnProcesses(frozenset({_KIMI_RUNNER}), procfs=tree.procfs)
 
 
@@ -471,6 +473,24 @@ def test_a_foreign_holder_of_a_ranks_memory_is_not_absorbed_by_another_cards_ran
     tree.holds(_OTHER_HOST, card, vram=_RANK_LOADING_VRAM, queues=2)
 
     assert [key for key in _keys(_read_kimi(tree), own) if key[0] == "crowded"] == [("crowded", card)]
+
+
+@pytest.mark.parametrize(("card", "crowded"), [(None, []), (3, [3]), (4, [4])], ids=["alone", "card-3", "card-4"])
+def test_a_rank_on_a_card_passed_by_the_launchers_place_vouches_for_no_holder_of_another_card(
+    tmp_path: Path, card: int | None, crowded: list[int]
+) -> None:
+    """The Kimi round without the spawn child, its server holding 0.2 GiB on card 0's render node and listed there by the
+    kernel with 0.9 GiB beside rank 0: the server is a launcher, and card 0 passes by its place. Rank 0's holder still
+    takes a process of the test, so a process outside the pod with a rank's 1.7 GiB beside rank 3 or rank 4 has none left
+    to pair with and crowds that card."""
+    tree = _pod(tmp_path)
+    own = _kimi_round(tree, child=False)
+    tree.renders(_KIMI_SERVER, _SPAWN_CARD, kib=_gib(0.2) >> 10, descriptor=30)
+    tree.holds(_KIMI_CHILD_HOST, _SPAWN_CARD, vram=_gib(0.9), queues=0)
+    if card is not None:
+        tree.holds(_OTHER_HOST, card, vram=_RANK_LOADING_VRAM, queues=2)
+
+    assert [key for key in _keys(_read_kimi(tree), own) if key[0] == "crowded"] == [("crowded", c) for c in crowded]
 
 
 def test_without_memory_in_the_descriptors_a_second_holder_crowds_the_card_as_before(tmp_path: Path) -> None:
