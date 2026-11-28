@@ -484,20 +484,22 @@ def _pairs(holders: Sequence[Holder], memory: Mapping[int, Mapping[int, int]]) -
 
     source, sink = ("source",), ("sink",)
     for index, holder in enumerate(holders):
-        edge(source, ("holder", index))
+        start = ("holder", index)
+        edge(source, start)
         for process, on in memory.items():
             cards = expected[process]
             if holder.card not in cards or abs(on[holder.card] - holder.vram) > UNACCOUNTED_VRAM_TOLERANCE:
                 continue
             if len(cards) == 1:
-                edge(("holder", index), ("process", process))
+                edge(start, (process,))
                 continue
             slot = (tuple(sorted(cards)), holder.card)
-            edge(("holder", index), ("slot-in", *slot))
-            edge(("slot-in", *slot), ("slot-out", *slot))
-            edge(("slot-out", *slot), ("process", process))
+            entry, exit_ = ("slot-in", *slot), ("slot-out", *slot)
+            edge(start, entry)
+            edge(entry, exit_)
+            edge(exit_, (process,))
     for process in memory:
-        edge(("process", process), sink)
+        edge((process,), sink)
 
     def augment(node: tuple[object, ...], seen: set[tuple[object, ...]]) -> bool:
         if node == sink:
