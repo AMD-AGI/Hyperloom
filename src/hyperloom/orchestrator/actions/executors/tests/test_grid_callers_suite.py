@@ -7,7 +7,9 @@ The contract: a conc sweep arm boots one server on its first rung, measures that
 after, and every rung serves the same launch; the arm's server and an explore variant's server are reaped with
 ``stop`` on the directory their rounds shared it through, however the rounds ended; explore launches one server once
 per round, starts no variant its session or phase budget cannot fit, and launches none that only restates the argv or
-environment of the session's base; a specialist rebench is one round that owns its server on the port it reports.
+environment of the session's base; an explore round the ledger answers whole succeeds without a launch, and one left
+with nothing to run fails and reports its grid exhausted; a specialist rebench is one round that owns its server on
+the port it reports.
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ from hyperloom.orchestrator.actions.executors.serving import _server_lifecycle
 from hyperloom.orchestrator.actions.executors.grid._grid_base import TS_SKIPPED_DEDUP, VariantResult
 from hyperloom.orchestrator.actions.executors._suite import rounds as suite_rounds
 from hyperloom.orchestrator.actions.executors import explore as explore_module
-from hyperloom.orchestrator.actions.executors.explore import BASELINE_NOOP, ExploreExecutor
+from hyperloom.orchestrator.actions.executors.explore import ALREADY_MEASURED, BASELINE_NOOP, ExploreExecutor
 from hyperloom.orchestrator.actions.executors.tests.test_grid_suite_round import _HOT, suite  # noqa: F401
 from hyperloom.orchestrator.rehearsal import READY, LaunchAttempt, LaunchScenario, ScriptedRounds, VirtualClock
 from hyperloom.orchestrator.rehearsal import installed_clock
@@ -242,6 +244,27 @@ def test_explore_starts_no_variant_the_budget_cannot_fit(
     assert result["explore_search_update"]["tested"] == {}
 
 
+def test_explore_succeeds_without_a_launch_when_the_ledger_already_measured_its_only_variant(
+    monkeypatch, suite, tmp_path
+):
+    """A variant that lost on this stack and is proposed again alone is answered by its verdict, not launched."""
+    state = SharedState.load_or_init(_session(suite))
+    state.baseline_tput = 800.0
+    slower = LaunchAttempt(outcome=READY, metrics={"output_throughput": 700.0, "completed_requests": 64})
+    rounds = ScriptedRounds(scenario=LaunchScenario(attempts=(slower,)), clock=VirtualClock(), launch=_launch())
+    monkeypatch.setattr(suite_rounds, "run_round", rounds.run_round)
+    rows = [{"name": "v_slow", "extra_args": "--max-running-requests 64"}]
+    first, _ = _explore(monkeypatch, suite, tmp_path, rows, state, rounds=rounds)
+    assert [row["outcome"] for row in first["explore_search_update"]["tested"].values()] == ["REVERT"]
+    state.apply_explore_search_update(first["explore_search_update"])
+
+    result, calls = _explore(monkeypatch, suite, tmp_path, rows, state, rounds=rounds)
+
+    assert len(calls) == 1, result
+    assert [(row["name"], row["reason"]) for row in result["skipped_dup"]] == [("v_slow", ALREADY_MEASURED)]
+    assert (result["status"], result["explore_grid_exhausted"]) == ("succeeded", False)
+
+
 _RECIPE_ARGS = ("--mem-fraction-static", "0.8", "--chunked-prefill-size", "16384")
 _RECIPE_ENV = {"SGLANG_USE_AITER": "1", "OMP_NUM_THREADS": "1"}
 
@@ -296,3 +319,20 @@ def test_explore_launches_no_variant_that_only_restates_the_recipe_base(
     ledger = {row["name"]: row for row in result["explore_search_update"]["tested"].values()}
     for name in ("restates-recipe-env", "restates-recipe-args"):
         assert (ledger[name]["outcome"], ledger[name]["reason"]) == (TS_SKIPPED_DEDUP, BASELINE_NOOP)
+
+
+def test_an_explore_grid_of_nothing_but_restatements_of_the_base_fails_as_exhausted(monkeypatch, suite, tmp_path):
+    """Every variant is dropped ahead of the round, which is left nothing to run and measures nothing."""
+    _serve_the_recipe_base(suite, monkeypatch, Workload.FIXED)
+    rows = [
+        {"name": "restates-recipe-env", "extra_envs": dict(_RECIPE_ENV)},
+        {"name": "restates-recipe-args", "extra_args": " ".join(_RECIPE_ARGS), "extra_envs": {}},
+    ]
+    state = SharedState.load_or_init(_session(suite))
+    state.baseline_tput = 800.0
+
+    result, calls = _explore(monkeypatch, suite, tmp_path, rows, state)
+
+    assert calls == []
+    assert [row["reason"] for row in result["skipped_dup"]] == [BASELINE_NOOP, BASELINE_NOOP]
+    assert (result["status"], result["explore_grid_exhausted"]) == ("failed", True)
