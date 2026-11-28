@@ -600,12 +600,12 @@ _FILL = "import sys, time; from pathlib import Path; from hyperloom.measure.runn
 )
 
 
-def _slow_source(tmp_path):
-    """The global git configuration of a fill whose source sends a pack in two parts a second apart: the host's own
-    configuration, which the fill includes, makes ``git upload-pack`` run ``git pack-objects`` through a hook that
-    passes its first bytes on at once and the rest a second later."""
-    config = tmp_path / "slow.gitconfig"
-    hook = "sh -c '\\\"$@\\\" | { dd bs=1 count=32 2>/dev/null; sleep 1; cat; }' hook"
+def _slow_source(tmp_path, pause=1):
+    """The global git configuration of a fill whose source sends a pack in two parts ``pause`` seconds apart: the
+    host's own configuration, which the fill includes, makes ``git upload-pack`` run ``git pack-objects`` through a
+    hook that passes its first bytes on at once and the rest ``pause`` seconds later."""
+    config = tmp_path / f"slow-{pause}.gitconfig"
+    hook = f"sh -c '\\\"$@\\\" | {{ dd bs=1 count=32 2>/dev/null; sleep {pause}; cat; }}' hook"
     config.write_text(f'[uploadpack]\n\tpackObjectsHook = "{hook}"\n')
     return config
 
@@ -710,6 +710,78 @@ def test_a_fresh_lock_held_past_the_wait_is_a_tool_error_and_left_in_place(upstr
         tools.fill_inferencex_store(cache, new)
 
     assert lock.exists(), "a lock another fill may still hold is never removed while it is fresh"
+
+
+def test_a_fill_whose_fetch_times_out_fails_at_once_and_leaves_no_lock(upstream, tmp_path, monkeypatch, caplog):
+    """The source stalls in the middle of the pack, while the fill's own fetch holds ``shallow.lock``: the fetch is
+    stopped at its timeout, removes the lock itself, and the fill fails then, never waiting on that lock as another
+    fill's; the next fill fetches at once."""
+    repo, old = upstream
+    cache = tmp_path / "runner-cache"
+    monkeypatch.setenv("INFERENCEX_REPO", str(repo))
+    store = tools.fill_inferencex_store(cache, old)
+    new = _second_commit(repo)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(_slow_source(tmp_path, pause=60)))
+    monkeypatch.setattr(tools, "_FETCH_TIMEOUT_SEC", 3)
+    lock = store / "shallow.lock"
+    seen = []
+    watching = threading.Event()
+
+    def watch():
+        while not watching.wait(0.05):
+            if lock.exists():
+                seen.append(lock)
+
+    watcher = threading.Thread(target=watch)
+    watcher.start()
+    started = time.monotonic()
+    try:
+        with caplog.at_level(logging.INFO, logger=tools.__name__), pytest.raises(ToolError) as failed:
+            tools.fill_inferencex_store(cache, new)
+    finally:
+        watching.set()
+        watcher.join()
+
+    assert seen, "the fill's own fetch held the lock while the source stalled"
+    assert "still running after 3 s and was stopped" in str(failed.value)
+    assert "another fill" not in str(failed.value)
+    assert time.monotonic() - started < 3 + tools._STOP_GRACE_SEC
+    assert not lock.exists(), "the stopped fetch removed the lock it took"
+    assert [record.getMessage() for record in caplog.records] == []
+
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL")
+    with caplog.at_level(logging.INFO, logger=tools.__name__):
+        assert tools.fill_inferencex_store(cache, new) == store
+    assert _git(store, "rev-parse", f"refs/tools/{new}") == new
+    assert [record.getMessage() for record in caplog.records] == []
+
+
+def test_a_fetch_failing_on_no_lock_raises_at_once_and_leaves_a_lock_that_is_there(upstream, tmp_path, monkeypatch):
+    """A lock file that is merely there, which a concurrent fill may hold, does not make another failure a wait: only
+    git's own message says a lock is held. The lock is the other fill's to remove and stays."""
+    repo, old = upstream
+    cache = tmp_path / "runner-cache"
+    monkeypatch.setenv("INFERENCEX_REPO", str(repo))
+    store = tools.fill_inferencex_store(cache, old)
+    new = _second_commit(repo)
+    lock = store / "shallow.lock"
+    lock.write_text("")
+    real = tools._git
+    fetches = []
+
+    def failing_without_a_lock(*args, **kwargs):
+        if "fetch" in args:
+            fetches.append(args)
+            raise ToolError("git -c failed: fatal: early EOF")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(tools, "_git", failing_without_a_lock)
+
+    with pytest.raises(ToolError, match="early EOF") as failed:
+        tools.fill_inferencex_store(cache, new)
+
+    assert len(fetches) == 1 and "another fill" not in str(failed.value)
+    assert lock.exists()
 
 
 @pytest.mark.parametrize(

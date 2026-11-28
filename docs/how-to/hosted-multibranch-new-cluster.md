@@ -293,7 +293,8 @@ repository it creates when it is missing, from `INFERENCEX_REPO` or upstream; a 
 is left as it is. The sandbox reads it, never writes it, so it may be mounted read-only. A fill that fails is logged as
 a warning and the build goes on; the tests then fetch InferenceX from `INFERENCEX_REPO` (or upstream) themselves.
 Builders fill the repository at the same time without a lock of their own: git's `shallow.lock` in the repository lets
-one fetch run at a time, and a builder that finds it held waits and tries again. A build killed while it fetched leaves
+one fetch run at a time, and a builder that finds it held waits and tries again. A fetch still running after 15 minutes
+is stopped, removes the lock it took, and its fill fails with a warning. A build killed outright while it fetched leaves
 that lock behind; the next fill removes it once it is older than 20 minutes (longer than a fetch may run), so it delays
 a new commit by at most that long and needs no one to remove it. `tools/` is created `2775` in the cache's group, like
 `inference-suite/`.

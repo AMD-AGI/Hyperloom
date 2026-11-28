@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -74,8 +75,10 @@ _LOCK_HELD = (
     "remove the file manually to continue",
     "shallow file has changed since we read it",
 )
+#: How long a git command stopped at its timeout has, after ``SIGTERM``, to remove its lock files and exit.
+_STOP_GRACE_SEC = 10
 #: How old a lock file of the store is before a fill takes it for one a killed fill left and removes it: a live fill's
-#: fetch holds it at most :data:`_FETCH_TIMEOUT_SEC`, and is killed then.
+#: fetch holds it at most :data:`_FETCH_TIMEOUT_SEC`, and is stopped then, removing it itself.
 _STALE_LOCK_SEC = _FETCH_TIMEOUT_SEC + 300
 #: How long a fill waits, in all, for the other fills of the store before it gives up.
 _LOCK_WAIT_SEC = 2 * _STALE_LOCK_SEC
@@ -120,14 +123,47 @@ class StagingMismatch(ToolError):
     """The runner's published staging is not the software the sheet's normalised manifest names."""
 
 
-def _git(*args: str, cwd: Path | None = None, timeout: int = 120, env: dict[str, str] | None = None) -> str:
+def _git(*args: str, cwd: Path | None = None, timeout: float = 120, env: dict[str, str] | None = None) -> str:
+    """Run git; one still running at ``timeout`` is stopped (:func:`_stop`), so it removes the lock files it holds."""
     try:
-        done = subprocess.run(["git", *args], capture_output=True, text=True, timeout=timeout, cwd=cwd, env=env)
-    except (OSError, subprocess.SubprocessError) as exc:
+        git = subprocess.Popen(
+            ["git", *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=cwd,
+            env=env,
+            start_new_session=True,
+        )
+    except OSError as exc:
         raise ToolError(f"git {args[0]} failed: {exc}") from exc
-    if done.returncode != 0:
-        raise ToolError(f"git {args[0]} failed: {done.stderr.strip()[-300:]}")
-    return done.stdout.strip()
+    try:
+        out, err = git.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _stop(git)
+        raise ToolError(f"git {args[0]} failed: it was still running after {timeout} s and was stopped") from None
+    except BaseException:
+        _stop(git)
+        raise
+    if git.returncode != 0:
+        raise ToolError(f"git {args[0]} failed: {err.strip()[-300:]}")
+    return out.strip()
+
+
+def _stop(git: subprocess.Popen[str]) -> None:
+    """Stop ``git`` and the processes it started (its own session): ``SIGTERM`` first, on which git removes the lock
+    files and temporary files it holds, and ``SIGKILL`` after :data:`_STOP_GRACE_SEC` if it is still running then; one
+    that outlives that too (blocked on a hung mount) is left to exit when it can."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(git.pid, sig)
+        except ProcessLookupError:
+            pass
+        try:
+            git.communicate(timeout=_STOP_GRACE_SEC)
+            return
+        except subprocess.TimeoutExpired:
+            continue
 
 
 def _head(path: Path) -> str | None:
@@ -328,6 +364,12 @@ def _fetch_into_store(store: Path, commit: str, fetch: list[str], work: Path, en
     again after a pause, which doubles up to :data:`_LOCK_PAUSE_SEC`; one that fails because a concurrent fill fetched
     the commit first is done. Before each attempt a lock file older than :data:`_STALE_LOCK_SEC` is removed
     (:func:`_remove_stale_lock`). Any other failure, or waiting longer than :data:`_LOCK_WAIT_SEC` in all, raises.
+
+    Whether another fill holds a lock is git's message alone: a fetch of this fill's own still running at
+    :data:`_FETCH_TIMEOUT_SEC` is stopped with ``SIGTERM`` (:func:`_git`), removes the locks it took, and its failure
+    raises at once; a lock file that is merely there is never read as another fill's, so a fill never waits on one its
+    own fetch left. A fetch that does not exit on ``SIGTERM`` may leave its lock behind; the next fill removes it once
+    stale, never sooner, since a concurrent fill may have taken it while this fill's fetch had not.
     """
     deadline = time.monotonic() + _LOCK_WAIT_SEC
     pause = 0.5
@@ -340,10 +382,7 @@ def _fetch_into_store(store: Path, commit: str, fetch: list[str], work: Path, en
         except ToolError as exc:
             if _holds(store, commit, env):
                 return  # a concurrent fill fetched it
-            held = any(words in str(exc) for words in _LOCK_HELD) or any(
-                lock.exists() for lock in _store_locks(store, commit)
-            )
-            if not held:
+            if not any(words in str(exc) for words in _LOCK_HELD):
                 raise
             if time.monotonic() >= deadline:
                 raise ToolError(f"another fill held a lock of {store} for {_LOCK_WAIT_SEC} s: {exc}") from exc
