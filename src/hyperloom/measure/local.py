@@ -71,6 +71,7 @@ from hyperloom.measure.farm import (
     place_farm,
     place_host_copies,
     record_unpatched,
+    server_environment,
     server_python,
     verify_farm,
 )
@@ -98,7 +99,7 @@ from hyperloom.measure.phases import (
 )
 from hyperloom.measure.points import AMBIENT_SHAPE_ENVS, launch_carriers
 from hyperloom.measure.profile_traces import PROFILE_DIR, collect_traces, round_has_traces
-from hyperloom.measure.repro import ReproError, find_case, run_case
+from hyperloom.measure.repro import Case, ReproError, find_case, run_case, run_probe
 from hyperloom.measure import second_tracer
 from hyperloom.measure.second_tracer import SecondTracer as _Tracer
 from hyperloom.measure.round_marks import ROLE_BOOT, ROLE_EVAL, ROLE_MEASURE, ROLE_WARMUP, RoundShape
@@ -127,7 +128,7 @@ from hyperloom.orchestrator.actions.executors import (
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, current_cancel_scope, use_cancel_scope
 from hyperloom.orchestrator.state.base_launch import freeze_base
 
-__all__ = ["LocalMeasurementBackend", "SUPPORTED_KINDS", "TestCallRefused"]
+__all__ = ["LocalMeasurementBackend", "SUPPORTED_KINDS", "TestCallRefused", "repro_case"]
 
 #: ``VariantResult.error_class`` of a round the per-round cap reaped.
 _TIMEOUT_CLASSES = frozenset({FailedStep.ROUND_TIMEOUT.value})
@@ -863,12 +864,26 @@ async def _sweep_by_restart(run: Run, order: list[int]) -> None:
             return
 
 
+def repro_case(call: TestCall) -> Case:
+    """The case of a repro test: the one entry script its attachments hold, where the runner unpacked them."""
+    return find_case(Path(call.cwd) / "attach", [attachment.id for attachment in call.attachments])
+
+
 async def _repro(run: Run) -> None:
-    """Boot the server the way a test does, run the case against it, tear the server down.
+    """Boot the server the way a test does, run the case against it, tear the server down; a probe that needs no
+    server runs with none.
 
     No warmup and no measured round: the server only has to be up. A server that does not boot ends the test as a
     failed test does; a case that cannot run to a verdict ends it as a failure of the measurement, never a verdict.
     """
+    try:
+        case = repro_case(run.call)
+    except ReproError as exc:
+        _fail_case(run, str(exc))
+        return
+    if not case.needs_server:
+        await _timed_case(run, case, None)
+        return
     lifecycle = _Lifecycle(run)
     if not lifecycle.eligible:
         _fail_case(run, f"the server cannot be held up for the case ({lifecycle.reason})")
@@ -877,9 +892,7 @@ async def _repro(run: Run) -> None:
         boot = await _boot_server(run, lifecycle, 0, "repro")
         run.add(0, boot)
         if not is_failure(boot) and run.stopped_rc is None:
-            run.phases.begin(REPRO_CASE)
-            await asyncio.to_thread(_run_case, run, lifecycle.port)
-            run.phases.begin(OTHER)
+            await _timed_case(run, case, f"http://127.0.0.1:{lifecycle.port}")
     finally:
         lifecycle.teardown()
 
@@ -889,21 +902,36 @@ def _fail_case(run: Run, reason: str) -> None:
     run.notes.append(f"repro_case_error: {reason}")
 
 
-def _run_case(run: Run, port: int) -> None:
+async def _timed_case(run: Run, case: Case, base_url: str | None) -> None:
+    run.phases.begin(REPRO_CASE)
+    await asyncio.to_thread(_run_case, run, case, base_url)
+    run.phases.begin(OTHER)
+
+
+def _run_case(run: Run, case: Case, base_url: str | None) -> None:
     call = run.call
     left = call.timeout_sec - (time.monotonic() - run.started)
     timeout = max(1.0, min(_CASE_TIMEOUT_SEC, left * _CASE_TIME_SHARE))
+    output_dir = Path(call.output_dir)
     try:
-        script = find_case(Path(call.cwd) / "attach", [attachment.id for attachment in call.attachments])
-        run_case(
-            script,
-            base_url=f"http://127.0.0.1:{port}",
-            model=_model_of(call),
-            timeout_sec=timeout,
-            output_dir=Path(call.output_dir),
-        )
+        if case.is_probe:
+            run_probe(case.script, env=_probe_env(call), base_url=base_url, timeout_sec=timeout, output_dir=output_dir)
+        else:
+            run_case(case.script, base_url=base_url, model=_model_of(call), timeout_sec=timeout, output_dir=output_dir)
     except ReproError as exc:
         _fail_case(run, str(exc))
+
+
+def _probe_env(call: TestCall) -> dict[str, str]:
+    """What the test's server is launched with (the test's cards, a rebuilt framework first on the import path), the
+    server's interpreter as ``HL_PYTHON`` and the model as ``HL_MODEL``."""
+    config = _point_config(call.points[0])
+    return {
+        **inherited_environment(os.environ, call.env_overrides, call.unset_envs),
+        **{str(name): str(value) for name, value in server_environment(config).items()},
+        "HL_PYTHON": server_python(config, default=sys.executable),
+        "HL_MODEL": _model_of(call),
+    }
 
 
 def _model_of(call: TestCall) -> str:

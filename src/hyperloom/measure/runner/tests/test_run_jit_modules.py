@@ -103,7 +103,7 @@ def image(rig: Rig, monkeypatch) -> Rig:
     """The rig over the stand-in aiter. The fake server imports nothing, so the farm's aiter (a package root of the
     sheet, as acceptance always makes one) is read as imported: whether it was is ``test_run_jit``'s to check."""
     standin.aiter_image(rig.bases)
-    monkeypatch.setattr(run_module, "refine_imports", lambda document, farm: document)
+    monkeypatch.setattr(run_module, "refine_imports", lambda document, farm, *, needs_server: document)
     return rig
 
 

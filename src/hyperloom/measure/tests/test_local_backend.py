@@ -1846,8 +1846,8 @@ _CASE = AttachmentRef("case", "dir", "a" * 64)
 class _Case:
     """A repro case unpacked where the runner leaves it, and the order the server and the case ran in."""
 
-    def __init__(self, tmp_path: Path, monkeypatch, body: str) -> None:
-        script = tmp_path / "attach" / _CASE.id / "repro.sh"
+    def __init__(self, tmp_path: Path, monkeypatch, body: str, *, entry: str = "repro.sh") -> None:
+        script = tmp_path / "attach" / _CASE.id / entry
         script.parent.mkdir(parents=True)
         script.write_text(f"{body}\n", encoding="utf-8")
         self.ran = tmp_path / "case-ran"
@@ -1908,16 +1908,14 @@ def test_a_repro_test_runs_no_warmup_even_when_the_call_plans_one(grid, server, 
 
 @pytest.mark.parametrize(
     ("body", "reason"),
-    [("exit 2", "exited with 2"), ("sleep 30", "did not finish within"), (None, "no attachment holds repro.sh")],
+    [("exit 2", "exited with 2"), ("sleep 30", "did not finish within")],
 )
 @pytest.mark.usefixtures("server")
 def test_a_case_that_cannot_run_to_a_verdict_is_a_failure_of_the_measurement_not_a_verdict(
     grid, monkeypatch, tmp_path, body, reason
 ):
     _boot_only(grid)
-    case = _Case(tmp_path, monkeypatch, body or "")
-    if body is None:
-        (tmp_path / "attach" / _CASE.id / "repro.sh").unlink()
+    case = _Case(tmp_path, monkeypatch, body)
 
     outcome = _run(_repro_call(tmp_path, timeout_sec=1))
 
@@ -1925,6 +1923,44 @@ def test_a_case_that_cannot_run_to_a_verdict_is_a_failure_of_the_measurement_not
     assert reason in outcome.stderr and "repro_case_error" in outcome.stderr
     assert not (tmp_path / "out" / "repro" / "verdict.json").exists()
     assert len(case.events) == 1, "the server is reclaimed whatever became of the case"
+
+
+def test_a_test_without_an_entry_script_is_a_failure_of_the_measurement_and_boots_nothing(grid, tmp_path):
+    (tmp_path / "attach" / _CASE.id).mkdir(parents=True)
+
+    outcome = _run(_repro_call(tmp_path))
+
+    assert outcome.failure_class == "infra" and "no attachment holds an entry script" in outcome.stderr
+    assert grid.calls == []
+
+
+def test_a_probe_without_a_server_boots_nothing_and_runs_with_what_the_server_is_launched_with(
+    grid, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("DROPPED", "x")
+    body = f'echo "$TP|$HL_MODEL|${{HL_BASE_URL:-none}}|${{DROPPED:-unset}}|$FROM_CALL" > {tmp_path}/case-ran\n'
+    _Case(tmp_path, monkeypatch, f'{body}test -x "$HL_PYTHON"; exit 3', entry="probe.sh")
+
+    outcome = _run(_repro_call(tmp_path, unset_envs=("DROPPED",), env_overrides={"FROM_CALL": "y"}))
+
+    assert grid.calls == []
+    assert (tmp_path / "case-ran").read_text() == "1|/models/m|none|unset|y\n"
+    assert (tmp_path / "out" / "repro" / "case.log").read_text().endswith("[exit code 3]\n")
+    assert (outcome.returncode, outcome.failure_class, outcome.rounds) == (0, None, ())
+
+
+@pytest.mark.usefixtures("server")
+def test_a_served_probe_runs_against_the_booted_server_and_any_exit_code_is_its_result(grid, monkeypatch, tmp_path):
+    _boot_only(grid)
+    case = _Case(tmp_path, monkeypatch, f'echo "$HL_BASE_URL" > {tmp_path}/case-ran\nexit 2', entry="served-probe.sh")
+
+    outcome = _run(_repro_call(tmp_path))
+
+    assert (tmp_path / "case-ran").read_text() == "http://127.0.0.1:8123\n"
+    assert case.events == ["teardown after the case"]
+    assert (tmp_path / "out" / "repro" / "case.log").read_text().endswith("[exit code 2]\n")
+    assert not (tmp_path / "out" / "repro" / "verdict.json").exists()
+    assert (outcome.returncode, outcome.failure_class, outcome.rounds) == (0, None, ())
 
 
 def test_a_server_that_does_not_boot_fails_the_test_like_any_test_and_runs_no_case(grid, server, monkeypatch, tmp_path):

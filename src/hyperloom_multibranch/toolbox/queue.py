@@ -20,12 +20,12 @@ from hyperloom.contracts.measurement import (
     PRIORITY_HIGHEST,
     PRIORITY_LOWEST,
     Purpose,
-    TestKind,
     TestRequest,
 )
 from hyperloom_multibranch.contracts.toolbox import Backpressure, QueueState, RequestRejected
 
 _LOWEST_PRIORITY = 4
+_PROFILE_PRIORITY = 3
 
 #: Priority of a request that names none, by purpose. Baseline, health and final are the scheduler's to
 #: give through QueuePolicy.priority_override; until it does they take the fallbacks below.
@@ -33,8 +33,9 @@ DEFAULT_PRIORITY: Mapping[Purpose, int] = {
     Purpose.CONFIRM: 0,
     Purpose.REPRO: 1,
     Purpose.INTEGRATION: 2,
-    Purpose.PROFILE: 3,
-    Purpose.ACCURACY: 3,
+    Purpose.PROFILE: _PROFILE_PRIORITY,
+    Purpose.PROBE: _PROFILE_PRIORITY,
+    Purpose.ACCURACY: _PROFILE_PRIORITY,
     Purpose.EXPLORE: _LOWEST_PRIORITY,
     Purpose.BASELINE: 2,
     Purpose.FINAL: 2,
@@ -118,7 +119,7 @@ EXEMPT_PURPOSES = frozenset({Purpose.CONFIRM, Purpose.REPRO, Purpose.BASELINE, P
 def exempt_from_k(request: TestRequest) -> bool:
     """Whether the request takes no slot of its branch's K (it still counts against the global limit)."""
 
-    return request.purpose in EXEMPT_PURPOSES or request.kind is TestKind.REPRO
+    return request.purpose in EXEMPT_PURPOSES
 
 
 class State(str, Enum):

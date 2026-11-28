@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.contracts.measurement import Purpose, TestRequest
+from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom.hosted.mcp_server import (
     HOST_KIND,
@@ -240,19 +240,45 @@ def test_a_specialist_cannot_submit_a_purpose_the_session_owns(rig: Rig, purpose
     """The queue exempts the session's purposes from the branch's K and backpressure, or ranks them above an explore."""
     _, reply = rig.call(rig.token("s1"), "submit_test", kind="test", purpose=purpose, parent_commit="c1")
     assert reply["error"]["code"] == -32602
-    assert "purpose must be one of ['explore', 'profile']" in reply["error"]["message"]
+    assert "purpose must be one of ['explore', 'profile', 'probe']" in reply["error"]["message"]
     assert rig.toolbox.submitted == []
 
 
-@pytest.mark.parametrize("kind", ["repro", "sweep", "accuracy"])
+@pytest.mark.parametrize("kind", ["sweep", "accuracy"])
 def test_a_specialist_cannot_submit_a_kind_the_session_owns(rig: Rig, kind: str) -> None:
-    """A reproduction check takes no slot of the branch's K whatever its purpose; a sweep is the final selection's."""
+    """A sweep is the final selection's."""
     _, reply = rig.call(rig.token("s1"), "submit_test", kind=kind, purpose="explore", parent_commit="c1")
-    assert reply["error"]["code"] == -32602 and "kind must be one of ['test', 'profile']" in reply["error"]["message"]
+    assert reply["error"]["code"] == -32602
+    assert "kind must be one of ['test', 'profile', 'repro']" in reply["error"]["message"]
     assert rig.toolbox.submitted == []
 
 
-@pytest.mark.parametrize(("kind", "purpose"), [("test", "profile"), ("profile", "explore")])
+def test_a_specialist_submits_a_probe_as_a_repro_test_of_its_own_purpose(rig: Rig) -> None:
+    case = {"id": "probe-case", "kind": "dir", "sha256": "a" * 64}
+    args = {"kind": "repro", "purpose": "probe", "parent_commit": "c1", "attachments": [case]}
+    _, reply = rig.call(rig.token("s1"), "submit_test", **args)
+
+    (request,) = rig.toolbox.submitted
+    assert "error" not in reply
+    assert (request.kind, request.purpose, request.branch_id) == (TestKind.REPRO, Purpose.PROBE, "s1")
+
+
+def test_a_probe_naming_an_intent_is_refused_so_the_explore_of_that_intent_keeps_its_claim(rig: Rig) -> None:
+    """A request with an intent takes the intent's claim and answers whether the intent was tested."""
+    token = rig.token("s1")
+    case = {"id": "probe-case", "kind": "dir", "sha256": "a" * 64}
+    probe = {"kind": "repro", "purpose": "probe", "parent_commit": "c1", "attachments": [case]}
+
+    _, reply = rig.call(token, "submit_test", **probe, intent_fingerprint="i1")
+    rig.ok(token, "submit_test", kind="test", purpose="explore", parent_commit="c1", intent_fingerprint="i1")
+
+    assert reply["error"]["code"] == -32602 and "without intent_fingerprint" in reply["error"]["message"]
+    assert [(r.purpose, r.intent_fingerprint) for r in rig.toolbox.submitted] == [(Purpose.EXPLORE, "i1")]
+
+
+@pytest.mark.parametrize(
+    ("kind", "purpose"), [("test", "profile"), ("profile", "explore"), ("repro", "explore"), ("test", "probe")]
+)
 def test_a_specialist_submits_kind_and_purpose_only_as_a_pair_it_owns(rig: Rig, kind: str, purpose: str) -> None:
     """A measured test sent as a profile would be queued at the profile's priority, ahead of every branch's explores,
     skip the explore-only checks and escape the profile dedup, which is keyed on the kind."""
@@ -260,6 +286,7 @@ def test_a_specialist_submits_kind_and_purpose_only_as_a_pair_it_owns(rig: Rig, 
     assert reply["error"]["code"] == -32602
     assert f"kind {kind} does not go with purpose {purpose}" in reply["error"]["message"]
     assert "kind test with purpose explore and kind profile with purpose profile" in reply["error"]["message"]
+    assert "kind repro with purpose probe" in reply["error"]["message"]
     assert rig.toolbox.submitted == []
 
 

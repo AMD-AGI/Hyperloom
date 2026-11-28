@@ -331,6 +331,11 @@ def test_a_repro_verdict_round_trips(verdict: str) -> None:
     assert _roundtrip(_result(repro_verdict=verdict)).repro_verdict == verdict
 
 
+def test_a_probe_log_round_trips_and_a_result_without_one_writes_none() -> None:
+    assert _roundtrip(_result(probe_log="412 us\n[exit code 0]\n")).probe_log == "412 us\n[exit code 0]\n"
+    assert "probe_log" not in _result().to_document()
+
+
 def test_a_document_written_before_the_repro_verdict_loads_with_none() -> None:
     document = _result().to_document()
     del document["repro_verdict"]

@@ -58,6 +58,7 @@
             "profile",
             "accuracy",
             "repro",
+            "probe",
             "final"
           ]
         },

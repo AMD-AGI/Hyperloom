@@ -73,6 +73,22 @@ async def test_the_case_reaches_the_sandbox_as_an_attachment_and_runs_there_with
     assert (tmp_path / "session" / result.output_dir / "repro" / "case.log").read_text() == "from-the-attachment\n"
 
 
+async def test_a_probe_is_a_result_with_the_end_of_its_log_whatever_its_exit_code_and_never_a_verdict(
+    tmp_path: Path, rig: Rig
+) -> None:
+    point = point_yaml(tmp_path, "planned.yaml", fake_repro="true", fake_report="false")
+    case = case_attachment(rig.config.spec.blobs, "echo 412 us\nexit 3\n", name="probe.sh")
+    request = req(kind=TestKind.REPRO, purpose=Purpose.PROBE, attachments=(case,))
+    job = TestJob(request.accepted("b1-000001"), 3, (), 2, AcceptedMeasurement(None, (point,)))  # type: ignore[arg-type]
+    executor = HostedExecutor(rig.backend, tmp_path / "session")
+
+    result = await executor.run(job)
+
+    assert result.validity is Validity.SUCCEEDED and result.probe_log == "412 us\n\n[exit code 3]\n"
+    assert result.repro_verdict == "" and result.rounds == ()
+    await executor.reverify(result)  # does not raise
+
+
 async def test_a_repro_result_that_holds_no_verdict_is_refused(tmp_path: Path, rig: Rig) -> None:
     executor = HostedExecutor(rig.backend, tmp_path / "session")
 

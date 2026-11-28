@@ -492,9 +492,14 @@ _FIRST_IDEA_CHECKOUT = (
 _UNPROFILED = """
 This server runs under no profiler here: a profile test is refused, so submit none; wherever the steps above say \
 profile or name the operators a profile ranks, use the step budget from the timing lines and the source instead."""
+_PROBE = (
+    "A probe looks at something on a GPU without a full test: store a script with fix_case and its probe argument, "
+    "submit it with kind repro and purpose probe, and read what it printed in the result's probe_log; its numbers "
+    "never enter the gate."
+)
 _NO_GPU = (
     "Do not start servers or benchmarks yourself: the toolbox measures every test in a fresh sandbox. You have no GPU "
-    "of your own: submit_test is how you measure."
+    f"of your own: submit_test is how you measure. {_PROBE}"
 )
 _DEV_SANDBOX = (
     "Do not start servers or benchmarks yourself outside your dev sandbox: the toolbox measures every test in a fresh "
@@ -508,7 +513,7 @@ _DEV_SANDBOX = (
     "cards, numbered from 0 (never set HIP_VISIBLE_DEVICES, ROCR_VISIBLE_DEVICES or CUDA_VISIBLE_DEVICES), listen "
     "only on the ports the lease names, and write under the lease's root, never in your worktree. Release it with "
     "dev_sandbox_release as soon as you are done: the runtime takes it back when it expires, sits idle or tests "
-    "queue for cards. When a lease is refused, submit the full test instead of waiting.\n\n"
+    f"queue for cards. When a lease is refused, submit the full test instead of waiting. {_PROBE}\n\n"
     "Forge, a kernel optimizer you may call on a hot kernel, runs for hours: lease it with term=long (up to 6 h, kept "
     "while its process runs). forge-fuse finds a fusion in the code by itself, or around a kernel you name, from a "
     "decode trace without CUDA graphs; forge-fuse checks its fusion by serving the model at the session's TP: lease "
