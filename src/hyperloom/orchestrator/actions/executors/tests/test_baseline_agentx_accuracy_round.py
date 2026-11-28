@@ -15,7 +15,11 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors._accuracy_gate import ACCURACY_DIR, BASELINE_ACCURACY_STOP_REASON
+from hyperloom.orchestrator.actions.executors._accuracy_gate import (
+    ACCURACY_DIR,
+    BASELINE_ACCURACY_STOP_REASON,
+    BASELINE_EVAL_FAILED_KEY,
+)
 from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 from hyperloom.orchestrator.actions.executors.benchmark_run import accuracy
 from hyperloom.orchestrator.actions.executors.benchmark_run.accuracy import ACCURACY_ROUND_KEY, AccuracyRoundOutcome
@@ -142,6 +146,21 @@ def test_only_a_baseline_that_owed_an_accuracy_round_stops_without_a_score(tmp_p
     executor._maybe_stop_on_missing_baseline_accuracy(ctx, {"status": "succeeded"})
 
     assert (state.stop_reason == BASELINE_ACCURACY_STOP_REASON) is stops
+
+
+@pytest.mark.parametrize("enablement_mode", ["off", "eval", "all"])
+def test_a_baseline_is_ruled_on_the_score_its_own_accuracy_round_wrote(tmp_path, monkeypatch, enablement_mode):
+    executor, calls, slot = _executor(tmp_path, monkeypatch, score=0.945)
+    state = SharedState(agentx_accuracy=True, benchmark_mode="agentx", enablement_mode=enablement_mode)
+    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", kind="baseline", params={}), extra={"shared_state": state})
+
+    result = asyncio.run(executor._run_with_accuracy(ctx))
+
+    assert calls == [(slot, slot / "point.yaml")]
+    assert state.stop_reason == ""
+    assert BASELINE_EVAL_FAILED_KEY not in result
+    assert result["accuracy"] == 0.945
+    assert result["accuracy_source"].startswith(str(slot / ACCURACY_DIR))
 
 
 def test_a_baseline_whose_accuracy_round_left_no_score_stops_whatever_an_earlier_attempt_scored(tmp_path, monkeypatch):

@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -33,6 +35,7 @@ from hyperloom.orchestrator.rehearsal.scenario import ScenarioError
 from hyperloom.orchestrator.actions.stop_attribution import SESSION_TIME_EXHAUSTED_CLASS
 from hyperloom.orchestrator.phases.machine_state import RETRY_PAST_THE_RESERVE
 from hyperloom.orchestrator.state.failure_evidence import ARGV_INVALID, ENGINE_CAPACITY, SERVER_INIT_DEAD
+from hyperloom.orchestrator.state.shared_state import SharedState
 from inference_suite.runtime.process import Reaped
 from inference_suite.contracts import FailedStep, LifecycleMode, RunLayout, WorkloadKind
 from inference_suite.tests.test_compose import _launch
@@ -209,7 +212,8 @@ def test_an_eval_failure_of_a_suite_round_is_eval_rooted() -> None:
     assert BaselineExecutor._is_eval_rooted_failure({"error_class": FailedStep.EVAL_FAILED.value})
 
 
-def test_a_multi_node_round_restarts_the_cluster_and_measures_it_externally_after_a_discarded_pass(monkeypatch, suite):
+def _multi_node(monkeypatch) -> list[str]:
+    """Make the session a multi-node one whose cluster restarts are recorded, not run; returns the restarts."""
     from hyperloom.orchestrator.actions.executors import _multi_node_env
 
     monkeypatch.setattr(suite_rounds, "client_only_server_url", lambda: "http://10.0.0.2:30000")
@@ -221,6 +225,11 @@ def test_a_multi_node_round_restarts_the_cluster_and_measures_it_externally_afte
         restarts.append(str(round_.output_dir))
 
     monkeypatch.setattr(BaselineExecutor, "_restart_multi_node_server", restart)
+    return restarts
+
+
+def test_a_multi_node_round_restarts_the_cluster_and_measures_it_externally_after_a_discarded_pass(monkeypatch, suite):
+    restarts = _multi_node(monkeypatch)
 
     result, rounds = _play(
         monkeypatch,
@@ -239,6 +248,47 @@ def test_a_multi_node_round_restarts_the_cluster_and_measures_it_externally_afte
     assert (warm.fixed.seed, measured.fixed.seed) == (WARMUP_SEED, MEASURED_SEED)
     assert Path(warm.paths.run_dir).parent == suite.ws / "mn_warmup"
     assert not measured.telemetry.gpu.enabled
+
+
+def test_a_multi_node_baseline_takes_the_score_of_its_measured_pass_not_of_the_discarded_one(monkeypatch, suite):
+    """Both passes of a multi-node round run the eval; ``ScriptedRounds`` plays their load and the stub their eval."""
+    _multi_node(monkeypatch)
+    document = yaml.safe_load(suite.point.read_text())
+    document["benchmark"]["envs"]["RUN_EVAL"] = "true"
+    suite.point.write_text(yaml.safe_dump(document), encoding="utf-8")
+    rounds = ScriptedRounds(
+        scenario=LaunchScenario(
+            attempts=(LaunchAttempt(outcome=READY, metrics=_COLD), LaunchAttempt(outcome=READY, metrics=_HOT))
+        ),
+        clock=VirtualClock(),
+        launch=_launch(),
+    )
+    scores = {"mn_warmup": 0.52, suite.ws.name: 0.91}
+    evaluated: list[str] = []
+
+    def run_round(config, *, cancel=None):
+        ran = rounds.run_round(replace(config, eval=replace(config.eval, enabled=False)), cancel=cancel)
+        if config.eval.enabled:
+            pass_dir = Path(config.paths.run_dir).parent.name
+            evaluated.append(pass_dir)
+            results = ran.layout.eval_dir / "model" / "results_gsm8k.json"
+            results.parent.mkdir(parents=True)
+            results.write_text(json.dumps({"results": {"gsm8k": {"exact_match,strict-match": scores[pass_dir]}}}))
+        return ran
+
+    monkeypatch.setattr(suite_rounds, "run_round", run_round)
+    state = SharedState()
+    executor = BaselineExecutor(default_config_path=suite.point, session_dir=suite.session, shared_state=state)
+    params = {"output_dir": str(suite.ws), "timeout_sec": 10, "gpu_type": "mi300x", "baseline_double_run": False}
+    task = SimpleNamespace(task_id="t-baseline", kind="baseline", params=params)
+
+    result = asyncio.run(executor(SimpleNamespace(task=task, extra={"shared_state": state})))
+
+    assert result["status"] == "succeeded", result
+    assert evaluated == ["mn_warmup", suite.ws.name]
+    assert result["accuracy"] == 0.91
+    assert Path(result["accuracy_source"]).is_relative_to(result["workspace"])
+    assert state.stop_reason == ""
 
 
 def test_an_agentx_baseline_is_measured_once_on_a_server_it_owns(monkeypatch, suite):
