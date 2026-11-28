@@ -317,6 +317,19 @@ it.
   second; a value of the second that was not an integer raised `ValueError`
   before the round ran and is now ignored. The result readers written for the
   harness 1.2.0 removed go with them. See [Upgrade](reference/upgrade.md).
+- **`result_dir` is no longer a task parameter.** It named where the benchmark
+  script of the harness 1.2.0 removed wrote its results. `baseline`, `explore`
+  and `integrate` ignore it: an `integrate` bench's accuracy is always read
+  from the bench's own directory (a task carrying `result_dir` had it searched
+  in a directory no round writes), a malformed value no longer fails a
+  baseline or an explore round as `bad_param`, a baseline result no longer
+  carries the key, and the baseline fingerprint is six parameters instead of
+  seven. See [Upgrade](reference/upgrade.md).
+- **The session package no longer collects `benchmark_report.json` and
+  `summary.txt`.** No round writes either file; a round's `report.json`,
+  `launch.json`, `config.yaml`, `phase_marks.json` and
+  `inferencex_result.json` are collected as before. See
+  [Upgrade](reference/upgrade.md).
 
 ## Hyperloom 1.2.0 release
 

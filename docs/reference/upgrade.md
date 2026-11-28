@@ -251,6 +251,40 @@ run either, so the warnings
 error classes `no_benchmark_workspace` and `benchmark_report_invalid_metric`,
 no longer occur.
 
+### Recommended: `result_dir` is no longer a task parameter
+
+`result_dir` told the benchmark script of the harness before 1.2.0 where to
+write. No round has been handed it since 1.2.0, and the `baseline`, `explore`
+and `integrate` tasks now ignore it, whatever its value:
+
+* `integrate` still read it: a task that carried `result_dir` had its bench's
+  accuracy searched in that directory, where no round writes, and its accuracy
+  round written below it. The accuracy of a bench is now always read from, and
+  its accuracy round always written into, the bench's own directory.
+* A `result_dir` with whitespace or a shell metacharacter failed a `baseline`
+  attempt and an `explore` round as `bad_param`; it no longer does.
+* A baseline result no longer carries `result_dir`. On a succeeded round it
+  repeated `workspace`, which still names the round's run directory.
+* The baseline fingerprint, which decides whether a proposed baseline repeats
+  one already queued or measured, is six parameters instead of seven. Two
+  proposals that differ only in `result_dir` are now the same baseline. In a
+  session resumed across the upgrade, a baseline proposed again is not matched
+  with one measured before the upgrade and runs once more.
+
+Custom workload scripts are not affected: a script is still run with
+`RESULT_DIR` in its environment and writes its result there.
+
+### Recommended: the session package no longer collects `benchmark_report.json` and `summary.txt`
+
+The package collected every `runs/**/benchmark_report.json` and
+`runs/**/summary.txt`, the report and summary of a round before 1.2.0. No
+round writes either. A 1.2.0 session that replayed a GEAK candidate on GEAK's
+own harness has a `benchmark_report.json` per replayed point under
+`runs/integrate/`; packaged again by this build, the package leaves those
+files out. They stay in the session directory. A round's `report.json`,
+`launch.json`, `config.yaml`, `phase_marks.json` and
+`inferencex_result.json` are collected as before.
+
 ---
 
 ## Upgrading from 1.1.x
