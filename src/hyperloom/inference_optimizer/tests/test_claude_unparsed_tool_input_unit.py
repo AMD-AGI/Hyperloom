@@ -167,8 +167,7 @@ def test_registered_schema_refuses_a_native_intent_type_outside_the_enum() -> No
         jsonschema.validate(instance=_UNKNOWN_TYPE_NATIVE, schema=tool.input_schema)
 
     assert "'review_verdict'" in exc.value.message
-    for intent_type in IntentType:
-        assert intent_type.value in exc.value.message
+    assert [t.value for t in IntentType if t.value not in exc.value.message] == []
 
 
 @pytest.mark.asyncio

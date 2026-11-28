@@ -92,8 +92,7 @@ def test_schema_is_json_serializable() -> None:
 def test_transport_contract_names_every_intent_type() -> None:
     """The model needs the vocabulary in prose as well as in the enforced schema."""
     instructions = codex_module.build_output_instructions()
-    for intent_type in IntentType:
-        assert intent_type.value in instructions
+    assert [t.value for t in IntentType if t.value not in instructions] == []
 
 
 # End-to-end round trip through the backend with a mocked Codex SDK.
