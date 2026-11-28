@@ -757,8 +757,8 @@ def _idea_generation_lines() -> list[str]:
 _KERNEL_OPT_PIPELINE_BODY: str = """\
 ## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)
 
-The request kinds you may emit here are `trace_analyze`, `integrate`, and
-`integrate`'s `apply_patch` alias; they are picked per the DECISION FRAMEWORK
+The request kinds you may emit here are `integrate` and its `apply_patch`
+alias; they are picked per the DECISION FRAMEWORK
 (phase allowed-set + gaps + KB priors), with no system-side priority ranking.
 Read the optimization lane's outcome before you act: a `state.gaps[]`
 `layer='kernel_agent'` gap names the target, `pending_keep_kernels` lists the
@@ -766,14 +766,6 @@ KEEPs awaiting integrate, `rejected_kernel_ids` lists the ids already written
 off, and `last_action_failures` explains a request of your own that failed.
 KERNEL_AGENT → CYCLE_END advance is driven by the phase budget, idle-no-progress,
 agent settled with no pending kernel work, or a terminal stop_reason.
-
-### `trace_analyze` — read-only candidate analysis
-
-  request{target_agent: 'kernel_agent', kind: 'trace_analyze',
-          params: {trace_input: <verbatim last_profile_trace>, top_k: 10}}
-
-  Skip if `last_trace_analyze.trace_input` already equals
-  `last_profile_trace` (cached). Explore/sweep/report are NEVER gated on it.
 
 ### `gemm_tuning` — not yours to propose
 

@@ -169,7 +169,6 @@ PHASE_HUMAN_LABELS: dict[str, str] = {
 # Human-friendly labels for the lifecycle steps surfaced to operators.
 LIFECYCLE_STEP_LABELS: dict[str, str] = {
     "roofline": "TraceLens",
-    "trace_analyze": "TraceLens",
     "integrate": "Integrate",
     "apply_patch": "Integrate",
     "report": "Report",

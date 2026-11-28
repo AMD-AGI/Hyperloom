@@ -169,11 +169,10 @@ def test_pending_keep_no_longer_blocks_other_actions(session_dir):
         )
 
 
-def _seed_trace_analyze(coord, *, hot_kernels, task_groups=None):
+def _seed_trace_analyze(coord, *, hot_kernels):
     coord.shared_state.last_trace_analyze = {
         "trace_input": "/tmp/profile.tar.gz",
         "hot_kernels": hot_kernels,
-        "task_groups": task_groups or [],
     }
 
 
@@ -219,27 +218,3 @@ def test_mission_summary_surfaces_untried_hot_kernels(session_dir):
     assert "untried_hot_kernels" in summary
     assert "k001" in summary
     assert "k002" in summary
-
-
-def test_run_optimization_request_no_longer_blocked_by_stale_trace_analyze(
-    session_dir,
-):
-    """A stale ``last_trace_analyze`` cache no longer pre-denies ``run_optimization``."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _write_baseline_json(session_dir)
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.last_profile_trace = "/tmp/profile.tar.gz"
-    s.last_trace_analyze = {}
-    assert coord.dispatcher.admission_denial_for_request("kernel_agent", "run_optimization") is None
-
-
-def test_trace_analyze_request_itself_passes(session_dir):
-    """A ``trace_analyze`` REQUEST bypasses its own prerequisite check; baseline still applies."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _write_baseline_json(session_dir)
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.last_profile_trace = "/tmp/profile.tar.gz"
-    s.last_trace_analyze = {}
-    assert coord.dispatcher.admission_denial_for_request("kernel_agent", "trace_analyze") is None

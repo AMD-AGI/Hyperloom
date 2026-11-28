@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import csv
-import json
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -254,96 +253,11 @@ def _collect_operand_shapes(dims: Sequence[Any], dtypes: Sequence[Any], shapes: 
             shapes.append(s)
 
 
-def _invocation_case_from_csv_row(row: dict[str, str]) -> dict[str, Any] | None:
-    """Preserve one ops_unique_args row as an exact invocation case."""
-    raw_dims = str(row.get("Input Dims") or "").strip()
-    raw_types = str(row.get("Input type") or "").strip()
-    raw_concrete = str(row.get("Concrete Inputs") or "").strip()
-    try:
-        dims = _safe_literal_eval(raw_dims or "()")
-        dtypes = _safe_literal_eval(raw_types or "()")
-    except _LITERAL_EVAL_ERRORS:
-        return None
-    if not isinstance(dims, (list, tuple)):
-        return None
-    if not isinstance(dtypes, (list, tuple)):
-        dtypes = ()
-
-    operands: list[str] = []
-    tensor_dtypes: list[str] = []
-    for index, operand in enumerate(dims):
-        dtype = dtypes[index] if index < len(dtypes) else ""
-        rendered = format_operand_shape(operand, dtype)
-        if rendered:
-            operands.append(rendered)
-            tensor_dtypes.append(str(dtype or ""))
-
-    raw_arg_spec = {
-        "input_dims": raw_dims,
-        "input_type": raw_types,
-        "concrete_inputs": raw_concrete,
-    }
-    if not operands and not any(raw_arg_spec.values()):
-        return None
-    return {
-        "operation": str(row.get("name") or ""),
-        "input_shapes": ([{"call_num": 1, "shape": "<br>".join(operands)}] if operands else []),
-        "input_dtypes": tensor_dtypes,
-        "raw_arg_spec": raw_arg_spec,
-    }
-
-
-def _resolve_invocation_cases_from_ops_unique_args_csv(
-    perf_report_csv_dir: Path | str | None,
-    row_matches: Callable[[str], bool],
-) -> list[dict[str, Any]]:
-    """Return distinct CSV invocations without flattening argument boundaries."""
-    if not perf_report_csv_dir:
-        return []
-    csv_path = Path(perf_report_csv_dir) / "ops_unique_args.csv"
-    if not csv_path.is_file():
-        return []
-
-    cases: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    try:
-        with csv_path.open(newline="", encoding="utf-8") as file:
-            for row in csv.DictReader(file):
-                name = str(row.get("name") or "").strip().lower()
-                if not row_matches(name):
-                    continue
-                case = _invocation_case_from_csv_row(row)
-                if case is None:
-                    continue
-                signature = json.dumps(
-                    case,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-                if signature in seen:
-                    continue
-                seen.add(signature)
-                cases.append(case)
-    except (OSError, csv.Error):
-        return []
-    return cases
-
-
 def resolve_fused_moe_shapes_from_csv(
     perf_report_csv_dir: Path | str | None,
 ) -> list[str]:
     """Recover the fused-MoE expert-kernel operand shapes from ``ops_unique_args.csv``."""
     return _resolve_shapes_from_ops_unique_args_csv(
-        perf_report_csv_dir,
-        lambda name: _FUSED_MOE_KERNEL_MARKER in name,
-    )
-
-
-def resolve_fused_moe_invocation_cases_from_csv(
-    perf_report_csv_dir: Path | str | None,
-) -> list[dict[str, Any]]:
-    """Recover every fused-MoE invocation row as an independent case."""
-    return _resolve_invocation_cases_from_ops_unique_args_csv(
         perf_report_csv_dir,
         lambda name: _FUSED_MOE_KERNEL_MARKER in name,
     )
@@ -361,60 +275,3 @@ def resolve_shapes_from_csv_for_op(
         perf_report_csv_dir,
         lambda name: name == target,
     )
-
-
-def resolve_invocation_cases_from_csv(
-    perf_report_csv_dir: Path | str | None,
-    op_name: str,
-) -> list[dict[str, Any]]:
-    """Recover every exact-name invocation row without merging its arguments."""
-    target = str(op_name or "").strip().lower()
-    if not target:
-        return []
-    return _resolve_invocation_cases_from_ops_unique_args_csv(
-        perf_report_csv_dir,
-        lambda name: name == target,
-    )
-
-
-def resolve_raw_arg_spec_from_csv(
-    perf_report_csv_dir: Path | str | None,
-    op_name: str,
-) -> dict[str, str] | None:
-    """Return the matched ``ops_unique_args.csv`` row's raw arg columns verbatim.
-
-    Unlike :func:`resolve_shapes_from_csv_for_op` (which drops scalar/empty
-    operands), this preserves the full ordered argument metadata exactly as the
-    trace recorded it — ``Input Dims`` / ``Input type`` / ``Concrete Inputs`` —
-    so the GEAK harness builder can reconstruct the real call signature
-    (tensors + scalar args in order) instead of inferring it from tensor shapes
-    alone. No parsing, no reshaping: the strings are forwarded as-is.
-
-    Args:
-        perf_report_csv_dir: Directory containing ``ops_unique_args.csv``.
-        op_name: Exact TraceLens op name to match (case-insensitive).
-
-    Returns:
-        ``{"input_dims", "input_type", "concrete_inputs"}`` from the first
-        matching row, or ``None`` when unavailable.
-    """
-    target = str(op_name or "").strip().lower()
-    if not target or not perf_report_csv_dir:
-        return None
-    csv_path = Path(perf_report_csv_dir) / "ops_unique_args.csv"
-    if not csv_path.is_file():
-        return None
-    try:
-        with csv_path.open(newline="", encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                if str(row.get("name") or "").strip().lower() != target:
-                    continue
-                spec = {
-                    "input_dims": str(row.get("Input Dims") or "").strip(),
-                    "input_type": str(row.get("Input type") or "").strip(),
-                    "concrete_inputs": str(row.get("Concrete Inputs") or "").strip(),
-                }
-                return spec if any(spec.values()) else None
-    except (OSError, csv.Error):
-        return None
-    return None

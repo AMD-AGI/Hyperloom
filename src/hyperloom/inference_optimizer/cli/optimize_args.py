@@ -564,7 +564,9 @@ def add_research_arguments(opt: argparse.ArgumentParser) -> None:
         "Default on: ``roofline`` (composite profile + "
         "trace_analyze + analysis.md). Pass ``--no-enable-roofline`` "
         "to use plain ``profile`` instead (lighter — captures the "
-        "trace only, skips trace_analyze). Behaviour is otherwise "
+        "trace only, skips trace_analyze): the session then has no "
+        "trace analysis, analysis.md or hot-kernel list unless the "
+        "block-FP8 GEMM shape capture runs one. Scheduling is "
         "identical (same idempotency keys, same pending-task "
         "dispatch gate, same watermark anchor update).",
     )

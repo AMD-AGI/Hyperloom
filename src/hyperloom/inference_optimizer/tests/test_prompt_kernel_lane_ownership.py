@@ -27,11 +27,8 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
 )
 
 
-# ``trace_analyze`` owns no action, so it is absent from the ownership tables and cannot be derived from them.
-_UNOWNED_REQUESTABLE_KINDS = frozenset({"trace_analyze"})
-
 _BACKTICKED = re.compile(r"`([a-z_]+)`")
-_REQUESTABLE_KINDS_SENTENCE = re.compile(r"MUST be EXACTLY one of(?P<kinds>.*?)—", re.DOTALL)
+_REQUESTABLE_KINDS_SENTENCE = re.compile(r"MUST be EXACTLY(?P<kinds>.*?)—", re.DOTALL)
 
 
 @pytest.fixture(scope="module")
@@ -56,8 +53,7 @@ def _expected_requestable_kinds() -> frozenset[str]:
     kinds = set(KERNEL_ACTION_REQUEST_KINDS.values()) | set(KERNEL_REQUEST_KIND_ALIASES)
     kinds -= set(COORDINATOR_OWNED_KERNEL_REQUEST_KINDS)
     proposable = set(_ps.allowed_actions_for(_ps.PHASE_KERNEL_AGENT))
-    kinds = {k for k in kinds if REQUEST_KIND_TO_OWNED_ACTION[k] in proposable}
-    return frozenset(kinds | _UNOWNED_REQUESTABLE_KINDS)
+    return frozenset(k for k in kinds if REQUEST_KIND_TO_OWNED_ACTION[k] in proposable)
 
 
 def test_requestable_kind_whitelist_matches_the_ownership_tables(kernel_prompt):
@@ -77,16 +73,9 @@ def test_no_request_template_exists_for_a_coordinator_owned_kind(kernel_prompt):
 
     # The requestable kinds keep theirs, so the assertions above cannot pass by the whole reference section having
     # vanished.
-    assert "kind: 'trace_analyze'" in kernel_prompt
     assert "kind: 'integrate'" in kernel_prompt
     assert "## 6. KERNEL-OPT REQUEST REFERENCE" in kernel_prompt
     assert "### Kernel request kinds" in kernel_prompt
-
-
-def test_trace_analyze_is_not_presented_as_a_dispatch_prerequisite(kernel_prompt):
-    """Source rewrite is the controller's; nothing the model does gates a lane."""
-    assert "must precede every `run_optimization`" not in kernel_prompt
-    assert "### `trace_analyze` — read-only candidate analysis" in kernel_prompt
 
 
 def test_the_owned_lanes_are_named_as_coordinator_owned(kernel_prompt):

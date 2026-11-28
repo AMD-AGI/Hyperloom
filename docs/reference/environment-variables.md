@@ -360,9 +360,9 @@ Globally, on every backend including the default `geak`:
 - **`kernel_opt` and `gemm_tuning` are no longer model-issued.** Orchestration
   can neither propose either action nor request `run_optimization` /
   `run_gemm_tuning` of the kernel agent: a proposal of either action is refused
-  as `phase_incompatible`, a request for `run_gemm_tuning` as `request_kind`,
-  and `run_optimization` has no handler, so a request for it is answered with a
-  failed `unknown_kernel_kind` response. The Coordinator dispatches each lane
+  as `phase_incompatible`, and a request for `run_gemm_tuning` or
+  `run_optimization` as `request_kind`: the first is a Coordinator-owned lane
+  and the second has no handler. The Coordinator dispatches each lane
   once at KERNEL entry from a lane budget, the way the fusion lane already
   worked. `integrate` stays proposable, so draining the KEEP queue is still the
   model's job.
@@ -875,7 +875,7 @@ recorded do not contradict the candidate's.
 
 | Variable | Default | Description |
 |---|---|---|
-| `HYPERLOOM_TRACE_ANALYSIS_ROUTE` | `agent` | `agent` runs the TraceLens skill under a model. `non-llm` runs TraceLens without a model and writes `analysis.json` from the TraceLens report; it shares the gates, candidates and reports with `agent` but adds no collective candidates and writes no prose, and the report's trace-quality warnings appear in `trace_health_warnings`. A `trace_analyze` request's `analysis_route` key overrides it. Any other value fails the request. |
+| `HYPERLOOM_TRACE_ANALYSIS_ROUTE` | `agent` | `agent` runs the TraceLens skill under a model. `non-llm` runs TraceLens without a model and writes `analysis.json` from the TraceLens report; it shares the gates, candidates and reports with `agent` but adds no collective candidates and writes no prose, and the report's trace-quality warnings appear in `trace_health_warnings`. A caller of the analysis that names `analysis_route` in its payload overrides it: the multi-branch `roofline` tool and the per-role analysis of a node-list PD trace both pass `non-llm`. Any other value fails the analysis with `invalid_analysis_route`. |
 
 ## TraceLens analysis budgets
 

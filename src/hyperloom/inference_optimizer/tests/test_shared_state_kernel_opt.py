@@ -10,7 +10,6 @@ import pytest
 from hyperloom.orchestrator.kernel import kernel_decisions as kd
 from hyperloom.orchestrator.state.shared_state import SharedState
 
-from .conftest import seed_integrate_verdict
 from .conftest import seed_kernel_keep as _seed_keep
 
 
@@ -20,7 +19,6 @@ def state() -> SharedState:
 
 
 # Invariant 1: empty kernel_id is a no-op Invariant 2: KEEP wins; non-KEEP never overwrites a pending KEEP
-# Vendor-playbook KEEPs (e.g. mori dispatch/combine) must never auto-deploy.
 # Pending-KEEP queue semantics
 def test_pending_keep_drains_in_micro_speedup_order(state: SharedState):
     """KEEPs on different source_files drain highest-micro-first as the stack fills."""
@@ -117,11 +115,8 @@ def test_pending_keep_excludes_rejected_and_integrated(state: SharedState):
 
 
 # untried_hot_reusable_kernels report gate.
-def _set_trace(state: SharedState, *, hot_kernels, task_groups=None):
-    state.last_trace_analyze = {
-        "hot_kernels": hot_kernels,
-        "task_groups": task_groups or [],
-    }
+def _set_trace(state: SharedState, *, hot_kernels):
+    state.last_trace_analyze = {"hot_kernels": hot_kernels}
 
 
 def test_untried_hot_kernels_returns_only_reusable_above_threshold(state: SharedState):
@@ -201,154 +196,9 @@ def test_untried_hot_kernels_reproduces_log1_session_164910Z(state: SharedState)
     assert "k006" not in untried  # non-reusable despite 15.6%
 
 
-def test_untried_hot_kernels_vendor_playbook_group_gated_on_aggregate(state: SharedState):
-    """mori's dispatch (7%) + combine (5%) must clear the gate together."""
-    _set_trace(
-        state,
-        hot_kernels=[
-            {
-                "kernel_id": "k010",
-                "gpu_pct": 7.0,
-                "vendor_playbook_aggregate_gpu_pct": 12.0,
-                "reusable_native_kernel": True,
-                "source_file": "/opt/venv/.../mori_ep_config.py",
-                "name": "mori::EpDispatchCombineOp::dispatch",
-            },
-            {
-                "kernel_id": "k011",
-                "gpu_pct": 5.0,
-                "vendor_playbook_aggregate_gpu_pct": 12.0,
-                "reusable_native_kernel": True,
-                "source_file": "/opt/venv/.../mori_ep_config.py",
-                "name": "mori::EpDispatchCombineOp::combine",
-            },
-        ],
-    )
-    untried = kd.untried_hot_reusable_kernels(state)
-    # Both members carry the group's full aggregate and must both clear the gate.
-    assert set(untried) == {"k010", "k011"}, "vendor-playbook group must not be dropped as below_min_gpu_pct"
-
-
-def test_untried_hot_kernels_vendor_playbook_floor_still_applies(state: SharedState, monkeypatch):
-    """A playbook's min_gpu_pct_floor is a floor on the *threshold*, not a bypass: an aggregate that clears a loosened env override but not the playbook's own floor must still be gated out."""
-    _set_trace(
-        state,
-        hot_kernels=[
-            {
-                "kernel_id": "k010",
-                "gpu_pct": 2.0,
-                "vendor_playbook_aggregate_gpu_pct": 3.0,
-                "vendor_playbook_min_gpu_pct_floor": 10.0,
-                "reusable_native_kernel": True,
-                "source_file": "/opt/venv/.../mori_ep_config.py",
-                "name": "mori::EpDispatchCombineOp::dispatch",
-            },
-        ],
-    )
-    # Loosening the env default to 1.0% must not let this in: the playbook's own floor (10.0) still applies.
-    monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "1.0")
-    untried = kd.untried_hot_reusable_kernels(state)
-    assert untried == []
-
-
-def test_untried_hot_kernels_vendor_playbook_gate_survives_real_projection(state: SharedState):
-    """Regression for PR #1191 tech-lead finding: the aggregate/floor gate was a no-op on the production path because ``untried_hot_reusable_kernels()`` reads ``hot_kernels_top15`` (SharedState._build_hot_kernel_summaries()'s projected ``summary_entry``, an explicit key whitelist) in preference to raw ``hot_kernels``, and that whitelist dropped ``vendor_playbook_aggregate_gpu_pct`` / ``vendor_playbook_min_gpu_pct_floor`` / ``vendor_playbook_group_id`` / ``patch_strategy`` entirely."""
-    state.record_trace_analyze(
-        {"trace_input": "/tmp/trace.json"},
-        {
-            "status": "ok",
-            "hot_kernels": [
-                {
-                    "kernel_id": "k010",
-                    "gpu_pct": 7.0,
-                    "vendor_playbook_aggregate_gpu_pct": 12.0,
-                    "vendor_playbook_group_id": "mori_ep_dispatch_combine",
-                    "patch_strategy": "vendor_playbook",
-                    "reusable_native_kernel": True,
-                    "source_file": "/opt/venv/.../mori_ep_config.py",
-                    "name": "mori::EpDispatchCombineOp::dispatch",
-                },
-                {
-                    "kernel_id": "k011",
-                    "gpu_pct": 5.0,
-                    "vendor_playbook_aggregate_gpu_pct": 12.0,
-                    "vendor_playbook_group_id": "mori_ep_dispatch_combine",
-                    "patch_strategy": "vendor_playbook",
-                    "reusable_native_kernel": True,
-                    "source_file": "/opt/venv/.../mori_ep_config.py",
-                    "name": "mori::EpDispatchCombineOp::combine",
-                },
-            ],
-        },
-    )
-    # The projection must actually carry the fields through -- this is the exact assertion that fails without the
-    # _build_hot_kernel_summaries() fix.
-    projected = {row["kernel_id"]: row for row in state.last_trace_analyze["hot_kernels_top15"]}
-    assert projected["k010"]["vendor_playbook_aggregate_gpu_pct"] == 12.0
-    assert projected["k010"]["patch_strategy"] == "vendor_playbook"
-    assert projected["k010"]["vendor_playbook_group_id"] == "mori_ep_dispatch_combine"
-
-    # Split-load pass-through direction: neither member clears the 10% default alone (7%, 5%), but the pair's
-    # aggregate (12%) must.
-    untried = kd.untried_hot_reusable_kernels(state)
-    assert set(untried) == {"k010", "k011"}, (
-        "aggregate gate must not degrade to bare gpu_pct on the real "
-        "record_trace_analyze() -> hot_kernels_top15 production path"
-    )
-
-
-def test_untried_hot_kernels_vendor_playbook_floor_still_applies_via_real_projection(
-    state: SharedState,
-    monkeypatch,
-):
-    """Unsafe-direction counterpart of the test above: a playbook's own ``min_gpu_pct_floor`` must still block dispatch through the real projection path, even when the caller has loosened ``HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT``."""
-    state.record_trace_analyze(
-        {"trace_input": "/tmp/trace.json"},
-        {
-            "status": "ok",
-            "hot_kernels": [
-                {
-                    "kernel_id": "k010",
-                    "gpu_pct": 2.0,
-                    "vendor_playbook_aggregate_gpu_pct": 3.0,
-                    "vendor_playbook_min_gpu_pct_floor": 10.0,
-                    "reusable_native_kernel": True,
-                    "source_file": "/opt/venv/.../mori_ep_config.py",
-                    "name": "mori::EpDispatchCombineOp::dispatch",
-                },
-            ],
-        },
-    )
-    projected = state.last_trace_analyze["hot_kernels_top15"][0]
-    assert projected["vendor_playbook_min_gpu_pct_floor"] == 10.0
-
-    monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "1.0")
-    untried = kd.untried_hot_reusable_kernels(state)
-    assert untried == [], (
-        "the playbook's own floor must survive the real projection path "
-        "and still block dispatch even under a loosened env override"
-    )
-
-
-def test_untried_hot_kernels_collapses_by_task_group(state: SharedState):
-    """task_group dedup: same AST function -> one slot."""
-    _set_trace(
-        state,
-        hot_kernels=[
-            {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
-            {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
-        ],
-        task_groups=[
-            {"primary_kernel_id": "k002", "kernel_ids": ["k001", "k002"]},
-        ],
-    )
-    untried = kd.untried_hot_reusable_kernels(state)
-    assert len(untried) == 1  # shared task_group -> one slot
-
-
 def test_untried_hot_kernels_rank_on_tracelens_order_via_real_projection(state: SharedState, monkeypatch):
-    """TraceLens' task priority beats a hotter kernel, its group slot goes to the highest-impact member, and an
-    unranked collective keeps a slot of its own past the cap."""
+    """TraceLens' task priority beats a hotter kernel, equal priorities order by impact, and an unranked collective
+    keeps a slot of its own past the cap."""
     hot = [
         {"kernel_id": kid, "gpu_pct": pct, "tracelens_pitem_rank": rank, "impact_score": score}
         for kid, pct, rank, score in [
@@ -365,29 +215,11 @@ def test_untried_hot_kernels_rank_on_tracelens_order_via_real_projection(state: 
         {
             "status": "ok",
             "hot_kernels": hot,
-            "task_groups": [{"primary_kernel_id": "k002", "kernel_ids": ["k002", "k003"]}],
         },
     )
-    assert kd.untried_hot_reusable_kernels(state) == ["k003", "k001", "k004"]
+    assert kd.untried_hot_reusable_kernels(state) == ["k003", "k002", "k001", "k004"]
     monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_GATE_TOP_N", "1")
     assert kd.untried_hot_reusable_kernels(state) == ["k003", "k004"]
-
-
-def test_untried_hot_kernels_skips_when_any_group_member_attempted(state: SharedState):
-    """An attempted group member marks the whole task_group tried."""
-    _set_trace(
-        state,
-        hot_kernels=[
-            {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
-            {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
-        ],
-        task_groups=[
-            {"primary_kernel_id": "k002", "kernel_ids": ["k001", "k002"]},
-        ],
-    )
-    seed_integrate_verdict(state, "k002", source_file="/p/moe_op.py", task_group_key="k002")
-    untried = kd.untried_hot_reusable_kernels(state)
-    assert untried == []
 
 
 def test_untried_hot_kernels_skips_when_source_file_integrated(state: SharedState):

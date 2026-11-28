@@ -27,19 +27,16 @@ from .kernel_event import (
     ROW_GEAK_ATTEMPT,
     ROW_GEAK_DISCOVERY,
     ROW_INTEGRATE,
-    ROW_TRACE_ANALYZE,
     SECTION_DISCOVERED,
     SECTION_EVENT,
     SECTION_GEAK_ATTEMPT,
     SECTION_GEAK_DISCOVERY,
     SECTION_INTEGRATE,
-    SECTION_TRACE_ANALYZE,
-    TRACE_ANALYZE_TRIGGER_BUS_REQUEST,
     _republish_closed_event,
     kernel_event_id,
 )
 from .kernel_gain import claimed_gain
-from .kernel_records import IntegrateVerdict, TraceAnalyzeRun
+from .kernel_records import IntegrateVerdict
 
 log = logging.getLogger(__name__)
 
@@ -47,7 +44,6 @@ __all__ = [
     "record_geak_attempts",
     "record_integrate_axis",
     "record_integrate_verdict",
-    "record_trace_analyze_request",
     "reject_geak_attempts",
 ]
 
@@ -291,42 +287,6 @@ def _write_discovered_kernels(
             row_type=ROW_DISCOVERED,
             natural_ids=(str(snapshot_id or 0), str(row.get("kernel_id") or f"rank:{rank}")),
         )
-
-
-def record_trace_analyze_request(*, macro_cycle: Any, run: TraceAnalyzeRun) -> None:
-    """Record an analysis an agent requested through the bus, not a phase.
-
-    A ``trace_analyze`` dispatched this way advances the roofline snapshot
-    counter and replaces the analysis cache, but it opens no roofline event of
-    its own -- the counter simply incremented with nothing on the timeline to
-    explain it, and the kernel table the analysis produced reached the report
-    only by way of the state projection. The row is attached to the visit that
-    was running when the request landed, which is the only event that can
-    account for it, and is written only when that event exists so a bus
-    request never mints one.
-
-    ``status`` is ``ok`` or ``failed``.
-    """
-    if not str(run.run_id or ""):
-        return
-    sink = EventSink(kernel_event_id(macro_cycle), producer=PRODUCER)
-    if not sink.has_row(SECTION_EVENT):
-        log.debug(
-            "kernel timeline: no event %s to hold the trace_analyze request %s",
-            sink.event_id,
-            run.run_id,
-        )
-        return
-    sink.record(
-        SECTION_TRACE_ANALYZE,
-        run.row(TRACE_ANALYZE_TRIGGER_BUS_REQUEST),
-        row_type=ROW_TRACE_ANALYZE,
-        natural_ids=str(run.run_id or ""),
-    )
-    produced = _as_dict(run.snapshot)
-    if produced:
-        _write_discovered_kernels(sink, produced, provenance="trace_analyze_run")
-    _republish_closed_event(sink.event_id)
 
 
 def _discovered_kernel_row(

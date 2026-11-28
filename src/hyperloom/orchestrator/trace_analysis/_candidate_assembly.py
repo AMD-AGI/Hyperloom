@@ -15,7 +15,6 @@ from hyperloom.common import kernel_source_contract as _KSC
 from hyperloom_common.io import JsonFormat, atomic_write_json
 from hyperloom_common.kernel_names import without_model_names
 
-from ._harness_discovery import find_benchmark_files, find_repo_root
 from ._io_utils import append_log
 from ._kernel_category import canonical_category
 from ._kernel_classification import (
@@ -27,13 +26,9 @@ from ._kernel_classification import (
 from ._kernel_roofline import _resolve_flydsl_source_fallback
 from ._trace_shapes import (
     _FUSED_MOE_KERNEL_MARKER,
-    resolve_fused_moe_invocation_cases_from_csv,
     resolve_fused_moe_shapes_from_csv,
-    resolve_invocation_cases_from_csv,
-    resolve_raw_arg_spec_from_csv,
     resolve_shapes_from_csv_for_op,
 )
-from ._vendor_operator_playbooks import match_vendor_operator_playbook, resolve_kernel_anchor_path
 
 log = logging.getLogger(__name__)
 
@@ -188,51 +183,13 @@ def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] |
     reusable, skip_reason = classify_patchability(item)
     item["reusable_native_kernel"] = reusable
     item["skip_reason"] = skip_reason
-    playbook = match_vendor_operator_playbook(item)
-    if playbook is not None:
-        item["patch_strategy"] = "vendor_playbook"
-        item["vendor_operator_playbook"] = playbook
-        item["vendor_playbook_role"] = playbook.get("role", "")
-        # Coordinator kernel handlers gate dispatch on a non-empty, path-shaped
-        # source_file before they will send work to any backend; a vendor
-        # playbook candidate has no rewritable device source, so point that
-        # field at the task bundle's anchor file instead of leaving it
-        # empty (which would otherwise fall through as "missing_native_source").
-        #
-        # The anchor also overrides whatever the grep tier guessed, and does so
-        # whether or not the guess was right. A registry match is a curated
-        # statement that this operator is tuned through a task bundle, so the
-        # device source is not the file a backend should be handed even when
-        # the guess found it -- and the guess can just as easily be a same-word
-        # collision (``mori::EpDispatchCombineOp::dispatch`` reduces to the
-        # keyword "dispatch" and lands on an unrelated vendor header).
-        # Unconditional, and safe to be: the registry refuses an entry with no
-        # ``kernel_anchor``, so ``resolve_kernel_anchor_path`` cannot come back
-        # empty for a playbook that matched. Guarding it here instead cost two
-        # commits and produced a real deadlock -- the guard's marker gated on
-        # ``source_file``, so a row with neither anchor nor path read as
-        # anchor-backed, went into ``protected_ids``, and the row most in need of
-        # the review was the one refused it. The shape it defended against does
-        # not occur in the data; the shape it created did.
-        anchor = resolve_kernel_anchor_path(playbook)
-        if source_file and source_file != anchor:
-            # Keep the displaced path for triage: an unconditional override is
-            # only auditable if the value it replaced is still recorded.
-            item["source_file_superseded_by_playbook"] = source_file
-        item["source_file"] = anchor
-    item["benchmark_files"] = find_benchmark_files(
-        item["name"], item.get("kernel_repo", ""), item.get("source_file", "")
-    )
     # The nccl-summary lane identifies collectives from TraceLens' own nccl_summary table plus a resolved device
     # symbol, which outranks a name guess. Re-deriving over it unresolves rows the lane already resolved:
     # small_collective, EpDispatchIntraNodeKernel_bf16 and ncclDevKernel_Generic_1 all carry is_multigpu=True from
-    # _nccl_summary_candidates and all read False by name. That flip reaches the invocation contract built below,
-    # which gates kind == "collective" and world_size on this flag -- so the rows that most need a rank count would
-    # be published as ordinary single-rank work.
+    # _nccl_summary_candidates and all read False by name.
     authoritative = bool(item.get("is_multigpu")) and str(item.get("candidate_source") or "") == "nccl_summary"
     if not authoritative:
         item["is_multigpu"] = is_multigpu_kernel(item["name"], item.get("source_file", ""))
-    item["num_gpus_recommended"] = 2 if item["is_multigpu"] else 1
     item["recommended_backends"] = recommend_backends(item)
     item["optimization_notes"] = build_notes(item)
     if op_cat_map and not str(item.get("tracelens_category") or "").strip():
@@ -243,52 +200,25 @@ def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] |
     item.setdefault("source_path", item.get("source_file", ""))
 
 
-def _recover_csv_invocations(item: dict[str, Any], perf_report_csv_dir: Path | str | None) -> None:
-    """Fill a candidate's missing shapes, invocation cases and raw arg spec from ``ops_unique_args.csv``.
+def _recover_csv_shapes(item: dict[str, Any], perf_report_csv_dir: Path | str | None) -> None:
+    """Fill a candidate's missing shapes from ``ops_unique_args.csv``.
 
     The fused-MoE expert kernel's trace event carries no Input Dims, so it takes the sidecar's fused-MoE rows
     instead of an exact-name match.
     """
-    had_observed_shapes = bool(item.get("shapes"))
-    operation = str(item.get("name") or "")
-    if _is_fused_moe_candidate(item):
-        fused_moe_shapes = resolve_fused_moe_shapes_from_csv(perf_report_csv_dir)
-        invocation_cases = resolve_fused_moe_invocation_cases_from_csv(perf_report_csv_dir)
-        if not item.get("shapes") and fused_moe_shapes:
-            item["shapes"] = fused_moe_shapes
-            item["shape_provenance"] = "torch_trace"
-    else:
-        invocation_cases = resolve_invocation_cases_from_csv(perf_report_csv_dir, operation)
     if not item.get("shapes"):
-        csv_shapes = resolve_shapes_from_csv_for_op(perf_report_csv_dir, operation)
+        fused_moe_shapes = (
+            resolve_fused_moe_shapes_from_csv(perf_report_csv_dir) if _is_fused_moe_candidate(item) else []
+        )
+        csv_shapes = fused_moe_shapes or resolve_shapes_from_csv_for_op(
+            perf_report_csv_dir, str(item.get("name") or "")
+        )
         if csv_shapes:
             item["shapes"] = csv_shapes
             item["shape_provenance"] = "torch_trace"
-    if invocation_cases:
-        if had_observed_shapes:
-            invocation_cases = [
-                {
-                    "operation": operation,
-                    "input_shapes": (item.get("input_shapes") or item.get("shapes") or []),
-                    "input_dtypes": item.get("input_dtypes") or [],
-                    "raw_arg_spec": item.get("raw_arg_spec") or {},
-                },
-                *invocation_cases,
-            ]
-        item["invocation_cases"] = invocation_cases
-    # Mark trace-extracted shapes so the dispatch-time validator knows their provenance.
+    # Shapes read from the trace say so; the collective lane copies the provenance with any shapes it borrows.
     if item.get("shapes"):
         item.setdefault("shape_provenance", "torch_trace")
-    # Forward the full ordered arg metadata so GEAK's harness builder can
-    # reconstruct the exact call signature.
-    if not item.get("raw_arg_spec"):
-        raw_spec = (
-            invocation_cases[0].get("raw_arg_spec")
-            if invocation_cases
-            else resolve_raw_arg_spec_from_csv(perf_report_csv_dir, operation)
-        )
-        if raw_spec:
-            item["raw_arg_spec"] = raw_spec
 
 
 def _finalize_candidates(
@@ -317,7 +247,7 @@ def _finalize_candidates(
         item.setdefault("source_file", "")
         item.setdefault("source_type", "unknown")
         item.setdefault("shapes", [])
-        _recover_csv_invocations(item, perf_report_csv_dir)
+        _recover_csv_shapes(item, perf_report_csv_dir)
         item["kernel_id"] = f"k{idx:03d}"
         item["duration_us"] = round(item["duration_us"], 3)
         # Keep TraceLens' authoritative pct_e2e when present, including a real
@@ -326,9 +256,7 @@ def _finalize_candidates(
         if item.get("gpu_pct") is None:
             item["gpu_pct"] = round(float(item.get("duration_us") or 0.0) / sum_dur * 100.0, 3)
         # source_file was already resolved by the analysis.json reader through
-        # TraceLens' resolve_kernel_source; classify its type host-side and record
-        # the repo it lives in for the invocation spec.
-        item["kernel_repo"] = find_repo_root(item.get("source_file", ""))
+        # TraceLens' resolve_kernel_source; classify its type host-side.
         item["source_type"] = source_type_for(item["name"], item.get("source_file", ""))
         # FlyDSL pseudo-ops carry no real source_file; inject the real FlyDSL
         # MoE kernel source before the patchability gate.
@@ -338,7 +266,6 @@ def _finalize_candidates(
                 _fb = _resolve_flydsl_source_fallback()
                 if _fb:
                     item["source_file"] = _fb
-                    item["kernel_repo"] = find_repo_root(_fb) or item["kernel_repo"]
                     item["flydsl_source_from_fallback"] = True
         # Downgrade thin dispatch wrappers to vendor_binary so recommend_backends drops them.
         if item["source_type"] != "vendor_binary" and is_vendor_dispatch_wrapper(
@@ -348,72 +275,7 @@ def _finalize_candidates(
             item["vendor_dispatch_wrapper"] = True
         item["runtime_generated_kernel"] = is_runtime_generated_kernel(item["name"], item.get("source_file", ""))
         _stamp_candidate_metadata(item, op_cat_map)
-    _apply_vendor_operator_playbook_grouping(top)
     return top
-
-
-def _apply_vendor_operator_playbook_grouping(top: list[dict[str, Any]]) -> None:
-    """Sum GPU share across a vendor playbook's sibling roles; mutates ``top``.
-
-    mori's dispatch and combine are two separate kernel launches under the
-    hood, but this deliberately invokes them as **one** Forge task/session
-    (see KernelForge PR #88): each is gated on the *sum* of dispatch's +
-    combine's ``gpu_pct``, since together they are one logical round trip.
-    Each member keeps its own candidate entry (so either one can be picked as
-    the ``--kernel-id`` the orchestrator dispatches); the vendor-playbook
-    dispatch path de-duplicates so only one forge-loop session actually
-    runs per group per analysis session.
-    """
-    for group_id, members in _vendor_playbook_groups(top).items():
-        aggregate = round(sum(float(m.get("gpu_pct") or 0.0) for m in members), 3)
-        member_ids = [str(m.get("kernel_id") or "") for m in members]
-        floor = _vendor_playbook_floor(members)
-        for member in members:
-            member["vendor_playbook_group_id"] = group_id
-            # Namespaced (not bare "aggregate_gpu_pct"): that name is already
-            # an existing task_group-level concept (the sum of GPU% across a
-            # task_group's rows -- see tracelens_skill_runner.py),
-            # stamped on task_group dicts, not candidate
-            # rows. Candidate rows don't carry it today, so reusing the name
-            # here is currently harmless, but any future code that flattens
-            # a task_group onto its candidate rows would silently change
-            # every ordinary group's gating behavior the moment it did (PR
-            # #1191 review finding #7).
-            member["vendor_playbook_aggregate_gpu_pct"] = aggregate
-            member["vendor_playbook_group_kernel_ids"] = list(member_ids)
-            if floor is not None:
-                # Consumed by effective_hot_kernel_min_gpu_pct() in the
-                # orchestrator's hot-kernel gate (kernel_decisions.py /
-                # request_handlers.py) so a heavier forge-loop-session
-                # playbook isn't dispatched below its own floor even when
-                # HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT is loosened elsewhere.
-                member["vendor_playbook_min_gpu_pct_floor"] = floor
-
-
-def _vendor_playbook_groups(top: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    """Group the vendor-playbook candidates by their playbook id, in candidate order."""
-    groups: dict[str, list[dict[str, Any]]] = {}
-    for item in top:
-        if not isinstance(item, dict) or item.get("patch_strategy") != "vendor_playbook":
-            continue
-        playbook = item.get("vendor_operator_playbook")
-        group_id = str(playbook.get("id") or "") if isinstance(playbook, dict) else ""
-        if not group_id:
-            continue
-        groups.setdefault(group_id, []).append(item)
-    return groups
-
-
-def _vendor_playbook_floor(members: list[dict[str, Any]]) -> float | None:
-    """Return the first member's declared GPU-share floor, or ``None`` when absent or malformed."""
-    for member in members:
-        playbook = member.get("vendor_operator_playbook")
-        if isinstance(playbook, dict) and playbook.get("min_gpu_pct_floor") is not None:
-            try:
-                return float(playbook["min_gpu_pct_floor"])
-            except (TypeError, ValueError):
-                return None
-    return None
 
 
 def _candidate_resolution_method(item: dict[str, Any]) -> str:

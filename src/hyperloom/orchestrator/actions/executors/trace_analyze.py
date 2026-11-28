@@ -1,14 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""TraceLens trace analysis: candidate env enrichment, argv assembly, and the trace_analyze handler."""
+"""TraceLens trace analysis: argv assembly and the trace_analyze handler."""
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import shlex
 import subprocess
 import sys
 import time
@@ -36,33 +34,6 @@ PD_ROLE_TRACE_KEY = "pd_role_trace"
 #: Payload key: the physical cards the caller holds for the arch microbenchmark (``--arch-gpus``); an empty list lets it
 #: run on none. Absent, the analysis picks among the visible GPUs.
 ARCH_GPUS_PARAM = "arch_gpus"
-
-_CANDIDATE_ENV_KEYS = {
-    "CONC",
-    "ISL",
-    "OSL",
-    "TP",
-    "NUM_PROMPTS",
-    "NUM_WARMUPS",
-    "MAX_MODEL_LEN",
-    "RANDOM_RANGE_RATIO",
-    "ROCR_VISIBLE_DEVICES",
-    "CUDA_VISIBLE_DEVICES",
-}
-
-
-_CANDIDATE_ENV_PREFIXES = (
-    "SGLANG_",
-    "VLLM_",
-    "AITER_",
-    "TRITON_",
-    "FLYDSL_",
-    "HIPBLASLT_",
-    "PYTORCH_TUNABLEOP_",
-)
-
-
-_SENSITIVE_ENV_PARTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
 
 
 def _tracelens_root_error(root: Path) -> str | None:
@@ -148,57 +119,14 @@ def _coerce_runtime_value(value: Any) -> Any:
     return value
 
 
-def _candidate_env_allowed(key: str) -> bool:
-    """Decide whether an env var may be forwarded as candidate metadata.
-
-    Rejects anything that looks sensitive (keys, tokens, secrets, passwords,
-    credentials); otherwise allows the key if it is in the explicit allowlist
-    or starts with a known safe prefix (e.g. ``SGLANG_``, ``VLLM_``).
-
-    Args:
-        key (str): Environment variable name to test.
-
-    Returns:
-        bool: ``True`` if the env var is safe to surface, ``False`` otherwise.
-    """
-    upper = key.upper()
-    if any(part in upper for part in _SENSITIVE_ENV_PARTS):
-        return False
-    return key in _CANDIDATE_ENV_KEYS or any(key.startswith(prefix) for prefix in _CANDIDATE_ENV_PREFIXES)
-
-
-def _split_server_args(raw: str) -> list[str]:
-    """Tokenize a raw server-args string into an argv list.
-
-    Args:
-        raw (str): Raw shell-style server argument string.
-
-    Returns:
-        list[str]: The parsed argv tokens, or an empty list when ``raw`` is
-            falsy or cannot be parsed (a warning is logged on parse failure).
-    """
-    try:
-        return shlex.split(raw) if raw else []
-    except ValueError:
-        log.warning("failed to parse materialized server args; preserving raw string")
-        return []
-
-
-def _load_materialized_workload_metadata(config_path: str) -> dict[str, Any]:
-    """Extract runtime workload context from a materialized point YAML.
-
-    Reads the config's ``benchmark`` block and derives the per-framework
-    server-args env name, the allowed candidate env vars, and a normalized
-    ``runtime_args`` view (framework, model, precision, server args, and the
-    coerced workload knobs such as ``tp`` / ``conc`` / ``isl`` / ``osl``).
+def _materialized_workload(config_path: str) -> dict[str, Any]:
+    """The split hints (``conc``, ``osl``, ``random_range_ratio``) of a materialized point YAML, coerced to numbers.
 
     Args:
         config_path (str): Path to the materialized workload YAML config.
 
     Returns:
-        dict[str, Any]: A dict with ``env_vars`` and ``runtime_args`` keys, or
-            an empty dict when the path is missing/unreadable. Empty/``None``
-            ``runtime_args`` entries are dropped.
+        dict[str, Any]: The hints the config sets, or an empty dict when the path is missing or unreadable.
     """
     if not config_path:
         return {}
@@ -208,150 +136,15 @@ def _load_materialized_workload_metadata(config_path: str) -> dict[str, Any]:
     import yaml
 
     try:
-        point = read_benchmark_point(path)
+        envs = read_benchmark_point(path).envs
     except (OSError, ValueError, yaml.YAMLError) as exc:
         log.warning("failed to read materialized workload config %s: %s", path, exc)
         return {}
-    envs = point.envs
-    framework = point.framework.strip().lower()
-    # Per-framework env-name source of truth (e.g. atom reads ``EXTRA_ATOM_ARGS``).
-    from hyperloom.inference_optimizer.framework_registry import server_args_env_name
-
-    server_key = server_args_env_name(framework)
-    server_args = str(envs.get(server_key) or "").strip()
-    workload = {
+    return {
         out_key: _coerce_runtime_value(envs[src_key])
-        for out_key, src_key in (
-            ("tp", "TP"),
-            ("conc", "CONC"),
-            ("isl", "ISL"),
-            ("osl", "OSL"),
-            ("num_prompts", "NUM_PROMPTS"),
-            ("num_warmups", "NUM_WARMUPS"),
-            ("max_model_len", "MAX_MODEL_LEN"),
-            ("random_range_ratio", "RANDOM_RANGE_RATIO"),
-        )
+        for out_key, src_key in (("conc", "CONC"), ("osl", "OSL"), ("random_range_ratio", "RANDOM_RANGE_RATIO"))
         if src_key in envs
     }
-    runtime_args = {
-        "materialized_config": str(path),
-        "framework": framework or None,
-        "model": point.model,
-        "precision": point.precision,
-        "server_args": server_args,
-        "server_args_argv": _split_server_args(server_args),
-        "workload": workload,
-    }
-    return {
-        "env_vars": {str(key): str(value) for key, value in envs.items() if _candidate_env_allowed(str(key))},
-        "runtime_args": {key: value for key, value in runtime_args.items() if value not in (None, "", {})},
-    }
-
-
-def _enrich_candidate_runtime_metadata(
-    candidates: Any,
-    metadata: dict[str, Any],
-) -> None:
-    """Backfill runtime env/args metadata onto each candidate kernel in place.
-
-    For every dict candidate, sets default ``env_vars`` and ``runtime_args``
-    entries from ``metadata`` without overwriting values the candidate already
-    carries (uses ``setdefault`` semantics).
-
-    Args:
-        candidates (Any): Expected to be a list of candidate dicts; ignored if
-            not a list.
-        metadata (dict[str, Any]): Metadata with ``env_vars`` / ``runtime_args``
-            sub-dicts as produced by
-            :func:`_load_materialized_workload_metadata`.
-
-    Returns:
-        None: The ``candidates`` list is mutated in place.
-    """
-    if not isinstance(candidates, list) or not metadata:
-        return
-    env_vars = metadata.get("env_vars") if isinstance(metadata.get("env_vars"), dict) else {}
-    runtime_args = metadata.get("runtime_args") if isinstance(metadata.get("runtime_args"), dict) else {}
-    for item in candidates:
-        if not isinstance(item, dict):
-            continue
-        item_env = item.setdefault("env_vars", {})
-        if isinstance(item_env, dict):
-            for key, value in env_vars.items():
-                item_env.setdefault(key, value)
-        item_args = item.setdefault("runtime_args", {})
-        if isinstance(item_args, dict):
-            for key, value in runtime_args.items():
-                item_args.setdefault(key, value)
-
-
-def _enrich_candidate_trace_report(candidates: Any, report_path: str) -> None:
-    """Stamp the TraceLens report path onto each candidate kernel in place.
-
-    Args:
-        candidates (Any): Expected to be a list of candidate dicts; ignored if
-            not a list.
-        report_path (str): Path to the TraceLens ``analysis.md`` report; ignored
-            if empty.
-
-    Returns:
-        None: Each dict candidate gains a default ``trace_report_path`` entry.
-    """
-    if not isinstance(candidates, list) or not report_path:
-        return
-    for item in candidates:
-        if isinstance(item, dict):
-            item.setdefault("trace_report_path", report_path)
-
-
-def _enrich_candidates_artifact(
-    candidates_path: str,
-    metadata: dict[str, Any],
-    *,
-    trace_report_path: str = "",
-) -> None:
-    """Rewrite the on-disk candidates artifact with enriched metadata.
-
-    Loads the ``candidates_path`` JSON, enriches its ``hot_kernels`` and
-    ``hot_kernels_top15`` lists with runtime metadata and (optionally) the
-    TraceLens report path, then writes the artifact back out (pretty-printed,
-    key-sorted). No-op when the path is missing or unreadable.
-
-    Args:
-        candidates_path (str): Path to the candidates JSON artifact to update.
-        metadata (dict[str, Any]): Runtime metadata to merge into each kernel.
-        trace_report_path (str): Optional TraceLens report path to record at
-            both the top level and on each kernel entry.
-
-    Returns:
-        None: The artifact file is rewritten in place when changes apply.
-    """
-    if not candidates_path:
-        return
-    path = Path(candidates_path)
-    if not path.exists():
-        return
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        log.warning("failed to read candidates artifact %s: %s", path, exc)
-        return
-    if not isinstance(data, dict):
-        return
-    if metadata:
-        _enrich_candidate_runtime_metadata(data.get("hot_kernels"), metadata)
-        _enrich_candidate_runtime_metadata(data.get("hot_kernels_top15"), metadata)
-    if trace_report_path:
-        data.setdefault("trace_report_path", trace_report_path)
-        artifact_paths = data.setdefault("artifact_paths", {})
-        if isinstance(artifact_paths, dict):
-            artifact_paths.setdefault("trace_report_path", trace_report_path)
-        _enrich_candidate_trace_report(data.get("hot_kernels"), trace_report_path)
-        _enrich_candidate_trace_report(
-            data.get("hot_kernels_top15"),
-            trace_report_path,
-        )
-    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 _TRACELENS_ANALYSIS_MODULE = "hyperloom.orchestrator.trace_analysis.tracelens_analysis"
@@ -573,7 +366,7 @@ def _requested_route(payload: dict) -> str:
     return (route_text or os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "").strip()).lower()
 
 
-def _surface_artifact_paths(result: dict[str, Any]) -> str:
+def _surface_artifact_paths(result: dict[str, Any]) -> None:
     artifacts = result.get("artifact_paths")
     if not isinstance(artifacts, dict):
         artifacts = {}
@@ -587,7 +380,6 @@ def _surface_artifact_paths(result: dict[str, Any]) -> str:
         result["tracelens_summary_path"] = str(artifacts["tracelens_summary"])
     if artifacts.get("kernel_roofline"):
         result["kernel_roofline_path"] = str(artifacts["kernel_roofline"])
-    return report_path
 
 
 def _record_analysis_failure(result: dict[str, Any]) -> None:
@@ -643,13 +435,9 @@ async def _run_analysis_tool(cmd: list[str], timeout_sec: int) -> dict[str, Any]
     return result
 
 
-def _settle_tool_result(
-    result: dict[str, Any], metadata: dict[str, Any], framework_warnings: list[dict[str, Any]]
-) -> None:
-    """Surface the result's artifacts, record a failed run, and enrich its candidates with the workload metadata."""
-    report_path = _surface_artifact_paths(result)
-    if report_path:
-        _enrich_candidate_trace_report(result.get("hot_kernels"), report_path)
+def _settle_tool_result(result: dict[str, Any], framework_warnings: list[dict[str, Any]]) -> None:
+    """Surface the result's artifacts, record a failed run, and prepend the handler's own warnings."""
+    _surface_artifact_paths(result)
 
     # A failed TraceLens run is a hard failure, not "empty candidates".
     if result.get("status") == "failed" and "trace_split_no_steady_state" not in str(result.get("error")):
@@ -657,11 +445,6 @@ def _settle_tool_result(
 
     # Prepend handler validation warnings so they reach the LLM.
     result["trace_health_warnings"] = framework_warnings + list(result.get("trace_health_warnings") or [])
-
-    _enrich_candidate_runtime_metadata(result.get("hot_kernels"), metadata)
-    candidates_path = result.get("candidates_path")
-    if isinstance(candidates_path, str):
-        _enrich_candidates_artifact(candidates_path, metadata, trace_report_path=report_path)
 
 
 async def trace_analyze_handler(
@@ -691,7 +474,7 @@ async def trace_analyze_handler(
     trace_input = payload.get("trace_input") or payload.get("trace_dir")
     if not trace_input:
         return {"status": "failed", "error": "missing 'trace_input' in payload"}
-    # Backfill workload context from SharedState when Orchestration omits it.
+    # Whatever the caller's payload leaves out of the workload context comes from SharedState.
     from ...state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
@@ -732,9 +515,7 @@ async def trace_analyze_handler(
     # raw trace and drop the --split-* hints.
     scriptable = is_scriptable(framework)
 
-    # Load materialized baseline workload metadata once.
-    metadata = _load_materialized_workload_metadata(state.baseline_config_path)
-    workload = metadata.get("runtime_args", {}).get("workload", {})
+    workload = _materialized_workload(state.baseline_config_path)
 
     cmd, steady_state_mode = _build_trace_analyze_cmd(
         payload,
@@ -756,7 +537,7 @@ async def trace_analyze_handler(
     _disc_started = time.monotonic()
     result = await _run_analysis_tool(cmd, timeout_sec)
     _disc_duration_sec = round(time.monotonic() - _disc_started, 3)
-    _settle_tool_result(result, metadata, framework_warnings)
+    _settle_tool_result(result, framework_warnings)
 
     # Surfaced for the caller's SBD V6 roofline event, which records the run
     # as it happens rather than re-deriving it at export time.

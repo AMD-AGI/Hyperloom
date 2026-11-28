@@ -224,7 +224,6 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             "kernel_opt",
             "kernel_agent",
             "integrate",
-            "trace_analyze",
             "run_gemm_tuning",
             "profile",
             "roofline",

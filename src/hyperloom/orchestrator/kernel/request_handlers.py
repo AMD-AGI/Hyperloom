@@ -17,8 +17,9 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+from hyperloom.inference_optimizer.protocol.action_surfaces import AGENT_REQUESTABLE_KERNEL_REQUEST_KINDS
+
 from ..actions.executors._kernel_agent_tool import HandlerResult, _maybe_revert_kernel_patch
-from ..actions.executors.trace_analyze import trace_analyze_handler
 from ._forge_fusion_run import run_fusion_handler
 from ._forge_gemm_tuning import _run_forge_gemm_tuning
 from .integrate_accuracy import _integrate_accuracy_verdict
@@ -308,11 +309,13 @@ async def _graded_integration(
 
 # Kernel-agent programmatic dispatch table.
 KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
-    "trace_analyze": trace_analyze_handler,
     # No run_gemm_tuning / run_fusion entries: KernelPhase awaits those handlers directly.
     "integrate": integrate_handler,
     "apply_patch": integrate_handler,  # alias — same flow
 }
+
+# PolicyGate admits exactly the requestable kinds, so the router indexes this table without a miss.
+assert set(KERNEL_REQUEST_HANDLERS) == AGENT_REQUESTABLE_KERNEL_REQUEST_KINDS
 
 
 __all__ = [

@@ -5,7 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""What the self-certification record concludes from a trace directory: the steps it finds and who may use it."""
+"""What the self-certification record concludes from a trace directory: what it counts and who may use it."""
 
 from __future__ import annotations
 
@@ -15,11 +15,6 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.trace_analysis.trace_selfcert import certify_trace_dir
-
-
-def _step(name: str, ts: int, dur: int) -> dict:
-    """An iteration root on the host timeline."""
-    return {"cat": "user_annotation", "ph": "X", "name": name, "ts": ts, "dur": dur}
 
 
 def _launch(corr: int, ts: int, kernels: list[tuple[int, int]], *, api: str = "hipLaunchKernel") -> list[dict]:
@@ -41,12 +36,10 @@ def _launch(corr: int, ts: int, kernels: list[tuple[int, int]], *, api: str = "h
     ]
 
 
-#: An SGLang extend step whose graph replay ran two kernels beside one plain launch, then a decode step.
-_STEP_EVENTS = [
-    _step("step[EXTEND bs=2 toks=64]", 1000, 400),
+#: A graph replay that ran two kernels, between two plain launches.
+_EVENTS = [
     *_launch(1, 1010, [(1020, 50)]),
     *_launch(2, 1100, [(1110, 40), (1160, 40)], api="hipGraphLaunch"),
-    _step("step[DECODE bs=2]", 1500, 200),
     *_launch(3, 1510, [(1520, 30)]),
 ]
 
@@ -56,18 +49,15 @@ def _write(path: Path, events: list[dict]) -> None:
     path.write_bytes(json.dumps({"traceEvents": events}).encode("utf-8"))
 
 
-def test_each_step_root_is_credited_with_the_kernels_its_own_launches_produced(tmp_path):
-    _write(tmp_path / "rank0.pt.trace.json", _STEP_EVENTS)
+def test_the_launch_and_operator_counts_cover_the_whole_trace(tmp_path):
+    _write(tmp_path / "rank0.pt.trace.json", [*_EVENTS, {"cat": "cpu_op", "name": "aten::add", "args": {}}])
 
-    annotations = certify_trace_dir(tmp_path, tmp_path, framework="sglang")["rank_level"][0]["annotations"]
+    rank = certify_trace_dir(tmp_path, tmp_path, framework="sglang")["rank_level"][0]
 
-    assert annotations["step_root_pattern_family"] == "backup"
-    steps = [
-        (s["kind"], s["is_prefill"], s["runtime_launch_count"], s["graph_launch_count"], s["kernel_count"])
-        for s in annotations["steps"]
-    ]
-    assert steps == [("EXTEND", True, 2, 1, 3), ("DECODE", False, 1, 0, 1)]
-    assert [s["gpu_busy_us"] for s in annotations["steps"]] == [130.0, 30.0]
+    assert rank["density"]["runtime_launch_count"] == 3
+    assert rank["density"]["kernel_per_launch"] == round(4 / 3, 6)
+    assert rank["attribution"]["op_meta_basis"] == {"cpu_op_total": 4, "cpu_op_with_meta": 3}
+    assert rank["attribution"]["op_meta_coverage"] == 0.75
 
 
 @pytest.mark.parametrize(
@@ -78,8 +68,8 @@ def test_each_step_root_is_credited_with_the_kernels_its_own_launches_produced(t
     ],
 )
 def test_the_certificate_reads_the_file_the_analysis_reads(tmp_path, trace_input, certified):
-    _write(tmp_path / "rank0.pt.trace.json", _STEP_EVENTS)
-    _write(tmp_path / "trace_split" / "chunk.pt.trace.json", _STEP_EVENTS)
+    _write(tmp_path / "rank0.pt.trace.json", _EVENTS)
+    _write(tmp_path / "trace_split" / "chunk.pt.trace.json", _EVENTS)
 
     record = certify_trace_dir(tmp_path, tmp_path / trace_input, framework="sglang")
 
@@ -87,7 +77,7 @@ def test_the_certificate_reads_the_file_the_analysis_reads(tmp_path, trace_input
 
 
 def test_kernels_no_op_claims_leave_the_trace_unusable(tmp_path):
-    _write(tmp_path / "rank0.pt.trace.json", [ev for ev in _STEP_EVENTS if ev["cat"] != "cpu_op"])
+    _write(tmp_path / "rank0.pt.trace.json", [ev for ev in _EVENTS if ev["cat"] != "cpu_op"])
 
     verdict = certify_trace_dir(tmp_path, tmp_path, framework="sglang")["verdict"]
 

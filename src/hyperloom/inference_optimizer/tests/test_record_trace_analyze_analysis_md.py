@@ -275,72 +275,6 @@ def test_record_trace_analyze_preserves_kernel_roofline_fields(
     assert cached["kernel_roofline_top15"][0] == row
 
 
-# skipped_kernels projection: when all candidates are skipped, project them for the prompt.
-
-
-def _result_with_skipped(skipped: list[dict]) -> dict:
-    return {
-        "hot_kernels": [],
-        "skipped_kernels": skipped,
-        "trace_health_warnings": [],
-    }
-
-
-def test_skipped_kernels_projected_when_hot_empty() -> None:
-    state = SharedState()
-    state.record_trace_analyze(
-        {"trace_input": "x"},
-        _result_with_skipped(
-            [
-                {"kernel_id": "k001", "name": "aten::mm", "skip_reason": "source file not resolved", "gpu_pct": 3.3},
-                {"kernel_id": "k003", "name": "aten::mm", "skip_reason": "source file not resolved", "gpu_pct": 17.1},
-            ]
-        ),
-    )
-    proj = state.last_trace_analyze["skipped_kernels_top"]
-    # Sorted by gpu_pct desc.
-    assert [p["kernel_id"] for p in proj] == ["k003", "k001"]
-    assert proj[0]["name"] == "aten::mm"
-    assert proj[0]["skip_reason"] == "source file not resolved"
-
-
-def test_skipped_projection_truncates_to_15() -> None:
-    state = SharedState()
-    many = [
-        {"kernel_id": f"k{i:03d}", "name": "aten::mm", "skip_reason": "source file not resolved", "gpu_pct": float(i)}
-        for i in range(1, 26)
-    ]
-    state.record_trace_analyze({"trace_input": "x"}, _result_with_skipped(many))
-    proj = state.last_trace_analyze["skipped_kernels_top"]
-    assert len(proj) == 15
-    assert proj[0]["kernel_id"] == "k025"  # highest gpu_pct first
-
-
-def test_skipped_top_empty_when_no_skipped() -> None:
-    state = SharedState()
-    state.record_trace_analyze(
-        {"trace_input": "x"},
-        {"hot_kernels": [], "trace_health_warnings": []},
-    )
-    assert state.last_trace_analyze["skipped_kernels_top"] == []
-
-
-def test_blob_renders_skipped_when_no_routable_candidates() -> None:
-    state = SharedState()
-    blob = {
-        "trace_input": "/t.json",
-        "candidates_path": "/kc.json",
-        "hot_kernels_top15": [],
-        "reusable_native_kernel_ids": [],
-        "skipped_kernels_top": [
-            {"kernel_id": "k001", "name": "aten::mm", "skip_reason": "source file not resolved", "gpu_pct": 3.3},
-        ],
-        "trace_health_warnings": [],
-    }
-    rendered = state._format_trace_analyze_blob(blob)
-    assert "skipped_kernels_top=[k001:aten::mm:source file not resolved]" in rendered
-
-
 def test_blob_format_stable_when_candidates_present() -> None:
     state = SharedState()
     blob = {
@@ -348,12 +282,7 @@ def test_blob_format_stable_when_candidates_present() -> None:
         "candidates_path": "/kc.json",
         "hot_kernels_top15": [{"kernel_id": "k002", "name": "rmsnorm"}],
         "reusable_native_kernel_ids": ["k002"],
-        "skipped_kernels_top": [
-            {"kernel_id": "k001", "name": "aten::mm", "skip_reason": "x", "gpu_pct": 3.3},
-        ],
         "trace_health_warnings": [],
     }
     rendered = state._format_trace_analyze_blob(blob)
-    # Candidates present → legacy format, no skipped suffix injected.
-    assert "skipped_kernels_top=" not in rendered
     assert "top=['k002']" in rendered

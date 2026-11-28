@@ -361,7 +361,6 @@ def test_a_hot_kernel_a_backend_patched_stops_holding_kernel():
                 "reusable_native_kernel": True,
             }
         ],
-        "task_groups": [],
     }
     assert kernel_work_pending(state) is True
 

@@ -14,12 +14,17 @@ and routed to a registered Python handler. No LLM turn is consumed.
 ## Request dispatch
 
 Orchestration emits a `request{target_agent: "kernel_agent", kind: "<kind>"}` intent.
-`IntentRouter._handle_request` (`orchestrator/loop/intent_router.py`) intercepts it
-before any agent backend runs:
+PolicyGate admits it only when `kind` is a registered request kind (see
+[Registered request kinds](#registered-request-kinds)); any other kind is
+policy-denied with `rule="request_kind"` and a hint naming the registered
+kinds: one `policy_denied` observation, no request or response on the bus
+and no `last_action_failures` row.
+`IntentRouter._handle_request` (`orchestrator/loop/intent_router.py`) intercepts
+an admitted request before any agent backend runs:
 
 1. `admission_denial_for_request` checks the baseline prerequisite and the
    time budget, and a request that fails either is policy-denied immediately
-   (no bus record): any registered kind but `trace_analyze` while
+   (no bus record): any registered kind while
    `baseline_tput == 0`, or an `integrate` / `apply_patch` whose expected
    cost — the `integrate` action's estimate, or one measured baseline round
    when longer — does not fit the time left in the session
@@ -28,8 +33,7 @@ before any agent backend runs:
 2. Records the request on the message bus (`source: "orchestration"`).
 3. Checks `shared_state.kernel_enabled`; auto-rejects with `agent_disabled` when
    `False` (that is, `--no-kernel`).
-4. Looks up the handler in `KERNEL_REQUEST_HANDLERS`; auto-rejects with
-   `unknown_kernel_kind` (and a `valid_kinds` list) when none is found.
+4. Takes the handler from `KERNEL_REQUEST_HANDLERS`.
 5. Runs the handler inline: `result = await handler(payload, session_dir=...)`.
 6. Posts a `response{source: "programmatic_handler"}` directly to the bus.
 7. Appends any failure to `last_action_failures`.
@@ -43,12 +47,13 @@ No PolicyGate path runs for the RESPONSE because it's written directly through
 
 | Request kind | Handler | Entry point |
 |---|---|---|
-| `trace_analyze` | `trace_analyze_handler` | TraceLens `tracelens_analysis.py` |
 | `integrate` | `integrate_handler` | patch → re-baseline → KEEP/REVERT |
 | `apply_patch` | `integrate_handler` (alias) | same as `integrate` |
 
-Any kind outside this table, including the action-name `kernel_opt`, yields an
-immediate `unknown_kernel_kind` rejection.
+PolicyGate denies any kind outside this table, including the action-name
+`kernel_opt`, as `rule="request_kind"`. The table's kinds are
+`AGENT_REQUESTABLE_KERNEL_REQUEST_KINDS` in
+`inference_optimizer/protocol/action_surfaces.py`, which the gate reads.
 
 `run_gemm_tuning_handler` and `run_fusion_handler` are absent from the table on
 purpose: `KernelPhase` awaits them directly. Both are Coordinator-owned lanes,

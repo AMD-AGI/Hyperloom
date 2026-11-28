@@ -27,6 +27,7 @@ from hyperloom.common.framework_arm import verdict_subject
 from hyperloom.common.visible_devices import detect_gpu_count
 from hyperloom.inference_optimizer.protocol.intent import EXTEND_LEASE_MAX_SEC, Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
+    AGENT_REQUESTABLE_KERNEL_REQUEST_KINDS,
     COORDINATOR_INTERNAL_ACTIONS,
     COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
 )
@@ -423,9 +424,10 @@ class PolicyGate:
         Checks that ``target_agent`` is in :data:`REQUEST_TARGETS`, that
         ``kind`` is present and is not a Coordinator-owned lane. GEMM-tuning
         ownership and external-tool collision guards are applied to the kind
-        as well. Refused here, such a request is a denial; past the gate the
-        router would answer it with a failed reply, which the failure ledger
-        and the recipe's ``what_failed`` record.
+        as well, and any kind left that the kernel agent has no handler for is
+        refused. Refused here, such a request is a denial; answered past the
+        gate with a failed reply, it would enter the failure ledger and the
+        recipe's ``what_failed``.
 
         Args:
             role (AgentRole): the resolved role of the emitting agent.
@@ -437,7 +439,8 @@ class PolicyGate:
 
         Raises:
             PolicyDenied: if the target is missing/disallowed, ``kind`` is
-                missing, or one of the applied action guards fires.
+                missing or has no handler, or one of the applied action guards
+                fires.
         """
         target = str(payload.get("target_agent", "")).strip()
         if not target:
@@ -447,7 +450,8 @@ class PolicyGate:
                 f"role={role.name!r} cannot request target_agent={target!r} (allowed: {sorted(REQUEST_TARGETS)!r})",
                 rule="request_target",
             )
-        kind = str(payload.get("kind", "")).strip()
+        sent_kind = str(payload.get("kind", ""))
+        kind = sent_kind.strip()
         if not kind:
             raise PolicyDenied("request missing kind", rule="payload")
         if kind in COORDINATOR_OWNED_KERNEL_REQUEST_KINDS:
@@ -463,6 +467,14 @@ class PolicyGate:
             )
         validate_gemm_tuning_request(kind)
         self._validate_tool_whitelist_collision(role.name, kind)
+        # Compared as sent: the router looks the handler up under the kind the request carries.
+        if sent_kind not in AGENT_REQUESTABLE_KERNEL_REQUEST_KINDS:
+            valid_kinds = ", ".join(sorted(AGENT_REQUESTABLE_KERNEL_REQUEST_KINDS))
+            raise PolicyDenied(
+                f"request kind {sent_kind!r} has no kernel handler",
+                rule="request_kind",
+                hint=f"a kernel request's kind is exactly one of: {valid_kinds}.",
+            )
 
     # R5 — tool_whitelist_role
     def _validate_tool_whitelist_collision(self, role_name: str, kind: str) -> None:

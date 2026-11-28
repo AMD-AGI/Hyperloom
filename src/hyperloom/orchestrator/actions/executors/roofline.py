@@ -18,7 +18,7 @@ from hyperloom.common.provenance import detect_kineto_backend
 from hyperloom_common.timeutil import now_iso
 from ...phases.machine_state import LifecycleMark, record_lifecycle_event
 from ...loop.sub_agent_runner import RunnerContext
-from ...state.analysis_failures import remember_roofline_failure, remember_trace_failure
+from ...state.analysis_failures import remember_roofline_failure
 from hyperloom.inference_optimizer.trace.task_progress import report_progress
 from ._multi_node_env import is_multi_node
 from ._pd_combined_report import report_pd_profile
@@ -761,7 +761,6 @@ class RooflineExecutor:
 
         analysis = await self._analyze(ctx, recorder, payload)
         if not isinstance(analysis, _AnalysisOutcome):
-            remember_trace_failure(self.shared_state, payload, analysis)
             return analysis
         if main_role:
             await self._record_role_analyses(ctx, profiled, main_role, analysis, framework=arm.framework)

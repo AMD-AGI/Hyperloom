@@ -20,7 +20,6 @@ from hyperloom.orchestrator.state.shared_state import (
 
 def test_lifecycle_label_resolves_human_labels():
     # Pipeline names map to the internal step/handler names.
-    assert lifecycle_label("trace_analyze") == "TraceLens"
     assert lifecycle_label("roofline") == "TraceLens"
     assert lifecycle_label("integrate") == "Integrate"
     assert lifecycle_label("apply_patch") == "Integrate"
@@ -39,7 +38,7 @@ def test_lifecycle_label_falls_back_to_phase_then_verbatim():
 def test_make_lifecycle_event_shape():
     event = make_lifecycle_event(
         LifecycleMark(
-            step="trace_analyze",
+            step="roofline",
             status="start",
             artifacts={"out_dir": "/tmp/run", "empty": "", "none": None},
             detail="  starting  ",
@@ -52,7 +51,7 @@ def test_make_lifecycle_event_shape():
     assert event["seq"] == 3
     assert event["ts"] == "2026-06-09T00:00:00+00:00"
     assert event["phase"] == "KERNEL_AGENT"  # upper-cased
-    assert event["step"] == "trace_analyze"
+    assert event["step"] == "roofline"
     assert event["label"] == "TraceLens"  # defaulted from step
     assert event["status"] == "START"  # upper-cased
     assert event["detail"] == "starting"  # stripped
@@ -78,7 +77,7 @@ def test_record_lifecycle_event_appends_and_defaults_phase():
     s.phase = PHASE_KERNEL_AGENT
     row = record_lifecycle_event(
         s,
-        LifecycleMark(step="trace_analyze", status="START", artifacts={"workspace": "/tmp/ws"}, detail="kernel tg001"),
+        LifecycleMark(step="roofline", status="START", artifacts={"workspace": "/tmp/ws"}, detail="kernel tg001"),
     )
     assert len(s.lifecycle) == 1
     assert row is s.lifecycle[0]
@@ -93,7 +92,7 @@ def test_record_lifecycle_event_monotonic_seq_and_cap():
     s = SharedState(session_id="abc")
     total = _LIFECYCLE_CAP + 25
     for i in range(total):
-        record_lifecycle_event(s, LifecycleMark(step="trace_analyze", status="END", detail=f"#{i}"))
+        record_lifecycle_event(s, LifecycleMark(step="roofline", status="END", detail=f"#{i}"))
     # Cap is enforced ...
     assert len(s.lifecycle) == _LIFECYCLE_CAP
     # ... but seq stays monotonic across the trim.
@@ -107,14 +106,14 @@ def test_lifecycle_persists_round_trip(tmp_path):
     s = SharedState(session_id="abc")
     s.phase = PHASE_KERNEL_AGENT
     record_lifecycle_event(
-        s, LifecycleMark(step="trace_analyze", status="END", artifacts={"candidates": "/tmp/kc.json"}, duration_s=42.0)
+        s, LifecycleMark(step="roofline", status="END", artifacts={"candidates": "/tmp/kc.json"}, duration_s=42.0)
     )
     s.save(tmp_path)
 
     s2 = SharedState.load_or_init(tmp_path)
     assert len(s2.lifecycle) == 1
     ev = s2.lifecycle[0]
-    assert ev["step"] == "trace_analyze"
+    assert ev["step"] == "roofline"
     assert ev["label"] == "TraceLens"
     assert ev["artifacts"] == {"candidates": "/tmp/kc.json"}
     assert ev["duration_s"] == 42.0

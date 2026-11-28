@@ -995,31 +995,8 @@ async def test_delegate_accepts_nested_params_idempotency_key(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_coordinator_request_routes_to_kernel(session_dir):
-    req = Intent(
-        type=IntentType.REQUEST,
-        payload={
-            "target_agent": "kernel_agent",
-            "kind": "trace_analyze",
-            "params": {"top_k": 5},
-        },
-    )
-    plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[req])])}
-    c = Coordinator(session_dir, backends=_build_backends(plans))
-    try:
-        c.shared_state.baseline_tput = 100.0
-        c.shared_state.last_profile_trace = "/tmp/trace.json.gz"
-        c.shared_state.save(session_dir)
-        await c.tick(1)
-        kernel_inbox = await c.bus.tail(to_agent="kernel_agent", topic="request")
-        assert any(m.payload.get("kind") == "trace_analyze" for m in kernel_inbox)
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_coordinator_response_routes_back_to_requester(session_dir):
-    """Programmatic handler emits RESPONSE to orchestration without an LLM turn."""
+async def test_coordinator_request_and_response_route_between_requester_and_kernel(session_dir):
+    """The request is mirrored to the kernel inbox and the programmatic handler answers without an LLM turn."""
     from unittest.mock import patch
     from hyperloom.orchestrator.kernel import request_handlers as krh
 
@@ -1027,25 +1004,24 @@ async def test_coordinator_response_routes_back_to_requester(session_dir):
         type=IntentType.REQUEST,
         payload={
             "target_agent": "kernel_agent",
-            "kind": "trace_analyze",
-            "params": {"trace_input": str(session_dir / "trace.json.gz")},
+            "kind": "integrate",
+            "params": {"kernel_id": "k001", "patch_path": str(session_dir / "k001.patch")},
         },
     )
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[req])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
 
     async def _fake_handler(payload, *, session_dir, **_kw):
-        return {"status": "ok", "hot_kernels": [], "candidates_path": ""}
+        return {"status": "ok", "decision": "NEEDS_REVIEW", "kernel_id": "k001"}
 
-    with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"trace_analyze": _fake_handler}):
+    with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"integrate": _fake_handler}):
         try:
             c.shared_state.baseline_tput = 100.0
-            c.shared_state.last_profile_trace = "/tmp/trace.json.gz"
             c.shared_state.kernel_enabled = True
             c.shared_state.save(session_dir)
             await c.tick(1)
             kernel_inbox = await c.bus.tail(to_agent="kernel_agent", topic="request")
-            assert kernel_inbox, "no request mirrored to kernel"
+            assert any(m.payload.get("kind") == "integrate" for m in kernel_inbox), "no request mirrored to kernel"
             responses = await c.bus.tail(topic="response", to_agent="orchestration")
             assert responses
             assert responses[0].payload["status"] == "ok"

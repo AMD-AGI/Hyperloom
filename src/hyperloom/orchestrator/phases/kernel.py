@@ -35,7 +35,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
     LaneRunFields,
 )
 from ..actions.stop_attribution import stopped_by_the_run_class
-from ..state.analysis_failures import analysis_skip_reason, no_gpu_trace_reason, remembered_trace_failure
+from ..state.analysis_failures import analysis_skip_reason, no_gpu_trace_reason
 from ..state.task_registry import TERMINAL_STATES, TaskNotFound, TaskSpec
 from ..bus.message_bus import Message
 from ..kernel import kernel_decisions
@@ -1170,31 +1170,3 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
             ROOFLINE_WATERMARK_RATIO,
         )
         return True
-
-    def cached_kernel_request(self, kind: str, payload: dict[str, Any]) -> dict[str, Any] | None:
-        """Return the result to serve without running the handler: the trace's last successful analysis
-        (``last_trace_analyze``), else a failure the same trace is known to reproduce; ``None`` to run it.
-        """
-        if kind != "trace_analyze":
-            return None
-        return self._cached_trace_analysis(payload) or remembered_trace_failure(self.shared_state, payload)
-
-    def _cached_trace_analysis(self, payload: dict[str, Any]) -> dict[str, Any] | None:
-        """The last successful analysis of ``payload``'s trace, when its candidates are still on disk."""
-        cached = self.shared_state.last_trace_analyze or {}
-        if not isinstance(cached, dict) or not cached:
-            return None
-        trace_input = payload.get("trace_input") or payload.get("trace_dir")
-        if not trace_input or trace_input != cached.get("trace_input"):
-            return None
-        candidates_path = cached.get("candidates_path")
-        if not candidates_path or not Path(candidates_path).exists():
-            return None
-        return {
-            "status": "ok",
-            "candidates_path": candidates_path,
-            "hot_kernels_top15": cached.get("hot_kernels_top15", []),
-            "reusable_native_kernel_ids": cached.get("reusable_native_kernel_ids", []),
-            "cached_at": cached.get("ts"),
-            "note": "served from shared_state.last_trace_analyze cache",
-        }

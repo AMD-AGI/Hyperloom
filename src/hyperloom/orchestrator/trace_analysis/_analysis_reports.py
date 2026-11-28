@@ -14,10 +14,7 @@ from hyperloom_common.io import JsonFormat, atomic_write_json
 from hyperloom_common.timeutil import now_iso
 
 from ._kernel_partition import build_kernel_candidates_document
-from ._kernel_roofline import (
-    build_kernel_roofline_payload,
-    enrich_candidates_with_runtime_metadata,
-)
+from ._kernel_roofline import add_framework_and_input_shapes, build_kernel_roofline_payload
 from ._trace_inputs import TraceInputs
 from .tracelens_skill_runner import aggregate_by_source_function
 from hyperloom.inference_optimizer.framework_registry import tracelens_analysis_mode
@@ -253,7 +250,7 @@ def write_reports(
     tracelens_dir = run_dir / "tracelens"
     (tracelens_dir / "system_findings").mkdir(parents=True, exist_ok=True)
     (tracelens_dir / "category_findings").mkdir(parents=True, exist_ok=True)
-    enrich_candidates_with_runtime_metadata(candidates, args)
+    add_framework_and_input_shapes(candidates, args.framework)
 
     manifest = {
         "trace_input": str(Path(args.trace_input).resolve()),

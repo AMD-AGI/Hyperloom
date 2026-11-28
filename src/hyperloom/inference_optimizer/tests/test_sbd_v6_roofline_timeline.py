@@ -251,7 +251,6 @@ def _validate(**overrides: Any) -> dict[str, Any]:
                     "kernel_per_launch": 5.0,
                 },
                 "time_structure": {"idle_pct_full_trace": 30.0},
-                "annotations": {"step_root_count": 12},
             }
         ],
         "checks": [],

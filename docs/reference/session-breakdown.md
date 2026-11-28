@@ -79,9 +79,9 @@ Four keys that only ever carried a constant are removed with the disposition
 `conc_sweep` `budget.raised` (always `false`) and `budget.granted_total_sec`
 (always equal to `budget.declared_total_sec`).
 
-Keys that existed only for the diffusion latency roofline or the `bypass`
-analysis route, both removed in this release, are removed with the disposition
-`removed in 6.1, producer removed`:
+Keys that existed only for the diffusion latency roofline, the `bypass`
+analysis route or the trace certificate's step annotations, all removed in this
+release, are removed with the disposition `removed in 6.1, producer removed`:
 
 - `close.roofline_progress.ceiling_kind`: read `ceiling_available`. `true` was
   `"throughput"` and `false` was `"none"`; `"latency"` came only from the
@@ -103,6 +103,10 @@ analysis route, both removed in this release, are removed with the disposition
   and `production_would_analyze_split_chunk`: they compared the certified file
   with the `bypass` route's resolver. The certificate now reads the file the
   analysis reads, so `selected_role` answers both.
+- `roofline` event
+  `ext.actions[].profile.runs[].validate.thresholds_effective.min_repeats`: the
+  trace certificate no longer finds iteration roots, and their count was the
+  only thing compared with it.
 - `steady_state.source` and `steady_state.aggregation_scope` in
   `roofline` event `ext.actions[].analysis.effective_run` and `kernel_agent`
   `trace_analyze_runs[]`: only the `bypass` route varied them.
@@ -111,6 +115,13 @@ The value `bypass` is no longer written either: `route` is `agent` or
 `non-llm` and `tool` is `tracelens`, `metadata.versions.tools` has no `bypass`
 entry, a trace certificate's `usable_by` names only `tracelens`, and the
 warning code `bypass_graph_under_recorded` is now `graph_under_recorded`.
+
+Orchestration can no longer request a trace analysis of the kernel agent, so
+`kernel_agent` `ext.forge.trace_analyze_runs` is removed with the disposition
+`removed in 6.1, producer removed`, and no `ext.forge.discovered_kernels[]` row
+carries the provenance `trace_analyze_run`. An analysis is recorded by the
+roofline action that ran it: on a `roofline` event, or under
+`ext.forge.reprofile.run` when the KERNEL entry re-profile ran it.
 
 The loop no longer holds a Critic verdict to an advisory rule, so the keys that
 recorded the hold are removed with the disposition

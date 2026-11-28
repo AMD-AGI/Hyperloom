@@ -19,9 +19,7 @@ import yaml
 from hyperloom.orchestrator.trace_analysis import tracelens_analysis as tla
 from hyperloom.orchestrator.trace_analysis import _analysis_reports as analysis_reports
 from hyperloom.orchestrator.trace_analysis import _candidate_assembly as candidate_assembly
-from hyperloom.orchestrator.trace_analysis import _harness_discovery as harness_discovery
 from hyperloom.orchestrator.trace_analysis import _kernel_classification as kernel_classification
-from hyperloom.orchestrator.trace_analysis import _kernel_roofline as kernel_roofline
 from hyperloom.orchestrator.trace_analysis import _kernel_search as kernel_search
 from hyperloom.orchestrator.trace_analysis._perf_report_analysis import PerfReportAnalysis
 from hyperloom.orchestrator.trace_analysis import _trace_gates as trace_gates
@@ -229,33 +227,6 @@ def test_unknown_source_root_is_not_reusable_native():
     assert candidate_assembly.recommend_backends(candidate) == []
 
 
-def test_known_rmsnorm_harness_is_registered_without_repo_root(monkeypatch, tmp_path):
-    """A curated harness is found from the kernel name alone, with no repo root."""
-    harness = tmp_path / "aiter" / "op_tests" / "test_rmsnorm2d.py"
-    harness.parent.mkdir(parents=True)
-    harness.write_text("def test_rmsnorm2d(): pass\n", encoding="utf-8")
-    monkeypatch.setattr(kernel_search, "kernel_search_roots", lambda: (str(tmp_path / "aiter"),))
-    harness_discovery._harness_search_bases.cache_clear()
-
-    files = harness_discovery.find_benchmark_files(
-        "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256EEEv",
-        "",
-        "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
-    )
-    harness_discovery._harness_search_bases.cache_clear()
-
-    assert files == [str(harness)]
-
-
-def test_absent_curated_harness_is_not_reported(monkeypatch, tmp_path):
-    """A hint that resolves nowhere yields nothing, not an unopenable path."""
-    monkeypatch.setattr(kernel_search, "kernel_search_roots", lambda: (str(tmp_path / "aiter"),))
-    harness_discovery._harness_search_bases.cache_clear()
-    files = harness_discovery.find_benchmark_files("kernel_paged_attention_2d", "", "/pkg/attention.py")
-    harness_discovery._harness_search_bases.cache_clear()
-    assert files == []
-
-
 def test_125_derive_category_explicit_wins_over_heuristic():
     cand = {"name": "Cijk_Alik_GEMM_x", "tracelens_category": "MoE"}
     assert candidate_assembly.derive_kernel_category(cand) == "MoE"
@@ -402,17 +373,6 @@ def test_resolve_fused_moe_shapes_matches_manual_harness(tmp_path):
     assert all(s and s != "()" for s in shapes)
 
 
-def test_resolve_fused_moe_preserves_invocation_boundaries(tmp_path):
-    csv_dir = _write_fused_moe_ops_unique_args(tmp_path)
-
-    cases = trace_shapes.resolve_fused_moe_invocation_cases_from_csv(csv_dir)
-
-    assert len(cases) == 2
-    assert "(15360,2048) bf16" in cases[0]["input_shapes"][0]["shape"]
-    assert "(122880,768) bf16" in cases[1]["input_shapes"][0]["shape"]
-    assert cases[0]["raw_arg_spec"]["input_dims"] != cases[1]["raw_arg_spec"]["input_dims"]
-
-
 def test_resolve_fused_moe_shapes_missing_csv_returns_empty(tmp_path):
     """Absent sidecar / no fused-MoE rows => [] so the candidate's empty shapes stay untouched."""
     assert trace_shapes.resolve_fused_moe_shapes_from_csv(tmp_path / "nope") == []
@@ -446,8 +406,6 @@ def test_finalize_grafts_fused_moe_shapes_onto_empty_candidate(tmp_path):
     assert out[0]["shapes"], "fused-MoE candidate must carry non-empty shapes"
     assert "(15360,2048) bf16" in out[0]["shapes"]
     assert out[0]["shape_provenance"] == "torch_trace"
-    assert len(out[0]["invocation_cases"]) == 2
-    assert out[0]["raw_arg_spec"] == out[0]["invocation_cases"][0]["raw_arg_spec"]
 
 
 def test_finalize_grafts_csv_shapes_for_other_bucket_attention_candidate(tmp_path):
@@ -516,7 +474,6 @@ def test_finalize_does_not_touch_non_moe_or_already_shaped(tmp_path):
     )
     assert out[0]["shapes"] == []
     assert out[1]["shapes"] == ["(99,99) bf16"]
-    assert out[1]["invocation_cases"][0]["input_shapes"] == ["(99,99) bf16"]
 
 
 def test_finalize_falls_back_to_heuristic_when_csv_missing(tmp_path):
@@ -558,7 +515,6 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
         "source_file": "/sgl-workspace/aiter/paged_attention.py",
         "shapes": [[1, 32, 128]],
         "is_multigpu": False,
-        "num_gpus_recommended": 1,
         # Set the routable marker explicitly since this test bypasses _finalize_candidates.
         "reusable_native_kernel": True,
     }
@@ -585,138 +541,7 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
     assert enriched["framework"] == "sglang"
     assert enriched["backend"] == "sglang"
     assert enriched["input_shapes"] == [{"call_num": 2, "shape": [1, 32, 128]}]
-    assert enriched["output_shapes"] == []
     assert enriched["input_dtypes"] == []
-    assert enriched["output_dtypes"] == []
-    assert enriched["runtime_args"] == {}
-    assert enriched["env_vars"] == {}
-    assert enriched["kernel_params"] == {}
-    assert enriched["runtime_flags"]["analysis_mode"] == "inference"
-    assert enriched["runtime_flags"]["target_platform"] == "MI300X"
-    assert enriched["runtime_flags"]["is_multigpu"] is False
-    assert enriched["runtime_flags"]["num_gpus_recommended"] == 1
-
-
-def test_load_model_kernel_params_reads_head_dim(tmp_path):
-    import json as _json
-
-    model_dir = tmp_path / "Qwen-Qwen3-8B"
-    model_dir.mkdir()
-    (model_dir / "config.json").write_text(
-        _json.dumps(
-            {
-                "head_dim": 128,
-                "hidden_size": 4096,
-                "num_attention_heads": 32,
-                "num_key_value_heads": 8,
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    params = kernel_roofline.load_model_kernel_params(str(model_dir))
-
-    assert params["HEAD_SIZE"] == 128
-    assert params["NUM_ATTENTION_HEADS"] == 32
-    assert params["NUM_KEY_VALUE_HEADS"] == 8
-    assert params["MODEL_CONFIG_PATH"] == str(model_dir / "config.json")
-
-
-def test_load_model_kernel_params_derives_head_size_from_hidden_size(tmp_path):
-    import json as _json
-
-    model_dir = tmp_path / "meta-llama-Llama-3.1-8B"
-    model_dir.mkdir()
-    (model_dir / "config.json").write_text(
-        _json.dumps(
-            {
-                "hidden_size": 4096,
-                "num_attention_heads": 32,
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    params = kernel_roofline.load_model_kernel_params(str(model_dir))
-
-    assert params["HEAD_SIZE"] == 128
-    assert params["HIDDEN_SIZE"] == 4096
-    assert params["NUM_ATTENTION_HEADS"] == 32
-
-
-def test_load_model_kernel_params_preserves_mla_head_dims(tmp_path):
-    import json as _json
-
-    model_dir = tmp_path / "DeepSeek-R1-0528"
-    model_dir.mkdir()
-    (model_dir / "config.json").write_text(
-        _json.dumps(
-            {
-                "hidden_size": 7168,
-                "num_attention_heads": 128,
-                "qk_nope_head_dim": 128,
-                "qk_rope_head_dim": 64,
-                "v_head_dim": 128,
-                "kv_lora_rank": 512,
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    params = kernel_roofline.load_model_kernel_params(str(model_dir))
-
-    assert "HEAD_SIZE" not in params
-    assert params["QK_NOPE_HEAD_DIM"] == 128
-    assert params["QK_ROPE_HEAD_DIM"] == 64
-    assert params["V_HEAD_DIM"] == 128
-    assert params["KV_LORA_RANK"] == 512
-
-
-def test_write_reports_enriches_head_size_from_model_config(tmp_path):
-    import json as _json
-    from argparse import Namespace
-
-    trace = tmp_path / "trace.json"
-    trace.write_text("{}", encoding="utf-8")
-    model_dir = tmp_path / "Qwen-Qwen3-8B"
-    model_dir.mkdir()
-    (model_dir / "config.json").write_text(
-        _json.dumps({"head_dim": 128, "num_attention_heads": 32}),
-        encoding="utf-8",
-    )
-    analysis_md = tmp_path / "run" / "tracelens" / "analysis.md"
-    analysis_md.parent.mkdir(parents=True, exist_ok=True)
-    analysis_md.write_text("# TraceLens stub\n", encoding="utf-8")
-    candidate = {
-        "kernel_id": "k001",
-        "name": "paged_attention",
-        "duration_us": 100.0,
-        "call_count": 2,
-        "gpu_pct": 10.0,
-        "source_file": "/sgl-workspace/aiter/paged_attention.py",
-        "shapes": [[1, 32, 128]],
-        "reusable_native_kernel": True,
-    }
-    args = Namespace(
-        trace_input=str(trace),
-        model_name=str(model_dir),
-        framework="sglang",
-        target_platform="MI300X",
-        workspace_path=str(tmp_path),
-        roofline_output_name="kernel_roofline.json",
-        dry_run=False,
-    )
-
-    artifacts = analysis_reports.write_reports(
-        tmp_path / "run",
-        trace_inputs.TraceInputs(input_type="file", files=[trace]),
-        candidates=[candidate],
-        args=args,
-        outcome=analysis_reports.OrchestratorOutcome(report_path=analysis_md),
-    )
-    payload = _json.loads(Path(artifacts["kernel_candidates"]).read_text(encoding="utf-8"))
-
-    assert payload["hot_kernels"][0]["kernel_params"]["HEAD_SIZE"] == 128
 
 
 # write_reports surfaces the upstream analysis.md as-is (no copies/aliases/fabrication)
@@ -2778,19 +2603,6 @@ def test_classify_patchability_rejects_cpp_itfs_py_host_launcher(monkeypatch):
     assert "cpp_itfs host launcher" in reason
 
 
-def test_library_token_pairing():
-    """Library detection keeps kernel<->benchmark same-lib."""
-    assert harness_discovery._library_token("/sgl-workspace/aiter/op_tests/test_activation.py") == "aiter"
-    # sgl-kernel / sgl_kernel normalize to sglang.
-    assert harness_discovery._library_token("/sgl-workspace/sglang/sgl-kernel/include/hip/x.cuh") == "sglang"
-    assert harness_discovery._library_token("/sgl-workspace/sglang/python/sglang/srt/x.py") == "sglang"
-    assert harness_discovery._library_token("/random/path/foo.py") == ""
-    # A sglang kernel and an aiter test are different libraries -> must not pair.
-    src = "/sgl-workspace/sglang/sgl-kernel/include/hip/hip_act_and_mul.cuh"
-    test = "/sgl-workspace/aiter/op_tests/test_activation.py"
-    assert harness_discovery._library_token(src) != harness_discovery._library_token(test)
-
-
 def test_classify_patchability_allows_aiter_device_source_unknown_type(monkeypatch):
     """aiter .cu/.cuh device sources are patchable even when source_type is 'unknown' (classifier ran before source_file resolved)."""
     src = "/sgl-workspace/aiter/csrc/py_itfs_ck/mha_batch_prefill_kernels.cu"
@@ -3126,10 +2938,10 @@ def test_aggregate_keeps_same_operation_in_different_functions_separate(
     }
 
 
-def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
+def test_same_kernel_different_shapes_yields_one_task_keeping_each_rows_shapes(
     tmp_path,
 ):
-    """End-to-end: same op + same source function + different shapes per row collapse to ONE task_group; each row's shapes are preserved verbatim and rendered as a distinct ``Case N:``."""
+    """End-to-end: same op + same source function + different shapes per row collapse to ONE task_group; each row's shapes are preserved verbatim."""
     src = tmp_path / "model_executor.py"
     src.write_text(
         "def x(): pass\n\n\ndef forward(x):\n    return x\n",
@@ -3181,12 +2993,6 @@ def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
     assert set(g["kernel_ids"]) == {"k001", "k002", "k003", "k004"}
     assert g["primary_kernel_id"] == "k001"  # heaviest (12704 us)
     assert len(g["rows"]) == 4
-    assert [case["case_id"] for case in g["shape_cases"]] == [
-        "case_001",
-        "case_002",
-        "case_003",
-        "case_004",
-    ]
     # Each row preserves its own shape list verbatim — no merging, no de-duplication.
     assert g["rows"][0]["shapes"] == ["(64,2880) bf16", "(128,2880) bf16", "(128,) bf16"]
     assert g["rows"][3]["shapes"] == ["(2048,2880) bf16", "(128,2880) bf16", "(128,) bf16"]

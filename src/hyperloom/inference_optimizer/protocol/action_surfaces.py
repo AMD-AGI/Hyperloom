@@ -58,6 +58,12 @@ COORDINATOR_OWNED_KERNEL_REQUEST_KINDS: frozenset[str] = frozenset(
 )
 
 
+# Request kinds an agent may send the kernel agent: every kind the tables above name, less the Coordinator's own lanes.
+AGENT_REQUESTABLE_KERNEL_REQUEST_KINDS: frozenset[str] = (
+    frozenset(REQUEST_KIND_TO_OWNED_ACTION) - COORDINATOR_OWNED_KERNEL_REQUEST_KINDS
+)
+
+
 # Coordinator-managed actions that agents should not directly propose.
 COORDINATOR_INTERNAL_ACTIONS: frozenset[str] = frozenset(
     {
@@ -331,6 +337,7 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
 __all__ = [
     "ACTION_CATALOGUE",
     "ActionMetadata",
+    "AGENT_REQUESTABLE_KERNEL_REQUEST_KINDS",
     "COORDINATOR_INTERNAL_ACTIONS",
     "FULL_ENABLED_ACTIONS",
     "KERNEL_ACTION_REQUEST_KINDS",

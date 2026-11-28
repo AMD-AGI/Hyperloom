@@ -18,11 +18,10 @@ import pytest
 
 from hyperloom.inference_optimizer.cli import bootstrap as cli_bootstrap
 from hyperloom.inference_optimizer.cli import parser as cli_parser
-from hyperloom.orchestrator.kernel import kernel_decisions as kd
 from hyperloom.orchestrator.tests._fixtures import MI325X_CARD, publish_card
 from hyperloom.orchestrator.kernel import request_handlers as krh
 
-from .conftest import seed_integrate_verdict, seed_kernel_keep
+from .conftest import seed_kernel_keep
 from hyperloom.inference_optimizer.session import paths as session_paths
 from hyperloom.orchestrator.actions.executors import trace_analyze as ta
 from hyperloom.orchestrator.actions.executors import VLLM_PATCH_PROFILER_FIELDS
@@ -2496,70 +2495,12 @@ async def test_trace_analyze_handler_surfaces_trace_report_path(
 
 
 @pytest.mark.asyncio
-async def test_trace_analyze_handler_persists_trace_report_to_candidates(
+async def test_trace_analyze_handler_splits_on_the_baseline_workload(
     session_dir,
     tmp_path,
     monkeypatch,
 ):
-    """Disk candidates must carry the TraceLens report path for GEAK prompts."""
-    report_path = tmp_path / "analysis.md"
-    report_path.write_text("# TraceLens Report\n", encoding="utf-8")
-    candidates_path = tmp_path / "kernel_candidates.json"
-    candidates_path.write_text(
-        json.dumps(
-            {
-                "hot_kernels": [
-                    {
-                        "kernel_id": "k1",
-                        "name": "paged_attention",
-                        "source_file": "/sgl-workspace/sglang/kernels/paged.py",
-                        "reusable_native_kernel": True,
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
-        return (
-            0,
-            json.dumps(
-                {
-                    "status": "ok",
-                    "hot_kernels": json.loads(candidates_path.read_text(encoding="utf-8"))["hot_kernels"],
-                    "trace_report_path": str(report_path),
-                    "artifact_paths": {
-                        "kernel_candidates": str(candidates_path),
-                        "trace_report_path": str(report_path),
-                    },
-                }
-            ),
-            "",
-        )
-
-    monkeypatch.setattr(ta, "_run_subprocess", fake_run_subprocess)
-
-    res = await ta.trace_analyze_handler(
-        {"trace_input": str(session_dir), "dry_run": True},
-        session_dir=session_dir,
-    )
-
-    persisted = json.loads(candidates_path.read_text(encoding="utf-8"))
-    candidate = persisted["hot_kernels"][0]
-    assert res["hot_kernels"][0]["trace_report_path"] == str(report_path)
-    assert persisted["trace_report_path"] == str(report_path)
-    assert persisted["artifact_paths"]["trace_report_path"] == str(report_path)
-    assert candidate["trace_report_path"] == str(report_path)
-
-
-@pytest.mark.asyncio
-async def test_trace_analyze_handler_backfills_runtime_metadata_from_config(
-    session_dir,
-    tmp_path,
-    monkeypatch,
-):
-    """GEAK candidates must inherit the materialized workload config."""
+    """A request that names no split hints takes them from the materialized baseline config."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     config_path = tmp_path / "profile_config.with_envs.yaml"
@@ -2574,111 +2515,37 @@ benchmark:
     CONC: 64
     ISL: 1024
     OSL: 1024
-    NUM_PROMPTS: 512
-    MAX_MODEL_LEN: 8192
-    EXTRA_SGLANG_ARGS: "--kv-cache-dtype fp8 --page-size 16"
-    SGLANG_USE_TRITON: "1"
-    ROCR_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
-    OPENAI_API_KEY: "should-not-leak"
+    RANDOM_RANGE_RATIO: "0.5"
 """,
         encoding="utf-8",
     )
     state = SharedState.load_or_init(session_dir)
     state.baseline_config_path = str(config_path)
     state.save(session_dir)
-
-    candidates_path = tmp_path / "kernel_candidates.json"
-    candidates_path.write_text(
-        json.dumps(
-            {
-                "hot_kernels": [
-                    {
-                        "kernel_id": "k1",
-                        "name": "paged_attention",
-                        "source_file": "/sgl-workspace/sglang/kernels/paged.py",
-                        "reusable_native_kernel": True,
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
+    captured: dict = {}
 
     async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
-        return (
-            0,
-            json.dumps(
-                {
-                    "status": "ok",
-                    "hot_kernels": json.loads(candidates_path.read_text(encoding="utf-8"))["hot_kernels"],
-                    "artifact_paths": {"kernel_candidates": str(candidates_path)},
-                }
-            ),
-            "",
-        )
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
 
     monkeypatch.setattr(ta, "_run_subprocess", fake_run_subprocess)
 
-    res = await ta.trace_analyze_handler(
+    await ta.trace_analyze_handler(
         {"trace_input": str(session_dir), "dry_run": True},
         session_dir=session_dir,
     )
 
-    enriched = json.loads(candidates_path.read_text(encoding="utf-8"))["hot_kernels"][0]
-    assert res["hot_kernels"][0]["env_vars"]["SGLANG_USE_TRITON"] == "1"
-    assert enriched["env_vars"]["TP"] == "8"
-    assert enriched["env_vars"]["ROCR_VISIBLE_DEVICES"] == "0,1,2,3,4,5,6,7"
-    assert "OPENAI_API_KEY" not in enriched["env_vars"]
-    assert enriched["runtime_args"]["framework"] == "sglang"
-    assert enriched["runtime_args"]["server_args"] == "--kv-cache-dtype fp8 --page-size 16"
-    assert enriched["runtime_args"]["workload"] == {
-        "tp": 8,
-        "conc": 64,
-        "isl": 1024,
-        "osl": 1024,
-        "num_prompts": 512,
-        "max_model_len": 8192,
-    }
-
-
-def test_materialized_workload_metadata_filters_prefixed_secrets(tmp_path):
-    config_path = tmp_path / "profile_config.with_envs.yaml"
-    config_path.write_text(
-        """
-benchmark:
-  framework: vllm
-  envs:
-    VLLM_USE_V1: "1"
-    VLLM_API_KEY: "should-not-leak"
-    TRITON_AUTH_TOKEN: "should-not-leak"
-""",
-        encoding="utf-8",
-    )
-
-    metadata = ta._load_materialized_workload_metadata(str(config_path))
-
-    assert metadata["env_vars"]["VLLM_USE_V1"] == "1"
-    assert "VLLM_API_KEY" not in metadata["env_vars"]
-    assert "TRITON_AUTH_TOKEN" not in metadata["env_vars"]
-
-
-def test_materialized_workload_metadata_tolerates_bad_server_args(tmp_path):
-    config_path = tmp_path / "profile_config.with_envs.yaml"
-    config_path.write_text(
-        """
-benchmark:
-  framework: sglang
-  envs:
-    EXTRA_SGLANG_ARGS: "--kv-cache-dtype 'unterminated"
-    TP: 1
-""",
-        encoding="utf-8",
-    )
-
-    metadata = ta._load_materialized_workload_metadata(str(config_path))
-
-    assert metadata["runtime_args"]["server_args"] == "--kv-cache-dtype 'unterminated"
-    assert metadata["runtime_args"]["server_args_argv"] == []
+    cmd = captured["cmd"]
+    split = cmd.index("--split-llm-inference")
+    assert cmd[split : split + 7] == [
+        "--split-llm-inference",
+        "--split-conc",
+        "64",
+        "--split-osl",
+        "1024",
+        "--split-r",
+        "0.5",
+    ]
 
 
 @pytest.mark.asyncio
@@ -2850,95 +2717,6 @@ def test_record_trace_analyze_defaults_warnings_to_empty_list(session_dir):
         },
     )
     assert state.last_trace_analyze["trace_health_warnings"] == []
-
-
-def test_record_trace_analyze_persists_task_groups(session_dir):
-    """``task_groups`` must flow into ``last_trace_analyze`` so the multi-KEEP queue collapses members of the same AST function into one slot."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    state = SharedState.load_or_init(session_dir)
-    groups = [
-        {
-            "primary_kernel_id": "k004",
-            "kernel_ids": ["k003", "k004"],
-            "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
-        },
-        {
-            "primary_kernel_id": "k002",
-            "kernel_ids": ["k001", "k002"],
-            "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
-        },
-    ]
-    state.record_trace_analyze(
-        {"trace_input": "/tmp/trace"},
-        {
-            "status": "ok",
-            "hot_kernels": [
-                {
-                    "kernel_id": "k001",
-                    "gpu_pct": 8.0,
-                    "reusable_native_kernel": True,
-                    "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
-                },
-                {
-                    "kernel_id": "k002",
-                    "gpu_pct": 25.0,
-                    "reusable_native_kernel": True,
-                    "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
-                },
-                {
-                    "kernel_id": "k003",
-                    "gpu_pct": 12.0,
-                    "reusable_native_kernel": True,
-                    "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
-                },
-                {
-                    "kernel_id": "k004",
-                    "gpu_pct": 38.0,
-                    "reusable_native_kernel": True,
-                    "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
-                },
-            ],
-            "task_groups": groups,
-        },
-    )
-    assert state.last_trace_analyze.get("task_groups") == groups
-    # After k002 + k004 attempted, group-aware collapse reports no untried kernels.
-    seed_integrate_verdict(
-        state,
-        "k002",
-        source_file="/sgl-workspace/aiter/aiter/ops/moe_op.py",
-        task_group_key="k002",
-    )
-    seed_kernel_keep(
-        state,
-        "k004",
-        decision="KEEP",
-        micro=1.17,
-        source_file="/sgl-workspace/aiter/aiter/ops/moe_op.py",
-        artifact="/tmp/k004.py",
-        task_group_key="k004",
-    )
-    assert kd.untried_hot_reusable_kernels(state) == [], (
-        "k001/k003 must be filtered out because their groups have an attempted member (k002 / k004 respectively)"
-    )
-
-
-def test_record_trace_analyze_defaults_task_groups_to_empty_list(session_dir):
-    """With no ``task_groups`` field (legacy TraceLens output), the cached entry defaults to an empty list."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    state = SharedState.load_or_init(session_dir)
-    state.record_trace_analyze(
-        {"trace_input": "/tmp/trace"},
-        {
-            "status": "ok",
-            "hot_kernels": [
-                {"kernel_id": "k1", "reusable_native_kernel": True},
-            ],
-        },
-    )
-    assert state.last_trace_analyze.get("task_groups") == []
 
 
 def test_record_select_kernels_filters_invalid_warning_entries(session_dir):
@@ -3199,49 +2977,21 @@ async def test_trace_analyze_handler_t4_failure_appends_to_existing_warnings(
     assert warnings[1]["code"] == "tracelens_analysis_failed"
 
 
-@pytest.mark.asyncio
-async def test_coordinator_answers_trace_analyze_with_the_registered_handler(session_dir, monkeypatch):
-    """With the dispatch table as shipped, trace_analyze reaches its handler instead of the unknown-kind reject."""
-
-    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
-        return 0, json.dumps({"status": "ok", "hot_kernels": ["kernel_a"]}), ""
-
-    monkeypatch.setattr(ta, "_run_subprocess", fake_run_subprocess)
-    c = Coordinator(session_dir, backends=_backends_silent())
-    try:
-        await c.router.handle_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.REQUEST,
-                payload={
-                    "target_agent": "kernel_agent",
-                    "kind": "trace_analyze",
-                    "params": {"trace_input": str(session_dir), "dry_run": True},
-                },
-            ),
-        )
-        (reply,) = await c.bus.tail(topic="response", to_agent="orchestration")
-        assert reply.payload["source"] == "programmatic_handler"
-        assert reply.payload["kind"] == "trace_analyze_done"
-        assert reply.payload["result"]["hot_kernels"] == ["kernel_a"]
-    finally:
-        await c.stop()
-
-
 # Coordinator — REQUEST programmatic handler integration
 @pytest.mark.asyncio
-async def test_coordinator_request_trace_analyze_uses_handler(session_dir):
-    """REQUEST{kind=trace_analyze} runs the registered handler programmatically and emits RESPONSE without the Kernel LLM."""
+async def test_coordinator_request_integrate_uses_handler(session_dir):
+    """REQUEST{kind=integrate} runs the registered handler programmatically and emits RESPONSE without the Kernel LLM."""
     c = Coordinator(session_dir, backends=_backends_silent())
+    c.shared_state.baseline_tput = 1234.5
 
     captured: dict = {}
 
     async def fake_handler(payload, *, session_dir):
         captured["payload"] = payload
         captured["session_dir"] = session_dir
-        return {"status": "ok", "hot_kernels": ["kernel_a", "kernel_b"]}
+        return {"status": "ok", "decision": "NEEDS_REVIEW", "kernel_id": "k009"}
 
-    with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"trace_analyze": fake_handler}):
+    with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"integrate": fake_handler}):
         try:
             await c.router.handle_intent(
                 "orchestration",
@@ -3249,8 +2999,8 @@ async def test_coordinator_request_trace_analyze_uses_handler(session_dir):
                     type=IntentType.REQUEST,
                     payload={
                         "target_agent": "kernel_agent",
-                        "kind": "trace_analyze",
-                        "params": {"trace_input": str(session_dir / "fake-trace.json.gz")},
+                        "kind": "integrate",
+                        "params": {"kernel_id": "k009", "patch_path": str(session_dir / "k009.py")},
                     },
                 ),
             )
@@ -3262,43 +3012,27 @@ async def test_coordinator_request_trace_analyze_uses_handler(session_dir):
             assert resp_msgs, "handler must emit RESPONSE without LLM"
             r = resp_msgs[0]
             assert r.from_agent == "kernel_agent"
-            assert r.payload["kind"] == "trace_analyze_done"
+            assert r.payload["kind"] == "integrate_done"
             assert r.payload["status"] == "ok"
-            assert r.payload["result"]["hot_kernels"] == ["kernel_a", "kernel_b"]
+            assert r.payload["result"]["kernel_id"] == "k009"
             assert r.payload["in_reply_to"] == req_id
             assert r.payload["source"] == "programmatic_handler"
 
             # And the handler did receive merged payload (params flattened in).
-            assert captured["payload"].get("trace_input") == str(session_dir / "fake-trace.json.gz")
+            assert captured["payload"].get("patch_path") == str(session_dir / "k009.py")
             assert captured["session_dir"] == session_dir
         finally:
             await c.stop()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("payload", "kernel_enabled", "error_class", "result_keys"),
-    [
-        ({"target_agent": "kernel_agent", "kind": "trace_analyze"}, False, "agent_disabled", ()),
-        (
-            {"target_agent": "kernel_agent", "kind": "invent_brand_new_kind"},
-            True,
-            "unknown_kernel_kind",
-            ("valid_kinds",),
-        ),
-    ],
-)
-async def test_coordinator_auto_reject_answers_in_one_envelope(
-    session_dir,
-    payload,
-    kernel_enabled,
-    error_class,
-    result_keys,
-):
-    """Every refusal the coordinator makes before a handler runs answers the requester the same way."""
+async def test_coordinator_auto_reject_answers_in_one_envelope(session_dir):
+    """A request the coordinator refuses after recording it is answered in the envelope a handler's result is."""
+    payload = {"target_agent": "kernel_agent", "kind": "integrate"}
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
-        c.shared_state.kernel_enabled = kernel_enabled
+        c.shared_state.kernel_enabled = False
+        c.shared_state.baseline_tput = 1234.5
         await c.router.handle_intent("orchestration", Intent(type=IntentType.REQUEST, payload=dict(payload)))
 
         requests = await c.bus.tail(topic="request", to_agent=payload["target_agent"])
@@ -3313,9 +3047,8 @@ async def test_coordinator_auto_reject_answers_in_one_envelope(
         assert reply.payload["status"] == "failed"
         assert reply.payload["source"] == "coordinator_auto_reject"
         assert reply.payload["result"]["status"] == "failed"
-        assert reply.payload["result"]["error_class"] == error_class
-        assert [k for k in result_keys if k not in reply.payload["result"]] == []
-        assert c.shared_state.last_action_failures[-1]["error_class"] == error_class
+        assert reply.payload["result"]["error_class"] == "agent_disabled"
+        assert c.shared_state.last_action_failures[-1]["error_class"] == "agent_disabled"
     finally:
         await c.stop()
 
@@ -3324,40 +3057,42 @@ async def test_coordinator_auto_reject_answers_in_one_envelope(
 async def test_a_padded_target_agent_reaches_its_handler(session_dir):
     """PolicyGate admits the stripped target, so the router has to route on the same name it admitted."""
     c = Coordinator(session_dir, backends=_backends_silent())
-    try:
-        c.shared_state.kernel_enabled = True
-        await c.router.handle_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.REQUEST,
-                payload={"target_agent": "  kernel_agent  ", "kind": "invent_brand_new_kind"},
-            ),
-        )
+    c.shared_state.baseline_tput = 1234.5
 
-        responses = await c.bus.tail(topic="response", to_agent="orchestration")
-        assert responses, "the request must be answered"
-        # It reaches the kernel_agent arm, so it is refused for its kind rather than for its target.
-        assert responses[0].payload["result"]["error_class"] == "unknown_kernel_kind"
-        assert responses[0].from_agent == "kernel_agent"
-    finally:
-        await c.stop()
+    async def fake_handler(payload, *, session_dir):
+        return {"status": "ok", "decision": "NEEDS_REVIEW", "kernel_id": "k009"}
+
+    with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"integrate": fake_handler}):
+        try:
+            await c.router.handle_intent(
+                "orchestration",
+                Intent(type=IntentType.REQUEST, payload={"target_agent": "  kernel_agent  ", "kind": "integrate"}),
+            )
+
+            responses = await c.bus.tail(topic="response", to_agent="orchestration")
+            assert responses, "the request must be answered"
+            assert responses[0].payload["source"] == "programmatic_handler"
+            assert responses[0].from_agent == "kernel_agent"
+        finally:
+            await c.stop()
 
 
 @pytest.mark.asyncio
 async def test_coordinator_request_handler_exception_recorded(session_dir):
     """Handler crashes → RESPONSE.status='failed' + error_class set."""
     c = Coordinator(session_dir, backends=_backends_silent())
+    c.shared_state.baseline_tput = 1234.5
 
     async def bad_handler(payload, *, session_dir):
         raise RuntimeError("boom")
 
-    with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"trace_analyze": bad_handler}):
+    with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"integrate": bad_handler}):
         try:
             await c.router.handle_intent(
                 "orchestration",
                 Intent(
                     type=IntentType.REQUEST,
-                    payload={"target_agent": "kernel_agent", "kind": "trace_analyze"},
+                    payload={"target_agent": "kernel_agent", "kind": "integrate"},
                 ),
             )
             resp_msgs = await c.bus.tail(topic="response", to_agent="orchestration")

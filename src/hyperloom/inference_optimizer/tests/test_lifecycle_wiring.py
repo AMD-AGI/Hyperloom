@@ -36,8 +36,8 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 
 def test_lifecycle_paths_extracts_present_path_keys():
     payload = {
-        "trace_input": "/tmp/trace.json.gz",
-        "candidates_path": "/tmp/kc.json",
+        "patch_path": "/tmp/k001.patch",
+        "target_file": "/tmp/moe_op.py",
         "empty": "",
         "missing": None,
         "not_a_path_key": "ignored",
@@ -45,24 +45,10 @@ def test_lifecycle_paths_extracts_present_path_keys():
     }
     out = lifecycle_paths(payload)
     assert out == {
-        "trace_input": "/tmp/trace.json.gz",
-        "candidates_path": "/tmp/kc.json",
+        "patch_path": "/tmp/k001.patch",
+        "target_file": "/tmp/moe_op.py",
         "best_artifact_path": "/tmp/best.py",
     }
-
-
-def test_lifecycle_paths_surfaces_tracelens_report_keys():
-    # The lifecycle allowlist must surface trace_analyze report outputs so operators reach analysis.md + sidecars.
-    payload = {
-        "trace_report_path": "/tmp/run/analysis.md",
-        "analysis_report_path": "/tmp/run/analysis.md",
-        "tracelens_summary_path": "/tmp/run/tracelens/summary.json",
-        "kernel_roofline_path": "/tmp/run/kernel_roofline.json",
-        "cli_log_path": "/tmp/run/cli.log",
-        "candidates_path": "/tmp/run/kernel_candidates.json",
-    }
-    out = lifecycle_paths(payload)
-    assert out == payload
 
 
 def test_lifecycle_paths_handles_non_dict():
@@ -112,122 +98,67 @@ async def test_emit_lifecycle_debounces_nonterminal_but_flushes_terminal(
             autospec=True,
         ) as mock_save:
             # First START flushes.
-            c.writeback.emit_lifecycle(step="trace_analyze", status="START")
+            c.writeback.emit_lifecycle(step="integrate", status="START")
             saves_after_first = mock_save.call_count
             assert saves_after_first == 1
             # Subsequent STARTs inside the window are debounced.
-            c.writeback.emit_lifecycle(step="trace_analyze", status="START")
+            c.writeback.emit_lifecycle(step="integrate", status="START")
             c.writeback.emit_lifecycle(step="kernel_optimization", status="START")
             assert mock_save.call_count == saves_after_first
             # A terminal END always flushes regardless of the window.
             c.writeback.emit_lifecycle(
-                step="trace_analyze",
+                step="integrate",
                 status="END",
-                artifacts={"trace_report_path": "/x/analysis.md"},
+                artifacts={"patch_path": "/x/k001.patch"},
             )
             assert mock_save.call_count == saves_after_first + 1
         # All four events are recorded in memory even when writes coalesced.
         steps = [(e["step"], e["status"]) for e in c.shared_state.lifecycle]
-        assert ("trace_analyze", "END") in steps
-        assert steps.count(("trace_analyze", "START")) == 2
+        assert ("integrate", "END") in steps
+        assert steps.count(("integrate", "START")) == 2
     finally:
         await c.stop()
 
 
+def _integrate_request(patch_path: str) -> Intent:
+    return Intent(
+        type=IntentType.REQUEST,
+        payload={"target_agent": "kernel_agent", "kind": "integrate", "params": {"patch_path": patch_path}},
+    )
+
+
 @pytest.mark.asyncio
-async def test_handle_request_emits_start_and_end(session_dir, monkeypatch, tmp_path):
+async def test_handle_request_emits_start_and_end(session_dir, monkeypatch):
     c = Coordinator(session_dir, backends=silent_backends())
     try:
         from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
 
-        candidates_path = tmp_path / "kernel_candidates.json"
-        candidates_path.write_text("{}", encoding="utf-8")
+        c.shared_state.baseline_tput = 100.0
+        patch_path = str(session_dir / "k001.patch")
+        report_path = str(session_dir / "integrate_report.json")
 
         async def fake_handler(payload, *, session_dir):
-            return {
-                "status": "ok",
-                "candidates_path": str(candidates_path),
-                "hot_kernels": [],
-            }
+            return {"status": "ok", "decision": "NEEDS_REVIEW", "kernel_id": "k001", "report_path": report_path}
 
-        monkeypatch.setitem(
-            kernel_request_handlers.KERNEL_REQUEST_HANDLERS,
-            "trace_analyze",
-            fake_handler,
-        )
+        monkeypatch.setitem(kernel_request_handlers.KERNEL_REQUEST_HANDLERS, "integrate", fake_handler)
 
-        intent = Intent(
-            type=IntentType.REQUEST,
-            payload={
-                "target_agent": "kernel_agent",
-                "kind": "trace_analyze",
-                "params": {"trace_input": str(session_dir / "trace-A.json.gz")},
-            },
-        )
-        await c.router.handle_intent("orchestration", intent)
+        await c.router.handle_intent("orchestration", _integrate_request(patch_path))
 
-        ta_events = [e for e in c.shared_state.lifecycle if e["step"] == "trace_analyze"]
-        assert len(ta_events) == 2, f"expected START + END, got {ta_events}"
-        start, end = ta_events[0], ta_events[1]
+        events = [e for e in c.shared_state.lifecycle if e["step"] == "integrate"]
+        assert len(events) == 2, f"expected START + END, got {events}"
+        start, end = events[0], events[1]
 
-        # START carries the input trace path; no duration yet.
+        # START carries the request's paths; no duration yet.
         assert start["status"] == "START"
-        assert start["label"] == "TraceLens"
-        assert start["artifacts"]["trace_input"] == str(session_dir / "trace-A.json.gz")
+        assert start["label"] == "Integrate"
+        assert start["artifacts"]["patch_path"] == patch_path
         assert "duration_s" not in start
 
         # END carries the produced artifact + a measured duration.
         assert end["status"] == "END"
-        assert end["artifacts"]["candidates_path"] == str(candidates_path)
+        assert end["artifacts"]["report_path"] == report_path
         assert "duration_s" in end and end["duration_s"] >= 0.0
         assert end["seq"] > start["seq"]
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_handle_request_end_surfaces_tracelens_report_paths(
-    session_dir,
-    monkeypatch,
-    tmp_path,
-):
-    # The lifecycle END for a trace_analyze step must carry every TraceLens report path the handler returns, not just
-    # candidates_path.
-    c = Coordinator(session_dir, backends=silent_backends())
-    try:
-        from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
-
-        report_fields = {
-            "candidates_path": str(tmp_path / "kernel_candidates.json"),
-            "trace_report_path": str(tmp_path / "analysis.md"),
-            "analysis_report_path": str(tmp_path / "analysis.md"),
-            "tracelens_summary_path": str(tmp_path / "summary.json"),
-            "kernel_roofline_path": str(tmp_path / "kernel_roofline.json"),
-            "cli_log_path": str(tmp_path / "cli.log"),
-        }
-
-        async def fake_handler(payload, *, session_dir):
-            return {"status": "ok", "hot_kernels": [], **report_fields}
-
-        monkeypatch.setitem(
-            kernel_request_handlers.KERNEL_REQUEST_HANDLERS,
-            "trace_analyze",
-            fake_handler,
-        )
-
-        intent = Intent(
-            type=IntentType.REQUEST,
-            payload={
-                "target_agent": "kernel_agent",
-                "kind": "trace_analyze",
-                "params": {"trace_input": str(session_dir / "trace-B.json.gz")},
-            },
-        )
-        await c.router.handle_intent("orchestration", intent)
-
-        end = [e for e in c.shared_state.lifecycle if e["step"] == "trace_analyze" and e["status"] == "END"][-1]
-        for key, val in report_fields.items():
-            assert end["artifacts"][key] == val, f"missing {key} in END artifacts"
     finally:
         await c.stop()
 
@@ -238,27 +169,17 @@ async def test_handle_request_failed_handler_emits_error(session_dir, monkeypatc
     try:
         from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
 
+        c.shared_state.baseline_tput = 100.0
+
         async def boom_handler(payload, *, session_dir):
             raise RuntimeError("kaboom")
 
-        monkeypatch.setitem(
-            kernel_request_handlers.KERNEL_REQUEST_HANDLERS,
-            "trace_analyze",
-            boom_handler,
-        )
+        monkeypatch.setitem(kernel_request_handlers.KERNEL_REQUEST_HANDLERS, "integrate", boom_handler)
 
-        intent = Intent(
-            type=IntentType.REQUEST,
-            payload={
-                "target_agent": "kernel_agent",
-                "kind": "trace_analyze",
-                "params": {"trace_input": str(session_dir / "t.json.gz")},
-            },
-        )
-        await c.router.handle_intent("orchestration", intent)
+        await c.router.handle_intent("orchestration", _integrate_request(str(session_dir / "k001.patch")))
 
-        ta_events = [e for e in c.shared_state.lifecycle if e["step"] == "trace_analyze"]
-        assert [e["status"] for e in ta_events] == ["START", "ERROR"]
+        events = [e for e in c.shared_state.lifecycle if e["step"] == "integrate"]
+        assert [e["status"] for e in events] == ["START", "ERROR"]
     finally:
         await c.stop()
 
@@ -342,37 +263,6 @@ def test_roofline_lifecycle_lets_a_state_serialization_bug_propagate(tmp_path, m
 
 
 @pytest.mark.asyncio
-async def test_handle_request_cache_hit_emits_lone_end(session_dir, monkeypatch):
-    c = Coordinator(session_dir, backends=silent_backends())
-    try:
-        cached = {"status": "ok", "candidates_path": "/tmp/cached_kc.json"}
-        monkeypatch.setattr(
-            c.phase_kernel,
-            "cached_kernel_request",
-            lambda kind, payload: cached,
-        )
-
-        intent = Intent(
-            type=IntentType.REQUEST,
-            payload={
-                "target_agent": "kernel_agent",
-                "kind": "trace_analyze",
-                "params": {"trace_input": str(session_dir / "trace.json.gz")},
-            },
-        )
-        await c.router.handle_intent("orchestration", intent)
-
-        ta = [e for e in c.shared_state.lifecycle if e["step"] == "trace_analyze"]
-        # A cache hit never runs the handler: exactly one END, no START.
-        assert [e["status"] for e in ta] == ["END"], f"want lone END, got {ta}"
-        assert ta[0]["detail"] == "cache_hit"
-        assert ta[0]["label"] == "TraceLens"
-        assert ta[0]["artifacts"]["candidates_path"] == "/tmp/cached_kc.json"
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
 async def test_handle_request_rejected_integrate_emits_lone_end(
     session_dir,
     monkeypatch,
@@ -385,11 +275,6 @@ async def test_handle_request_rejected_integrate_emits_lone_end(
             c.dispatcher,
             "admission_denial_for_request",
             lambda target, kind: None,
-        )
-        monkeypatch.setattr(
-            c.phase_kernel,
-            "cached_kernel_request",
-            lambda kind, payload: None,
         )
         patch_path = str(session_dir / "p.patch")
         rejection = {

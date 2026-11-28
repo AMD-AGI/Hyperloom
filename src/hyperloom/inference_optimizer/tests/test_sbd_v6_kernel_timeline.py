@@ -33,7 +33,6 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event_rows import (
     record_geak_attempts,
     record_integrate_axis,
     record_integrate_verdict,
-    record_trace_analyze_request,
     reject_geak_attempts,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
@@ -45,7 +44,6 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
     KernelReprofile,
     KernelRewriteRun,
     LaneRunFields,
-    TraceAnalyzeRun,
 )
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -193,81 +191,6 @@ def test_a_keep_nothing_measured_is_delivered_without_claiming_a_gain(tmp_path):
     assert [entry["ref"] for entry in ext["outcome"]["delivered"]] == ["attempt-7"]
     assert ext["outcome"]["verdict"] == "no_improvement"
     assert ext["outcome"]["reason"] == "nothing measured a gain on the candidates kept"
-
-
-def test_a_bus_requested_analysis_accounts_for_the_snapshot_it_advanced(tmp_path):
-    recorder = _forge_recorder()
-    recorder.record_kernel_rewrite(
-        KernelRewriteRun(
-            lane=LaneRunFields(run_id="attempt-7", status="success", micro_decision="keep"), kernel_id="k001"
-        )
-    )
-    record_trace_analyze_request(
-        macro_cycle=3,
-        run=TraceAnalyzeRun(
-            run_id="msg-42",
-            status="ok",
-            result={"hot_kernels": [{"name": "fused_moe", "gpu_pct": 31.5}]},
-            requested_by="kernel_agent",
-            request_msg_id="msg-42",
-            trace_input="traces/rank0.pt.trace.json",
-            top_k=15,
-            snapshot={"roofline_snapshot_id": 4, "analysis_md_path": "reports/analysis.md"},
-        ),
-    )
-    recorder.finish(KernelExit(tput_after=1000.0))
-
-    runs = _kernel_events(tmp_path)[0]["ext"]["forge"]["trace_analyze_runs"]
-    assert len(runs) == 1
-    assert runs[0]["run_id"] == "msg-42"
-    assert runs[0]["trigger"] == "bus_request"
-    assert runs[0]["requested_by"] == "kernel_agent"
-    assert runs[0]["roofline_snapshot_id"] == 4
-    assert runs[0]["cache_hit"] is False
-
-
-def test_a_bus_requested_analysis_after_the_visit_closed_still_lands(tmp_path):
-    recorder = _forge_recorder()
-    recorder.finish(KernelExit(tput_after=1000.0))
-
-    record_trace_analyze_request(
-        macro_cycle=3,
-        run=TraceAnalyzeRun(run_id="msg-42", status="ok", result={}, snapshot={"roofline_snapshot_id": 4}),
-    )
-
-    runs = _kernel_events(tmp_path)[0]["ext"]["forge"]["trace_analyze_runs"]
-    assert [run["run_id"] for run in runs] == ["msg-42"]
-
-
-def test_a_bus_request_with_no_visit_running_mints_no_event(tmp_path):
-    record_trace_analyze_request(
-        macro_cycle=3,
-        run=TraceAnalyzeRun(run_id="msg-42", status="ok", result={}, snapshot={"roofline_snapshot_id": 4}),
-    )
-
-    assert _kernel_events(tmp_path) == []
-
-
-def test_a_bus_requested_analysis_carries_the_kernel_table_it_produced(tmp_path):
-    recorder = _forge_recorder()
-    record_trace_analyze_request(
-        macro_cycle=3,
-        run=TraceAnalyzeRun(
-            run_id="msg-42",
-            status="ok",
-            result={},
-            snapshot={
-                "roofline_snapshot_id": 4,
-                "reusable_native_kernel_ids": ["k001"],
-                "hot_kernels_top15": [{"kernel_id": "k001", "name": "fused_moe", "gpu_pct": 31.5}],
-            },
-        ),
-    )
-    recorder.finish(KernelExit(tput_after=1000.0))
-
-    discovered = _kernel_events(tmp_path)[0]["ext"]["forge"]["discovered_kernels"]
-    assert [row["kernel_id"] for row in discovered] == ["k001"]
-    assert discovered[0]["provenance"] == "trace_analyze_run"
 
 
 def test_an_adoption_states_the_basis_its_gain_was_measured_on(tmp_path):
@@ -1141,63 +1064,6 @@ def test_an_unfinished_visit_states_no_verdict(tmp_path):
     assert ext["outcome"]["failed_stage"] == "tick_body"
 
 
-def test_the_trace_analyze_run_records_the_only_legal_kernel_id_source(tmp_path):
-    recorder = _forge_recorder()
-    record_trace_analyze_request(
-        macro_cycle=3,
-        run=TraceAnalyzeRun(
-            run_id="ta-1",
-            status="ok",
-            requested_by="orchestration",
-            trace_input="/s/traces",
-            top_k=10,
-            result={
-                "analysis_meta": {"route": "agent", "tool": "tracelens"},
-                "hot_kernels_top15": [{"name": "aten::mm", "gpu_pct": 10.0}],
-                "candidates_path": "/s/candidates.json",
-            },
-            snapshot={"roofline_snapshot_id": 5, "reusable_native_kernel_ids": ["k001", "k002"]},
-        ),
-    )
-    recorder.finish(KernelExit(tput_after=1000.0))
-
-    run = _kernel_events(tmp_path)[0]["ext"]["forge"]["trace_analyze_runs"][0]
-    assert run["route"] == "agent"
-    assert run["tool"] == "tracelens"
-    assert run["roofline_snapshot_id"] == 5
-    assert run["reusable_native_kernel_ids"] == ["k001", "k002"]
-    assert run["artifacts"]["candidates_path"] == "/s/candidates.json"
-    assert sorted(run) == [
-        "analysis_md_path",
-        "artifacts",
-        "cache_hit",
-        "hot_kernels",
-        "preflight",
-        "request_msg_id",
-        "requested_by",
-        "reusable_native_kernel_ids",
-        "roofline_baseline_gain_at_snapshot",
-        "roofline_snapshot_id",
-        "route",
-        "route_ext",
-        "run_id",
-        "selection",
-        "split",
-        "status",
-        "steady_state",
-        "steady_state_trace",
-        "steps",
-        "tool",
-        "tool_run_id",
-        "top_k",
-        "trace_input",
-        "trigger",
-        "ts",
-        "warnings",
-    ]
-    assert run["hot_kernels"]["count"] == 1
-
-
 def _geak_rebench(recorder, attempt_id: str, decision: str | None, **overrides: Any) -> None:
     fields: dict[str, Any] = {
         "attempt_id": attempt_id,
@@ -1561,38 +1427,6 @@ def test_discovered_kernels_carry_profiling_fields(tmp_path):
     assert hot["bandwidth_util_pct"] == 12.0
     assert hot["recommended_actions"] == ["tile"]
     assert forge["recommended_kernels"][0]["kernel_id"] == "k-hot"
-
-
-def test_trace_analyze_run_also_records_discovered_kernels(tmp_path):
-    recorder = _forge_recorder()
-    record_trace_analyze_request(
-        macro_cycle=3,
-        run=TraceAnalyzeRun(
-            run_id="ta-2",
-            status="ok",
-            result={"analysis_meta": {"route": "agent", "tool": "tracelens"}},
-            snapshot={
-                "roofline_snapshot_id": 6,
-                "hot_kernels_top15": [
-                    {
-                        "kernel_id": "k001",
-                        "name": "aten::mm",
-                        "gpu_pct": 10.0,
-                        "duration_us": 50.0,
-                        "call_count": 8,
-                        "bound_type": "memory",
-                    }
-                ],
-                "reusable_native_kernel_ids": ["k001"],
-            },
-        ),
-    )
-    recorder.finish(KernelExit(tput_after=1000.0))
-
-    discovered = _kernel_events(tmp_path)[0]["ext"]["forge"]["discovered_kernels"]
-    assert discovered[0]["kernel_id"] == "k001"
-    assert discovered[0]["duration_us"] == 50.0
-    assert discovered[0]["provenance"] == "trace_analyze_run"
 
 
 _CONTROLLER_RESULT = {

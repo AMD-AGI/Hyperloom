@@ -215,6 +215,78 @@ from scripts, and read `reports/final.md` for the session's own summary and
 `HYPERLOOM_REPORT_MAX_TOKENS` are no longer read and are silently ignored, so
 drop them.
 
+### Required: the `trace_analyze` kernel request is removed
+
+Orchestration can no longer ask the kernel agent to analyse a trace. A
+`request` with `kind: trace_analyze` is refused like any kind with no handler:
+PolicyGate denies it with `rule=request_kind` and a hint naming the kinds that
+have one, `apply_patch` and `integrate`. The
+analysis is produced only by the roofline executor: by the Coordinator's
+`roofline` action at PRELUDE, at each +10% watermark and on the KERNEL entry
+re-profile, and by the Forge GEMM lane's vLLM block-FP8 shape capture, which
+runs the same executor inline whatever `--enable-roofline` says. Read it in
+`last_trace_analyze`.
+
+* A session run with `--no-enable-roofline` profiles but gets no analysis
+  unless the block-FP8 GEMM shape capture runs one: without it there is no
+  `last_trace_analyze`, no `analysis.md` and no hot-kernel list. Drop the flag
+  if the session needs them.
+* `session_breakdown.json`: a `kernel_agent` event's `ext.forge` no longer has
+  `trace_analyze_runs`, and no `discovered_kernels` row has the provenance
+  `trace_analyze_run`. The schema stays `v6.1`. Read an analysis on the
+  `roofline` event of the action that ran it, or under `ext.forge.reprofile.run`
+  when the KERNEL entry re-profile ran it.
+* `state.json`: `analysis_failures` gains no `trace:<trace_input>` records;
+  the ones an earlier release wrote are ignored.
+* The `trace_analyze_done` response, its `cache_hit` lifecycle line and the
+  failure class `trace_analysis_failure_remembered` no longer occur.
+* A request for any other kind with no handler, such as `run_optimization`, is
+  denied the same way. Before, it was answered with a failed
+  `unknown_kernel_kind` response, which left a `last_action_failures` row and
+  reached the recipe's `what_failed`; that error class no longer occurs.
+
+### Required: the trace analysis drops the outputs of the retired per-kernel dispatch
+
+The trace analysis still wrote fields that only Hyperloom's own per-kernel
+selection and dispatch read, a chain earlier releases removed. The fields are
+gone. Nothing in Hyperloom reads them; a consumer of yours that does should
+stop.
+
+`HYPERLOOM_MODELS_ROOT` is no longer read and is silently ignored, so drop it.
+It named a directory searched for the model's `config.json`, which was read
+only to fill the removed `kernel_params` and `kernel_contract`.
+
+* `kernel_candidates.json` and `tracelens_report.json`: a row no longer
+  carries `benchmark_files`, `kernel_params`, `runtime_flags`,
+  `num_gpus_recommended`, `kernel_contract`, `e2e_transferable`,
+  `e2e_transfer_note`, `env_vars`, `runtime_args`, `trace_report_path`,
+  `invocation_cases`, `raw_arg_spec`, `output_shapes`, `output_dtypes`,
+  `patch_strategy`, `kernel_repo`, `vendor_operator_playbook`,
+  `source_file_superseded_by_playbook` or a `vendor_playbook_*` key, and a
+  `task_groups[]` entry no longer carries `shape_cases` or
+  `legacy_task_group_keys`. `kernel_candidates.json` no longer gains a
+  top-level `trace_report_path` or `artifact_paths`; the analysis result still
+  names the report in `trace_report_path`. The per-invocation rows those fields
+  were built from are in `tracelens/perf_report_csvs/ops_unique_args.csv`
+  beside `analysis.md`.
+* The trace certificate (`<trace_dir>.selfcert.json`, and `trace_validate` in
+  a profile result) no longer carries `rank_level[].annotations`, and its
+  `verdict.thresholds_effective` has no `min_repeats`. In
+  `session_breakdown.json` the same key leaves `validate.thresholds_effective`
+  on a `roofline` event's profile runs; the schema stays `v6.1`.
+* `state.json`: `last_trace_analyze` no longer has `task_groups` or
+  `skipped_kernels_top`, its hot-kernel rows drop `kernel_contract`,
+  `patch_strategy` and the `vendor_playbook_*` fields, and a queued kernel
+  integration drops `legacy_task_group_keys`. A session written by an earlier
+  release still resumes: the retired keys are ignored.
+* mori EP dispatch and combine kernels are classified like any other row, by
+  the source the trace resolved for them. They are compiled bindings, so they
+  come out `reusable_native_kernel: false` and no longer hold
+  `kernel_work_pending` true. `HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT` is compared
+  with each row's own `gpu_pct`; the group sum and its 10% floor are gone.
+* The wheel no longer ships
+  `hyperloom/orchestrator/trace_analysis/vendor_operator_playbooks.json`.
+
 ---
 
 ## Upgrading from 1.1.x

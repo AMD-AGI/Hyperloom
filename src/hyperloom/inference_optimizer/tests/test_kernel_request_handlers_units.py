@@ -1910,45 +1910,19 @@ class TestCoerceRuntimeValue:
         assert ta._coerce_runtime_value(value) == expected
 
 
-class TestCandidateEnvAllowed:
-    @pytest.mark.parametrize("name", ["AWS_SECRET_ACCESS_KEY", "ANTHROPIC_API_KEY"])
-    def test_sensitive_env_blocked(self, name):
-        assert ta._candidate_env_allowed(name) is False
-
-    def test_known_prefix_allowed(self):
-        prefixes = ta._CANDIDATE_ENV_PREFIXES
-        assert prefixes  # registry not empty
-        sample = next(iter(prefixes))
-        assert ta._candidate_env_allowed(sample + "FOO") is True
-
-    def test_explicit_allowlisted_key(self):
-        keys = ta._CANDIDATE_ENV_KEYS
-        if not keys:
-            pytest.skip("no explicit allowlist entries in build")
-        sample = next(iter(keys))
-        assert ta._candidate_env_allowed(sample) is True
-
-
-class TestSplitServerArgs:
-    def test_unterminated_quote_returns_empty(self):
-        # shlex.split raises ValueError on bad input; helper returns [].
-        argv = ta._split_server_args('--foo "unterminated')
-        assert argv == []
-
-
-class TestLoadMaterializedWorkloadMetadata:
+class TestMaterializedWorkload:
     def test_empty_when_no_path(self):
-        assert ta._load_materialized_workload_metadata("") == {}
+        assert ta._materialized_workload("") == {}
 
     def test_empty_when_path_missing(self, tmp_path):
-        assert ta._load_materialized_workload_metadata(str(tmp_path / "no.yaml")) == {}
+        assert ta._materialized_workload(str(tmp_path / "no.yaml")) == {}
 
     def test_empty_when_the_config_has_no_benchmark_block(self, tmp_path):
         cfg = tmp_path / "other.yaml"
         cfg.write_text("other: {}\n")
-        assert ta._load_materialized_workload_metadata(str(cfg)) == {}
+        assert ta._materialized_workload(str(cfg)) == {}
 
-    def test_parses_sglang_metadata(self, tmp_path):
+    def test_reads_the_split_hints_as_numbers(self, tmp_path):
         cfg = tmp_path / "point.yaml"
         cfg.write_text(
             "benchmark:\n"
@@ -1956,98 +1930,12 @@ class TestLoadMaterializedWorkloadMetadata:
             "  model: /weights/m\n"
             "  precision: bf16\n"
             "  envs:\n"
-            "    TP: 1\n"
             "    CONC: 16\n"
-            "    ISL: 1024\n"
             "    OSL: 512\n"
+            "    RANDOM_RANGE_RATIO: '0.5'\n"
             "    EXTRA_SGLANG_ARGS: '--foo 1'\n"
         )
-        out = ta._load_materialized_workload_metadata(str(cfg))
-        runtime = out["runtime_args"]
-        assert (runtime["framework"], runtime["model"], runtime["precision"]) == ("sglang", "/weights/m", "bf16")
-        assert runtime["server_args"] == "--foo 1"
-        assert runtime["server_args_argv"] == ["--foo", "1"]
-        workload = runtime["workload"]
-        assert workload["tp"] == 1
-        assert workload["conc"] == 16
-        assert "TP" in out["env_vars"]
-
-    @pytest.mark.parametrize(
-        "framework,env_name,expected_args",
-        [
-            ("sglang", "EXTRA_SGLANG_ARGS", "--mem-fraction-static=0.8"),
-            ("vllm", "EXTRA_VLLM_ARGS", "--gpu-memory-utilization 0.9"),
-            ("atom", "EXTRA_ATOM_ARGS", "--trust-remote-code --level 2 --enable-expert-parallel"),
-        ],
-    )
-    def test_server_args_read_from_per_framework_env_key(
-        self,
-        tmp_path,
-        framework,
-        env_name,
-        expected_args,
-    ):
-        """The handler reads the per-framework ``EXTRA_<FRAMEWORK>_ARGS`` slot."""
-        cfg = tmp_path / f"point_{framework}.yaml"
-        cfg.write_text(
-            "benchmark:\n"
-            f"  framework: {framework}\n"
-            "  model: /weights/m\n"
-            "  precision: bf16\n"
-            "  envs:\n"
-            "    TP: 4\n"
-            "    CONC: 32\n"
-            "    ISL: 1024\n"
-            "    OSL: 1024\n"
-            f"    {env_name}: '{expected_args}'\n"
-        )
-        out = ta._load_materialized_workload_metadata(str(cfg))
-        runtime = out["runtime_args"]
-        assert runtime["framework"] == framework
-        assert runtime["server_args"] == expected_args, (
-            f"framework={framework!r} expected server_args={expected_args!r}; got {runtime['server_args']!r}."
-        )
-
-    def test_atom_server_args_ignore_stray_sglang_env(self, tmp_path):
-        """When an atom YAML carries both EXTRA_ATOM_ARGS and a stray EXTRA_SGLANG_ARGS, the atom slot wins."""
-        cfg = tmp_path / "point_atom_mixed.yaml"
-        cfg.write_text(
-            "benchmark:\n"
-            "  framework: atom\n"
-            "  model: /weights/m\n"
-            "  precision: fp8\n"
-            "  envs:\n"
-            "    TP: 4\n"
-            "    CONC: 32\n"
-            "    ISL: 1024\n"
-            "    OSL: 1024\n"
-            "    EXTRA_SGLANG_ARGS: '--should-be-ignored'\n"
-            "    EXTRA_ATOM_ARGS: '--trust-remote-code --level 2'\n"
-        )
-        out = ta._load_materialized_workload_metadata(str(cfg))
-        runtime = out["runtime_args"]
-        assert runtime["framework"] == "atom"
-        assert runtime["server_args"] == "--trust-remote-code --level 2"
-        assert "--should-be-ignored" not in runtime["server_args"]
-
-
-class TestEnrichCandidate:
-    def test_enrich_candidate_runtime_metadata_setdefault_semantics(self):
-        candidates = [{"kernel_id": "k", "env_vars": {"TP": "8"}}]
-        metadata = {"env_vars": {"TP": "1", "CONC": "16"}, "runtime_args": {"framework": "sglang"}}
-        ta._enrich_candidate_runtime_metadata(candidates, metadata)
-        assert candidates[0]["env_vars"] == {"TP": "8", "CONC": "16"}
-        assert candidates[0]["runtime_args"]["framework"] == "sglang"
-
-    def test_enrich_candidate_runtime_metadata_ignores_non_dict_items(self):
-        candidates = ["not a dict", {"kernel_id": "x"}]
-        ta._enrich_candidate_runtime_metadata(candidates, {"env_vars": {"A": "B"}})
-        assert candidates[1].get("env_vars") == {"A": "B"}
-
-    def test_enrich_candidate_trace_report_skips_blank_path(self):
-        candidates = [{"kernel_id": "k"}]
-        ta._enrich_candidate_trace_report(candidates, "")
-        assert "trace_report_path" not in candidates[0]
+        assert ta._materialized_workload(str(cfg)) == {"conc": 16, "osl": 512, "random_range_ratio": 0.5}
 
 
 class TestReusableSourceRootsAtom:

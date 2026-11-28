@@ -80,7 +80,7 @@ def test_gate_unknown_agent_rejected(gate):
         pytest.param(
             "orchestration",
             IntentType.REQUEST,
-            {"target_agent": "kernel_agent", "kind": "trace_analyze"},
+            {"target_agent": "kernel_agent", "kind": "integrate"},
             id="orchestration-request-to-kernel_agent",
         ),
         pytest.param(
