@@ -724,9 +724,9 @@ def _variant_row(run: _GridRun, at: _VariantSlot, measured: _MeasuredVariant) ->
     unmeasured = run.launch.lifecycle_boot_only or run.launch.evaluation_only
     if unmeasured and measured.round.proc.returncode == 0 and not measurement.get("valid_measurement"):
         return _unmeasured_row(at, outcome, run.launch)
-    if round_succeeded(measurement):
-        return _measured_row(at, outcome)
-    _abort_on_invalid_measurement(run, at, outcome)
+    if not round_succeeded(measurement):
+        _abort_on_invalid_measurement(run, at, outcome)
+    return _measured_row(at, outcome)
 
 
 def _unmeasured_row(at: _VariantSlot, outcome: _VariantOutcome, launch: GridLaunch) -> VariantResult:
