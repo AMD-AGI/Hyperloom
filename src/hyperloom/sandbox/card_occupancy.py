@@ -25,12 +25,27 @@ cannot be matched to what the container sees. The probe then does not name whose
 starts nothing may hold a card, so any holder is foreign. While it runs, each of its cards may have one process with
 memory on it, the test's on that card, and on the card where a launcher of the test (a process of the test that holds memory
 and started processes that hold their own) holds memory, a second one with no more than a launcher's memory
-(:data:`LAUNCHER_VRAM`); every holder beyond that is foreign. What the test's processes report on a card's render node does
-not count as holders of that card: a rank of a server with several reports its whole memory on every render node of the
-server, while the kernel lists it on its own card only. A holder with almost no memory (:data:`NEGLIGIBLE_VRAM`) and no queue, such as a launcher that only initialised the
-GPU, is not counted. Memory on a card that no process the container sees
-accounts for is foreign as well (:mod:`hyperloom.sandbox.drm_fdinfo`). Processes that only opened the interface hold
-nothing and are not counted.
+(:data:`LAUNCHER_VRAM`); every holder beyond that is foreign, unless every holder of the card pairs one to one, by its
+memory, with a process of the test by what that process's open DRM files on the card's render node say it holds there (a
+server and the processes it spawned, a rank of a server with several on each of its cards). Memory is the only evidence on
+this path, the kernel's process ids being the host's and its records naming no process the container can see: a process
+of the test that no holder pairs with does not count against the card. Every rank of a server with several reports
+its memory on the render node of every card of the server, while the kernel lists it on its own card only, so each process
+of the test pairs with one holder across all the cards, and the lone holders of the other cards pair first; the holders
+of a card passed by a launcher's place keep the processes they pair with as well. A process of the test pairs only on
+the card where it is expected to hold memory of its own: where it reports its most, which is the one card of a process
+with memory on one card and the own card of a rank whose files say more there; the ranks of a server (the processes
+that report memory on the same several cards) pair with one holder per card between them, as each card is the own card of one. Memory
+alone leaves a window: while a process of the test is not paired with its own holder (the kernel does not list it yet, or
+lists it more than :data:`UNACCOUNTED_VRAM_TOLERANCE` from what its files say), one foreign holder within the tolerance
+of what that process reports on its expected card passes there, and only there: on its one card, on a rank's own card,
+or, for a rank whose files do not say which card is its own, on the card of the server none of the other ranks pairs on.
+A foreign holder that no process of the test left free comes near is counted at any size.
+Beyond that pairing, what the test's processes report on a card's render node does not count as holders of that card: a rank of a server with
+several reports its whole memory on every render node of the server, while the kernel lists it on its own card only. A
+holder with almost no memory (:data:`NEGLIGIBLE_VRAM`) and no queue, such as a launcher that only initialised the GPU,
+is not counted. Memory on a card that no process the container sees accounts for is foreign as well
+(:mod:`hyperloom.sandbox.drm_fdinfo`). Processes that only opened the interface hold nothing and are not counted.
 """
 
 from __future__ import annotations
@@ -269,20 +284,44 @@ class CardReading:
         beside it one holder with a launcher's memory (:data:`LAUNCHER_VRAM`) on a card where one of the test's launchers
         (:meth:`_own_launchers`) holds memory on the render node. Each launcher is allowed so on one card only, the
         lowest-numbered one that needs it, as its runtime keeps its memory on its first card. Every holder beyond that is
-        not the test's.
+        not the test's, unless each holder of the card is matched to a process of the test by what it holds on the card
+        (:meth:`_own_memory`), to within :data:`UNACCOUNTED_VRAM_TOLERANCE` and one to one across all the cards (each
+        process with one holder), with as many lone holders of the other cards and the holders of the cards that passed so
+        before still matched (:func:`_pairs`): a server and the processes it spawned that each hold memory on the card,
+        ranks of a server with several among them, are the test's, whatever their memory. The holders of a card that
+        passes by a launcher's place and pair keep their processes for the cards after it (:func:`_still_paired`), so a
+        rank there vouches for no holder elsewhere.
+
+        Each process of the test pairs only on a card where it is expected to hold memory of its own (:func:`_own_cards`),
+        and the ranks of a server (processes that report memory on the same several cards) pair with one holder per card between them. Memory
+        alone cannot tell a foreign holder from a process of the test that no holder pairs with: while one is not listed
+        by the kernel, or listed more than the tolerance from what its files say, one foreign holder near what it reports
+        on its expected card passes there, and on no other card: a single-card process's card, a rank's own card, or for
+        ranks whose files say as much on every card, the card none of the server's other ranks pairs on.
 
         The test's open DRM files on a card's render node do not raise what is allowed there: each rank of a server with
         several reports its whole memory on every render node of the server, while the kernel lists it on its own card
         only."""
         launchers = self._own_launchers(own)
         spare = len(launchers)
+        memory = self._own_memory(own)
+        residents = {
+            card: [holder for holder in self.holders if holder.card == card and _has_memory(holder)]
+            for card in sorted(self.held_cards())
+        }
+        alone = [listed[0] for listed in residents.values() if len(listed) == 1]
+        paired: list[Holder] = []
+        alone_paired = _pairs(alone, memory)
         found = []
-        for card in sorted(self.held_cards()):
-            resident = [holder for holder in self.holders if holder.card == card and _has_memory(holder)]
+        for card, resident in residents.items():
             if len(resident) <= 1:
+                continue
+            if _pairs([*alone, *paired, *resident], memory) == alone_paired + len(paired) + len(resident):
+                paired.extend(resident)
                 continue
             if spare and len(resident) == 2 and self._launcher_beside(card, resident, launchers):
                 spare -= 1
+                paired.extend(_still_paired(resident, [*alone, *paired], alone_paired + len(paired), memory))
                 continue
             named = ", ".join(f"host pid {h.pid} with {h.vram / _GIB:.1f} GiB" for h in resident)
             found.append(
@@ -302,6 +341,42 @@ class CardReading:
             for client in self.render_clients
             for pid, _ in client.processes
         )
+
+    def _own_memory(self, own: OwnProcesses) -> dict[int, dict[int, int]]:
+        """What each of ``own``'s processes holds on each card, by its open DRM files on that card's render node: the sum
+        of what they say, kept where it is more than almost none (:data:`NEGLIGIBLE_VRAM`), keyed by process.
+
+        A render node is one card's (the topology names the node of each card), so a process's files on it say what it
+        reports on that card: a rank of a server with several has files on every render node of the server and has an
+        entry for each card. Processes that share an open file (a child forked after its parent opened the GPU) are one
+        process here, with what their files say once, as the kernel lists only the one that opened it; such a group counts
+        only when every process in it is ``own``'s. Empty when the descriptors were not read (the reading then has no
+        render clients)."""
+        group: dict[int, int] = {}
+
+        def root(pid: int) -> int:
+            while group.setdefault(pid, pid) != pid:
+                pid = group[pid]
+            return pid
+
+        for client in self.render_clients:
+            first = root(client.processes[0][0])
+            for pid, _ in client.processes[1:]:
+                other = root(pid)
+                if other != first:
+                    group[other] = first
+        memory: dict[int, dict[int, int]] = {}
+        owned: dict[int, bool] = {}
+        for client in self.render_clients:
+            key = root(client.processes[0][0])
+            on = memory.setdefault(key, {})
+            on[client.card] = on.get(client.card, 0) + client.vram
+            owned[key] = owned.get(key, True) and all(own.owns(pid) for pid, _ in client.processes)
+        return {
+            key: {card: vram for card, vram in on.items() if vram > NEGLIGIBLE_VRAM}
+            for key, on in sorted(memory.items())
+            if owned[key]
+        }
 
     def _own_launchers(self, own: OwnProcesses) -> frozenset[int]:
         """The test's processes that hold memory on a render node and started a process that holds memory through an open
@@ -378,6 +453,83 @@ def _has_memory(holder: Holder) -> bool:
     """Whether ``holder`` counts toward a crowded card: it has more than almost no memory on it (:data:`NEGLIGIBLE_VRAM`),
     or it has some memory and runs work there (queues)."""
     return holder.vram > NEGLIGIBLE_VRAM or (holder.vram > 0 and holder.queues > 0)
+
+
+def _own_cards(on: Mapping[int, int]) -> frozenset[int]:
+    """The cards where a process of the test that reports ``on`` (what it holds on each card) is expected to hold memory
+    of its own: the cards where it reports its most, to within :data:`NEGLIGIBLE_VRAM`. A process with memory on one card
+    has that card; a rank of a server with several, whose files say on its own card more than on the others, has its own
+    card; and a rank whose files say as much on every card of the server (while it loads, or as each rank reads at once)
+    has every one of them, of which it is the server's rank on one only (:func:`_pairs`)."""
+    top = max(on.values(), default=0)
+    return frozenset(card for card, vram in on.items() if top - vram <= NEGLIGIBLE_VRAM)
+
+
+def _pairs(holders: Sequence[Holder], memory: Mapping[int, Mapping[int, int]]) -> int:
+    """How many of ``holders`` pair at most, one to one, with a process of ``memory`` (what each process of the test
+    holds on each card, see :meth:`CardReading._own_memory`): a holder with a process that holds memory on its card within
+    :data:`UNACCOUNTED_VRAM_TOLERANCE` of the holder's, on a card where that process is expected to hold its own
+    (:func:`_own_cards`). Each process pairs with one holder across all cards, as the kernel lists a rank of a server with
+    several on its own card only while it reports its memory on every card of the server; and the processes that report
+    memory on the same several cards (the ranks of a server, whether or not their files say which card is their own) pair
+    with one holder per card between them, as each card is the own card of one rank only. So a process that no holder pairs with
+    vouches for a holder only on a card where it is expected: a process with memory on one card on that card, a rank on its
+    own card, and a rank whose files do not say which card is its own on a card of the server none of the other ranks pairs
+    on."""
+    expected = {process: _own_cards(on) for process, on in memory.items()}
+    residual: dict[tuple[object, ...], dict[tuple[object, ...], int]] = {}
+
+    def edge(start: tuple[object, ...], end: tuple[object, ...]) -> None:
+        residual.setdefault(start, {})[end] = 1
+        residual.setdefault(end, {}).setdefault(start, 0)
+
+    source, sink = ("source",), ("sink",)
+    for index, holder in enumerate(holders):
+        start = ("holder", index)
+        edge(source, start)
+        for process, on in memory.items():
+            cards = expected[process]
+            if holder.card not in cards or abs(on[holder.card] - holder.vram) > UNACCOUNTED_VRAM_TOLERANCE:
+                continue
+            if len(on) == 1:
+                edge(start, (process,))
+                continue
+            slot = (tuple(sorted(on)), holder.card)
+            entry, exit_ = ("slot-in", *slot), ("slot-out", *slot)
+            edge(start, entry)
+            edge(entry, exit_)
+            edge(exit_, (process,))
+    for process in memory:
+        edge((process,), sink)
+
+    def augment(node: tuple[object, ...], seen: set[tuple[object, ...]]) -> bool:
+        if node == sink:
+            return True
+        seen.add(node)
+        for following, capacity in residual.get(node, {}).items():
+            if capacity and following not in seen and augment(following, seen):
+                residual[node][following] -= 1
+                residual[following][node] += 1
+                return True
+        return False
+
+    flow = 0
+    while augment(source, set()):
+        flow += 1
+    return flow
+
+
+def _still_paired(
+    resident: Sequence[Holder], kept: Sequence[Holder], count: int, memory: Mapping[int, Mapping[int, int]]
+) -> list[Holder]:
+    """The holders of ``resident``, largest first, that pair (:func:`_pairs`) beside ``kept``, of which ``count`` pair,
+    and beside each other: what a card passed by a launcher's place takes from the test's processes, so that a process
+    whose holder is on that card cannot vouch for a holder of another card."""
+    taken: list[Holder] = []
+    for holder in sorted(resident, key=lambda h: -h.vram):
+        if _pairs([*kept, *taken, holder], memory) == count + len(taken) + 1:
+            taken.append(holder)
+    return taken
 
 
 def _descends(procfs: Path, pid: int, roots: frozenset[int]) -> bool:

@@ -328,14 +328,15 @@ def _test_server(tree: KernelTree, pids: list[int]) -> OwnProcesses:
     return OwnProcesses(frozenset({100}), procfs=tree.procfs)
 
 
-def test_a_second_holder_with_memory_is_crowded_even_when_the_tests_own_and_the_record_names_each_one(
+def test_a_second_holder_with_memory_no_file_of_the_test_matches_is_crowded_and_the_record_names_each_one(
     pod: KernelTree,
 ) -> None:
-    """The server and a helper of it with memory of its own on the card: one holder with memory per card is allowed, so
-    the card is crowded, and the record names both of the test's processes on the render node."""
+    """The server and a helper of it with memory of its own on the card, and two holders the kernel lists with as much
+    memory in all, but neither with what one of the test's files says: they pair with no file of the test, so the card is
+    crowded, and the record names both of the test's processes on the render node."""
     own = _test_server(pod, [101, 102])
-    pod.holds(3001, _CARD, vram=_SERVER_VRAM, queues=6)
-    pod.holds(3002, _CARD, vram=_HELPER_VRAM, queues=0)
+    pod.holds(3001, _CARD, vram=_SERVER_VRAM + _HELPER_VRAM - _FOREIGN_VRAM, queues=6)
+    pod.holds(3002, _CARD, vram=_FOREIGN_VRAM, queues=0)
     pod.renders(101, _CARD, kib=_SERVER_VRAM // 1024)
     pod.renders(102, _CARD, kib=_HELPER_VRAM // 1024)
 
@@ -343,7 +344,7 @@ def test_a_second_holder_with_memory_is_crowded_even_when_the_tests_own_and_the_
 
     assert [i.key for i in found] == [("crowded", _CARD)]
     assert found[0].what == (
-        "2 processes with memory on card 5 at once (host pid 3001 with 200.0 GiB, host pid 3002 with 0.5 GiB); "
+        "2 processes with memory on card 5 at once (host pid 3001 with 197.5 GiB, host pid 3002 with 3.0 GiB); "
         "this container's processes with memory on its render node: "
         "pid 101 (the test) with 200.0 GiB: python3 -m server --rank=101; "
         "pid 102 (the test) with 0.5 GiB: python3 -m server --rank=102"

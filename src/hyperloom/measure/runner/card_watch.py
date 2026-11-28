@@ -30,8 +30,16 @@ the result is ``unobservable`` and why: enforcing, it is refused as ``cards_unob
 :data:`REFUSE_UNOBSERVABLE` is set, and kept with a note when it is not; observing, it is kept with a note. In a pid namespace of its
 own the probe counts instead of naming (before the test nothing may hold a card; during it one process may hold memory on
 each, and beside it, on the one card where a launcher of the test's server holds memory, one with no more than a
-launcher's memory, not counting one with a few MiB and no queue; and no memory may be held that no process of this container
-accounts for): the result says so in its ``method``.
+launcher's memory, not counting one with a few MiB and no queue; more than that only when every holder of the card pairs
+one to one, by memory within 512 MiB, with a process of the test by what its open DRM files on that card's render node
+say it holds there, such as a server and the processes it spawned, a rank of a server with several on each of its cards,
+each process of the test pairing with one holder across all the cards (a rank reports its memory on every render node
+of its server), the holders of a card passed by a launcher's place keeping their processes too, memory being the only
+evidence, each process pairing only on the card where it is expected to hold memory (where it reports its most; the ranks
+of a server pairing with one holder per card between them): while a process of the test is
+not listed, or listed more than 512 MiB from what its files say, a foreign holder within 512 MiB of what it reports on
+that card passes there and on no other card (a single-card process's card, a rank's own card, or the card of the server
+none of the other ranks pairs on); and no memory may be held that no process of this container accounts for): the result says so in its ``method``.
 """
 
 from __future__ import annotations
