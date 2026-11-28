@@ -14,7 +14,7 @@ session directory.
 When no explicit `--session-dir` is given, scripts resolve the active session in
 two steps: `INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR` when set, otherwise the
 workspace root (`USER_DATA_PATH`, falling back to `/workspace/hyperloom`). This
-does **not** auto-discover the latest `$USER_DATA_PATH/<model>/<ts>/` per-session
+does not auto-discover the latest `$USER_DATA_PATH/<model>/<ts>/` per-session
 subdir — under the per-model timestamp layout, pass `--session-dir` explicitly
 (or rely on `INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`, which the CLI sets during
 a run). See [Hyperloom authentication and credentials](authentication.md).

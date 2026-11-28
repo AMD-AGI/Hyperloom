@@ -1222,7 +1222,7 @@ below describe the runtime behavior operators observe.
 - **Build budget.** Each build runs under its component's fixed wall-clock
   budget.
 
-See `docs/reference/environment-variables.md` "Targeted builds (Rung 5)" for the
+See `docs/reference/environment-variables/env-vars-targeted-builds.md` for the
 full env-var set, and `docs/reference/session-breakdown.md` for the emitted
 `enablement` / `build_attempts[]` fields.
 

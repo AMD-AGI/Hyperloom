@@ -202,7 +202,7 @@ or the split Anthropic/OpenAI credentials.
 
 Launchers can rely on these outputs of `hyperloom optimize`.
 
-**Exit codes**
+### Exit codes
 
 | Code | Meaning |
 |---|---|
@@ -215,7 +215,7 @@ Launchers can rely on these outputs of `hyperloom optimize`.
 `hyperloom recover` exits 0 on success (including a cleanup confirmation that found nothing to confirm), 1 when the breakdown
 rebuild fails, and 2 on invalid arguments or when a `--confirm-stopped` / `--confirm-scope-gone` confirmation is refused.
 
-**Launch line**
+### Launch line
 
 Once the session directory exists, stdout carries one line
 
@@ -266,7 +266,7 @@ and inspect the failure before relaunching. SIGHUP follows normal terminal drain
 `--max-hours` is cooperative and cannot guarantee termination of a frozen
 Coordinator. Historical stop reasons remain readable but do not trigger a restart.
 
-**When the resume is refused.** A relaunch in a new pod (or a restarted
+When the resume is refused: A relaunch in a new pod (or a restarted
 container) is a different execution environment, so it cannot observe whether
 the tasks the lost pod was running have exited. The resume then exits 2 with
 `resume blocked: prior execution exit cannot be established in this

@@ -1,6 +1,6 @@
 .. meta::
   :description: Learn how Hyperloom autonomously optimizes large language model inference on AMD GPUs — from installation and components to API reference and case studies.
-  :keywords: Hyperloom, LLM inference, AMD GPU, optimization, agentic, ROCm, GEMM tuning, kernel optimization, throughput, TraceLens, InferenceSuite, GEAK, IntelliKit, documentation
+  :keywords: Hyperloom, LLM inference, AMD GPU, optimization, agentic, ROCm, GEMM tuning, kernel optimization, throughput, TraceLens, InferenceSuite, GEAK, documentation
 
 ***********************
 Hyperloom documentation
@@ -9,7 +9,7 @@ Hyperloom documentation
 ROCm Hyperloom is an autonomous agentic system designed to optimize end-to-end inference workloads
 on AMD GPUs. It uses advanced AI agents and profiling tools to analyze a workload, identify performance
 bottlenecks, implement targeted optimizations, and validate the performance and correctness of the
-optimizations -- all without requiring manual intervention.
+optimizations, without requiring manual intervention.
  
 The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyperloom <https://github.com/AMD-AGI/Hyperloom>`_.
 

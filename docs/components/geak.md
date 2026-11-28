@@ -25,7 +25,7 @@ candidate kernels then happens inside GEAK's Workflows on the on-box GPUs.
 
 ## Role in Hyperloom
 
-Hyperloom uses GEAK as the **whole-pipeline e2e delegate** when
+Hyperloom uses GEAK as the whole-pipeline e2e delegate when
 `KERNEL_OPT_BACKEND_ORDER=geak` (the bare-metal default). In this mode the
 orchestrator hands the optimization workload to
 `src/hyperloom/orchestrator/kernel/geak_runner.py`, which resolves the

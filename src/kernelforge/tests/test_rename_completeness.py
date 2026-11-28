@@ -78,12 +78,6 @@ _FELLOW_ALLOWED: tuple[tuple[str, str, str], ...] = (
         r".",
         "This file names the old spelling in order to forbid it.",
     ),
-    (
-        "docs/release-notes.md",
-        r"FORGE_DISABLE_COMPILED_FELLOWS",
-        "The retired environment-variable spelling, named so a migrating operator can "
-        "find it; it is forwarded then ignored, and silently re-enables the backends.",
-    ),
 )
 
 
@@ -107,6 +101,12 @@ _LLM_ALLOWED: tuple[tuple[str, str, str], ...] = (
         "docs/release-notes.md",
         r"`kernelforge\.llm`",
         "Release notes naming the dissolved package, so code that still imports from it "
+        "recognises the path that now fails.",
+    ),
+    (
+        "docs/reference/upgrade.md",
+        r"`kernelforge\.llm`",
+        "Upgrade notes naming the dissolved package, so code that still imports from it "
         "recognises the path that now fails.",
     ),
 )

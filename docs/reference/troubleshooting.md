@@ -6,7 +6,7 @@ myst:
 ---
 # Troubleshooting Hyperloom
 
-A consolidated symptom → cause → fix index for the most common Hyperloom failures. If a symptom isn't listed here, check the
+A consolidated symptom-cause-fix index for the most common Hyperloom failures. If a symptom isn't listed here, check the
 upstream SKILL file for the component you're touching:
 [`inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md),
 [`kernel-execution-path.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/reference/kernel-execution-path.md),
@@ -186,7 +186,7 @@ more of:
 
 1. `HYPERLOOM_RUNTIME_DIR` when set (must be outside a source checkout and
    creatable, or the turn raises `CodexSessionUnavailableError`).
-2. Otherwise the first safe declared **writable root** for that turn.
+2. Otherwise the first safe declared writable root for that turn.
 3. Otherwise the run working directory.
 
 Each turn then creates a mode-`0700` `.hyperloom-codex-home-*` directory under
@@ -194,7 +194,7 @@ that parent; Codex stores SQLite (WAL) state there. When the SDK client closes,
 `_cleanup_codex_home` removes that directory — it is not left behind for a
 post-stage listing.
 
-Installers often **export** `HYPERLOOM_RUNTIME_DIR=$USER_DATA_PATH/runtime`, but
+Installers often export `HYPERLOOM_RUNTIME_DIR=$USER_DATA_PATH/runtime`, but
 that is launch configuration, not a separate placement rule inside
 `_codex_home_parent`. If that path (or an unset-runtime writable root) sits on
 storage that does not support the file locking SQLite needs, concurrent writers
@@ -202,8 +202,8 @@ from the main agent and spawned sub-agents can block for minutes on the critical
 path.
 
 **Scope**: This entry covers SDK turns that go through `_codex_home_parent` only.
-It does **not** cover Forge-fusion / GEAK Codex (KernelForge uses its own home
-under `~/.cache/kernelforge/codex_home`) or subprocess **specialist** Codex
+It does not cover Forge-fusion / GEAK Codex (KernelForge uses its own home
+under `~/.cache/kernelforge/codex_home`) or subprocess specialist Codex
 tasks (`CODEX_HOME=<task-workspace>/.codex`, which also ignores
 `HYPERLOOM_RUNTIME_DIR`). Treat stalls on those paths as separate placement
 issues.

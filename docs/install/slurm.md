@@ -95,8 +95,8 @@ curl -sS --resolve <your-gateway-host>:443:<GATEWAY_JUMP_HOST_IP> \
   "$OPENAI_BASE_URL/models" -H "Authorization: Bearer $OPENAI_API_KEY"
 ```
 
-HTTP 200 plus a model list means the key works. **Note the model names in the
-list** — they are needed in [LLM model-name constraints](#llm-model-name-constraints).
+HTTP 200 plus a model list means the key works. Note the model names in the
+list — they are needed in [LLM model-name constraints](#llm-model-name-constraints).
 
 See [Authentication and credentials](../reference/authentication.md) for the full
 credential model, including the split Anthropic-/OpenAI-compatible provider setup.

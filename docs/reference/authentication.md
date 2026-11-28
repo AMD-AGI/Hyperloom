@@ -60,7 +60,7 @@ checkout another account can write:
 Shell environment variables always win over `.env`.
 Both the inference optimizer CLI dotenv loader and
 `src/hyperloom/inference_optimizer/assets/install.sh` honor this rule. Do *not*
-manually `source .env` from chat — it inverts the precedence and can
+manually `source .env` from chat: it inverts the precedence and can
 overwrite an exported key with a stale value from disk.
 
 A key is considered "set" in `.env` if the line is uncommented and the
@@ -155,7 +155,7 @@ it.
 
 ## LLM gateway credentials
 
-A provider side is configured by **both** its base URL and its own key. Exactly
+A provider side is configured by both its base URL and its own key. Exactly
 three shapes are accepted; anything else fails preflight.
 
 | Shape | Set | Effect |
@@ -185,7 +185,7 @@ Downstream tooling reads the side it belongs to:
 * Critic-agent uses the OpenAI side for KB summary / synthesis calls.
 
 There are no internal key slots in `.env` to fill: each side's credential
-travels under its own name. Preflight does **not** cross-fill the per-provider
+travels under its own name. Preflight does not cross-fill the per-provider
 primary keys (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`),
 and an explicitly set provider key is never overwritten.
 
