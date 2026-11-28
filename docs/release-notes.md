@@ -235,7 +235,14 @@ it.
   it measured as zero or below the enablement floor is no longer replaced by
   one: with `--enablement eval` or `all` on a single node it is recorded as an
   eval failure and not promoted, otherwise the run stops with
-  `baseline_accuracy_failed`. The warning
+  `baseline_accuracy_failed`. A native AgentX baseline whose accuracy round
+  was refused or stopped by the session clock is ruled the same way, also
+  when an earlier attempt scored. In a multi-node session the score found
+  could also be that of the attempt's own discarded warm pass: a multi-node
+  baseline is ruled on its measured pass alone and stops the run when that
+  pass has no usable score or its eval aborted it, and a multi-node warm
+  replay whose measured pass left no score is admitted without a verdict
+  where its warm pass's score used to judge it. The warning
   `baseline_accuracy_salvaged_from_sibling_attempt` is gone. Measuring a
   baseline no longer writes the session's accuracy reference; promoting it
   does, so a baseline that is not promoted (`anchor_held`, an eval failure, a

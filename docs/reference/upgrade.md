@@ -249,9 +249,9 @@ attempt measured.
 
 * The result of such an attempt carries `accuracy`, `accuracy_task`,
   `accuracy_metric`, `accuracy_source`, `accuracy_definition_digest` and
-  `accuracy_eval_kind` of the round that ran the eval, and so does the
-  `measurement` the session breakdown records for the action; for a warm
-  replay and a stack validation that `accuracy` was `null`.
+  `accuracy_eval_kind` of the round that ran the eval. The `measurement` the
+  session breakdown records for the action carries the first four of them;
+  for a warm replay and a stack validation its `accuracy` was `null`.
   `accuracy_eval_kind` did not appear on such a result before; it is `""` for
   an `lm-eval` score. The score, and every verdict taken on it, is the one
   the search found.
@@ -272,7 +272,8 @@ attempt measured.
   The verdict on a score is unchanged: a collapsed score rejects the replay,
   and a score taken under another eval definition than the baseline's is no
   verdict. A replay without a score is admitted and marked as before, now also
-  when a results file lies elsewhere under its task directory.
+  when a results file lies elsewhere under its task directory; for a
+  multi-node replay that file was its own discarded warm pass's (see below).
 * A genuine baseline whose own attempt left no usable score no longer
   continues on a score found in the directory above its round. For an attempt
   of one round (a multi-node, AgentX or scriptable baseline) that directory is
@@ -284,12 +285,38 @@ attempt measured.
   always took. With `--enablement eval` or `all` on a single node it is
   recorded as an eval failure and not promoted: a first baseline opens the
   enablement lane, a re-baseline leaves the anchor and its reference as they
-  were. Otherwise, and in a multi-node session, the run stops with
+  were. A re-baseline that used to pass this ruling on the score the search
+  found now leaves what a failed baseline leaves: a `baseline` row in
+  `last_action_failures` (`state.json`, shown to the model each turn), the gap
+  derived from that row, and a `what_failed` entry in the published recipe.
+  Otherwise, and in a multi-node session, the run stops with
   `stop_reason: baseline_accuracy_failed`; so does a genuine baseline whose
   eval aborted its round, which another attempt's score used to keep
   running. The stop line and the round's eval output name the failure to fix.
   A run that used to continue on another attempt's score now takes one of
   these two routes.
+* In a multi-node session the searched directory also held the attempt's own
+  discarded warm pass (`mn_warmup`), which runs the same eval as the measured
+  pass, so the score the search found could be that pass's as well as another
+  attempt's. A multi-node attempt is ruled on its measured pass alone, and
+  three outcomes change when that pass has no usable score of its own. A
+  baseline whose measured pass succeeded without one stops the run with
+  `baseline_accuracy_failed`, where the found score let the run continue on
+  it. A baseline whose measured pass was aborted by its eval stops the
+  run on that attempt, where the found score left a failed attempt that was
+  retried. A warm replay whose measured pass left no score is admitted
+  without an accuracy verdict and marked (`eval_ran: false`), where it was
+  judged on its warm pass's score and rejected when that score had collapsed.
+  A multi-node attempt whose measured pass scores is unchanged.
+* A native AgentX baseline whose accuracy round did not run, because it was
+  refused before it started or stopped by the run (the session clock, a
+  shutdown), has no score and is ruled like any baseline without one:
+  recorded as an eval failure and not promoted, with the
+  `last_action_failures` row above, or the run stops with
+  `baseline_accuracy_failed`. That was already the ruling for the first
+  baseline of a session; a later attempt used to pass on the score an earlier
+  attempt's accuracy round had left. `agentx_accuracy_round.error_class` on
+  the result names why the round did not run.
 * The session's accuracy reference (`baseline_accuracy` and its digest in
   `state.json`) is written only when a baseline is promoted, together with
   its throughput. Measuring a baseline used to write the score the search
@@ -298,25 +325,32 @@ attempt measured.
   attempt) replaced the reference while the throughput anchor stayed; it now
   leaves both as they were.
 * `baseline_accuracy_salvaged_from_sibling_attempt` no longer appears in a
-  result's `nonfatal_warnings`. The log lines `cold-start guard — reading
-  accuracy=... from the warmup round` and `salvaged a measured baseline
-  accuracy=... from a sibling attempt` are gone, and the warning for an eval
-  failure that goes to enablement reads `eval-rooted failure; routing to
-  enablement (RUN_EVAL stays on).`
+  result's `nonfatal_warnings`. Every log line that names a salvage or a
+  sibling attempt is gone: `cold-start guard — reading accuracy=... from the
+  warmup round`, `salvaged a measured baseline accuracy=... from a sibling
+  attempt`, `eval-rooted baseline failure, but salvaged a valid baseline
+  accuracy=... from a sibling attempt (...); not stopping the run` and
+  `eval-rooted baseline failure and the sibling attempt measured
+  accuracy=... (...); stopping the run`. The warning for an eval failure that
+  goes to enablement reads `eval-rooted failure; routing to enablement
+  (RUN_EVAL stays on).`
 * A promoted baseline that scored nothing leaves the session without an
   accuracy reference: `baseline_accuracy` is `0.0` and
   `baseline_accuracy_definition_digest` is empty in `state.json`. The score
   and digest of the anchor it replaced used to stay beside the new
   `baseline_tput`. A re-baseline whose eval left no score reaches this when
   the run stops with `stop_reason: baseline_accuracy_failed` (`--enablement
-  off` or `launch`, or a multi-node session): its throughput becomes the
-  anchor as before, and the reference is dropped with the anchor it belonged
-  to. A session resumed after that stop grades candidates on throughput alone,
-  as it does after a first baseline that stopped the same way; it used to
-  grade them against the score of the previous stack. With `--enablement
-  eval` or `all` on a single node such a re-baseline is recorded as an eval
-  failure and not promoted, so the anchor and its reference stay as they
-  were.
+  off` or `launch`, or a multi-node session) and it is promoted: it measured
+  higher than the anchor, it is an enablement revalidation, or it corrects a
+  cold anchor. Its throughput becomes the anchor as before, and the reference
+  is dropped with the anchor it belonged to. One that is not promoted
+  (`anchor_held`) leaves the anchor and its reference as they were. A session
+  resumed after a promoted one stopped the run grades candidates on
+  throughput alone, as it does after a first baseline that stopped the same
+  way; it used to grade them against the score of the previous stack. With
+  `--enablement eval` or `all` on a single node such a re-baseline is recorded
+  as an eval failure and not promoted, so the anchor and its reference stay
+  as they were.
 
 ### Recommended: drop `INFERENCE_OPTIMIZER_RESCUE_PATHS` and `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC`
 
