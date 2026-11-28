@@ -67,7 +67,6 @@ from .workload._agentx_checkpoint import round_checkpoint
 from ._subprocess_kill import AGENTX_EARLY_STOP_ERROR_CLASS
 from .benchmark_result import double_run_requested
 from .benchmark_run.accuracy import accuracy_round_due, record_accuracy_round, run_candidate_accuracy_round
-from .explore_prefilter._prefilter import prefilter_round, record_decision_round
 from .explore_prefilter._remeasure import STACK_REVALIDATE_SOURCE, is_stack_revalidation
 from .explore_prefilter.grid_payload import (
     framework_lever_attributions,
@@ -214,9 +213,6 @@ def _sanitized_script(params: dict[str, Any]) -> str | None:
 class _ExploreRound:
     """One explore round: the stack it accumulates, the variants it measures, and the ledgers it writes."""
 
-    projection: dict[str, Any] | None = None
-    prefilter_dropped = 0
-
     def __init__(self, ctx: Any, params: dict[str, Any], output_root: Path) -> None:
         extra = getattr(ctx, "extra", None) or {}
         self.ctx = ctx
@@ -297,7 +293,6 @@ class _ExploreRound:
         self._resolve_grid()
         self._shape_runnable()
         self._open_schedule()
-        round_ctx = await prefilter_round(self, session_dir)
         for idx, gv in enumerate(self.runnable):
             if self._refused(gv, idx):
                 if self.run_stop is not None:
@@ -311,8 +306,7 @@ class _ExploreRound:
                 if self.run_stop is not None:
                     break
                 if measurement is not None:
-                    row = await self._settle(gv, run_gv, measurement, slot)
-                    await record_decision_round(round_ctx, gv, measurement, row)
+                    await self._settle(gv, run_gv, measurement, slot)
             finally:
                 # The warmup and decision rounds share this slot's server; reap it on every exit path.
                 if self.lifecycle_eligible:
@@ -761,7 +755,7 @@ class _ExploreRound:
 
     # ----- the verdict -----------------------------------------------------
 
-    async def _settle(self, gv: GridVariant, run_gv: GridVariant, r: Any, slot: Path) -> dict[str, Any]:
+    async def _settle(self, gv: GridVariant, run_gv: GridVariant, r: Any, slot: Path) -> None:
         # Rule on this variant's measurement and fold a KEEP onto the round's stack.
         #
         # A variant KEEPs when it clears the graded verdict and the accuracy gate. The axes and the threshold floor
@@ -808,7 +802,6 @@ class _ExploreRound:
         self._record(gv, row)
         if row["outcome"] == "KEEP":
             self.winners.append(self._keep(gv, run_gv, r, row, variant_meas))
-        return row
 
     def _graded_verdict(self, gv: GridVariant, r: Any, variant_meas: dict[str, Any]) -> dict[str, Any]:
         # How the graded comparison ruled on this measurement, and which gate ended the arc.
@@ -1056,10 +1049,9 @@ class _ExploreRound:
             )
         best = max(self.winners, key=lambda w: to_float(w.get("gain_pct"), 0.0) or 0.0, default=None)
         best_gain_pct = (to_float(best.get("gain_pct"), 0.0) or 0.0) if best else 0.0
-        # A round whose every variant a pre-filter dropped, already had its verdict, or only restated the stack is
-        # answered, as if measured again.
-        offered = len(self.runnable) + self.prefilter_dropped
-        answered = bool(offered) and self.judged_without_measuring + self.prefilter_dropped == offered
+        # A round whose every variant already had its verdict, or only restated the stack, is answered, as if
+        # measured again.
+        answered = bool(self.runnable) and self.judged_without_measuring == len(self.runnable)
         measured = any(t.get("outcome") in ("KEEP", "REVERT") for t in self.tested.values())
         status = "succeeded" if measured or self.winners or answered else "failed"
         return {
@@ -1089,8 +1081,7 @@ class _ExploreRound:
             "framework": self.framework,
             # gain_pct for the audit trail (best gain of the batch).
             "gain_pct": best_gain_pct,
-            "explore_grid_exhausted": not self.runnable and not self.prefilter_dropped,
-            "projection": self.projection,
+            "explore_grid_exhausted": not self.runnable,
         }
 
     def _budget_error(self, status: str) -> dict[str, Any]:

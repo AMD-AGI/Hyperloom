@@ -5,16 +5,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
-from types import SimpleNamespace
 
 import pytest
 
 from hyperloom.common.benchmark_config import BenchmarkPoint
-from hyperloom.orchestrator.actions.executors.explore_prefilter import _prefilter as prefilter
 from hyperloom.orchestrator.actions.executors.explore_prefilter import _reuse as reuse
-from hyperloom.orchestrator.actions.executors.grid._grid_base import GridVariant
 
 _SESSION = {
     "model": "/models/Qwen3-8B",
@@ -141,51 +137,3 @@ def test_the_launch_digest_follows_overlay_content(tmp_path):
     assert digest != reuse.launch_digest({}, frozenset())
     (overlay / "kernel.py").write_text("x = 2\n")
     assert reuse.launch_digest({"PYTHONPATH": str(overlay)}, frozenset()) != digest
-
-
-@pytest.mark.parametrize(
-    ("outcome", "reason", "anchor_tput", "recorded"),
-    [
-        ("REVERT", "below_threshold", 100.0, True),
-        ("KEEP", "above_threshold", 100.0, False),
-        ("REVERT", "accuracy_drop", 100.0, False),
-        ("REVERT", "accuracy_unavailable", 100.0, False),
-        ("REVERT", "below_threshold", 0.0, False),
-    ],
-)
-def test_only_a_performance_revert_is_recorded(store, outcome, reason, anchor_tput, recorded):
-    identity = _identity()
-    ctx = SimpleNamespace(identity=lambda gv, stack: identity, session_dir=None)
-    verdict = prefilter.Verdict(outcome, reason, anchor_tput, "r1", prefilter.Stack())
-    prefilter._record_revert(ctx, GridVariant(name="v"), SimpleNamespace(output_throughput=90.0), verdict)
-    assert (reuse.lookup_revert(reuse.measurement_key(identity)) is not None) is recorded
-
-
-def _round_with_a_stored_revert_of(name, tmp_path):
-    ctx = SimpleNamespace(
-        identity=lambda gv, stack: reuse.measurement_identity(_SESSION, {}, {"fingerprint": gv.name}, []),
-        session_dir=None,
-        output_root=tmp_path,
-        gpu="mi355x",
-        runtime={},
-        grade_on_intvty=False,
-    )
-    verdict = prefilter.Verdict("REVERT", "below_threshold", 100.0, "r1", prefilter.Stack())
-    prefilter._record_revert(ctx, GridVariant(name=name), SimpleNamespace(output_throughput=90.0), verdict)
-    return ctx
-
-
-def test_the_round_drops_a_stored_revert_and_keeps_the_rest_in_order(store, tmp_path, monkeypatch):
-    monkeypatch.delenv("HYPERLOOM_EXPLORE_PROJECTION", raising=False)
-    ctx = _round_with_a_stored_revert_of("b", tmp_path)
-    grid = [GridVariant(name=name) for name in "abc"]
-    kept = asyncio.run(prefilter.prefilter_variants(grid, ctx, prefilter.Stack()))
-    assert [gv.name for gv in kept.runnable] == ["a", "c"]
-    assert [(row["name"], row["reason"]) for row in kept.dropped] == [("b", prefilter.REASON_REVERTED_BEFORE)]
-
-
-def test_a_revalidation_round_measures_a_stored_revert_again(store, tmp_path):
-    ctx = _round_with_a_stored_revert_of("b", tmp_path)
-    grid = [GridVariant(name=name) for name in "abc"]
-    kept = asyncio.run(prefilter.prefilter_variants(grid, ctx, prefilter.Stack(), revalidation=True))
-    assert (kept.runnable, kept.dropped) == (grid, [])

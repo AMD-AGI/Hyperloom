@@ -285,6 +285,52 @@ files out. They stay in the session directory. A round's `report.json`,
 `launch.json`, `config.yaml`, `phase_marks.json` and
 `inferencex_result.json` are collected as before.
 
+### Recommended: drop the EXPLORE pre-filter settings
+
+The opt-in EXPLORE pre-filters are removed: the cross-session measurement
+store, the InferaSim projection, the recording of measured anchors and the
+anchor harvest. A session that set none of their switches measures the same
+variants and reaches the same verdicts as before. Its explore result no longer
+carries `projection`, which was `null` unless the projection was on.
+
+These variables are no longer read and are silently ignored, so drop them:
+
+* `HYPERLOOM_MEASUREMENT_STORE` and `HYPERLOOM_MEASUREMENT_MAX_AGE_DAYS`;
+* `HYPERLOOM_EXPLORE_PROJECTION`, `HYPERLOOM_EXPLORE_PROJECTION_MARGIN_PCT`,
+  `HYPERLOOM_EXPLORE_PROJECTION_CALIBRATED_MARGIN_PCT` and
+  `HYPERLOOM_EXPLORE_PROJECTION_TOP_K`;
+* `HYPERLOOM_INFERASIM_ROOT`, `HYPERLOOM_INFERASIM_MODE`,
+  `HYPERLOOM_INFERASIM_ESTIMATOR`, `HYPERLOOM_INFERASIM_MODEL`,
+  `HYPERLOOM_INFERASIM_WORKLOAD`, `HYPERLOOM_INFERASIM_GPU_ARCH`,
+  `HYPERLOOM_INFERASIM_HBM_GB` and `HYPERLOOM_INFERASIM_SERVING_MODEL`;
+* `HYPERLOOM_INFERASIM_ANCHOR_STORE`, `HYPERLOOM_INFERASIM_ANCHOR`,
+  `HYPERLOOM_INFERASIM_ANCHOR_SCALING`, `HYPERLOOM_INFERASIM_HARVEST`,
+  `HYPERLOOM_INFERASIM_HARVEST_PYTHON`, `HYPERLOOM_INFERASIM_HARVEST_GPUS` and
+  `HYPERLOOM_INFERASIM_HARVEST_TIMEOUT_SEC`.
+
+A session that had set one of the switches now sees this:
+
+* A variant a filter used to drop is benchmarked. The `skipped_dup` reasons
+  `measured_revert_before`, `projection_decisively_slower` and
+  `projection_outranked` no longer occur, and a round takes as long as its
+  whole grid. Nothing replaces the cross-session skip: a launch that REVERTed
+  in an earlier session is measured again in a new one.
+* A round no longer writes `_projection/` or `_anchor_spec/` under its output
+  directory.
+* Hyperloom no longer writes into the anchor-store directory: no
+  `measured/*.json` point from a decision round, no `harvested/*.json`, no
+  index update and no `.harvest-*.lock`. Files already there are left as they
+  are. Tooling outside Hyperloom that read the measured anchors gets no new
+  point from a session.
+* The measurement-store directory is no longer read or written. Its records
+  are left in place and can be deleted.
+* No server is booted for an anchor harvest
+  (`HYPERLOOM_INFERASIM_MODE=benchmark` booted one when the store had no anchor
+  for the regime).
+
+The `inferasim` extra is removed: drop it from install commands. The multi-node
+`infera` backend is a different thing and is unchanged.
+
 ---
 
 ## Upgrading from 1.1.x

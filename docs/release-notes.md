@@ -195,8 +195,26 @@ it.
   GPUs, and it was off by default. `HYPERLOOM_EXPLORE_SCREEN` and its
   `_MARGIN_PCT`, `_GPUS`, `_MODEL`, `_LAYERS`, `_ATTENTION_BACKEND` and
   `_TIMEOUT_SEC` settings are no longer read, and no variant is skipped as
-  `screen_decisively_slower`. The measurement store and the InferaSim
-  projection are unchanged, and so is a run that never set the switch.
+  `screen_decisively_slower`. A run that never set the switch is unchanged.
+- **The EXPLORE measurement store and InferaSim projection are removed.** The
+  two opt-in pre-filters that 1.2.0 added behind `HYPERLOOM_MEASUREMENT_STORE`
+  and `HYPERLOOM_EXPLORE_PROJECTION=1` are gone, and with them the recording of
+  measured anchors into `HYPERLOOM_INFERASIM_ANCHOR_STORE`, the anchor harvest
+  that booted a server in benchmark mode, and the `inferasim` extra. Their 21
+  `HYPERLOOM_MEASUREMENT_*`, `HYPERLOOM_EXPLORE_PROJECTION*` and
+  `HYPERLOOM_INFERASIM_*` settings are no longer read. Every variant of a round
+  is benchmarked: none is skipped as `measured_revert_before`,
+  `projection_decisively_slower` or `projection_outranked`, and a launch that
+  REVERTed in an earlier session is measured again. A round writes no
+  `_projection/` or `_anchor_spec/` directory, and nothing is read from or
+  written to a measurement-store or anchor-store directory; what those
+  directories hold is left as it is. A run that never set a switch measures
+  the same variants and reaches the same verdicts; its explore result no
+  longer carries `projection` (always `null` there), and a decision round that
+  REVERTs on performance no longer hashes the directories on its launch's
+  `PYTHONPATH`, which it did with the store unset whenever the session had
+  recorded an image digest and an engine version. See
+  [Upgrade](reference/upgrade.md).
 - **A session reads its GPU from the machine; no board table is kept.** Every
   start and resume reads the visible cards and prints the one it runs on (`GPU
   card        : AMD Instinct MI325X (gfx942, 304 CUs, 262128 MiB, 2100 MHz)`).
@@ -266,8 +284,7 @@ it.
   required, and a `trace_analyze` request with no GPU type fails with
   `gpu_label_missing`. A custom workload no longer looks for `custom_mi355x.sh`
   when nothing names the machine. `MLPERF_AGENTIC_HARDWARE` defaults to the
-  session's GPU type. An InferaSim projection with no GPU to price is refused,
-  and its HBM capacity defaults to the card's memory.
+  session's GPU type.
 - **Recipe KB borrows across GPU types only between rows that record the same
   `gfx_arch`** and topology suffix, locally and remotely. Rows written before
   this release match only their own GPU type until a session on it writes them
