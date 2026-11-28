@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,7 +12,14 @@ from hyperloom.inference_optimizer.session.session_paths import (
     next_forge_attempt_dir,
 )
 from hyperloom.orchestrator.kernel.campaign_baseline import RepoBaseline
-from hyperloom.orchestrator.kernel.forge_handoff import build_workload_md, write_forge_handoff
+from hyperloom.orchestrator.kernel.forge_handoff import (
+    E2E_REJECTIONS_FILENAME,
+    build_serving_context_md,
+    build_workload_md,
+    load_e2e_rejections,
+    record_e2e_rejections,
+    write_forge_handoff,
+)
 from kernelforge.workflows.rewrite_controller import read_handoff
 
 
@@ -346,3 +354,65 @@ def test_the_handoff_names_the_installed_package_a_snapshot_is_served_from(tmp_p
     bundle = read_handoff(handoff_dir)
     assert bundle.repositories == (checkout.resolve(), snapshot.resolve())
     assert bundle.served_trees == {snapshot.resolve(): installed}
+
+
+def test_a_reverted_operator_reaches_the_next_handoff_as_a_do_not_repeat(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    operator_id = "kernel:forge-loop:unified_attention:vllm:0.33.0:triton:gb10"
+    integration = {
+        "status": "completed",
+        "kept_count": 0,
+        "reverted_count": 1,
+        "results": [
+            {
+                "operator_id": operator_id,
+                "status": "reverted_e2e_failed",
+                "reason": "E2E did not KEEP",
+                "gain_pct": -12.932,
+                "new_tput": 518.87,
+                "best_commit": "6ad4d6d1cf61",
+            }
+        ],
+    }
+
+    assert record_e2e_rejections(session, integration, macro_cycle=3) == 1
+    assert record_e2e_rejections(session, {"results": [{"status": "kept"}]}) == 0
+    rejections = load_e2e_rejections(session)
+
+    assert [row["operator_id"] for row in rejections] == [operator_id]
+    assert rejections[0]["macro_cycle"] == 3
+
+    serving = build_serving_context_md(_state(), rejections=rejections)
+
+    assert "## Operators Already Reverted By End-To-End Validation" in serving
+    assert f"`{operator_id}` — macro cycle 3: end-to-end -12.93% (518.9 tok/s)" in serving
+    assert "cleared the in-session speed gate and still made the full served" in serving
+
+
+def test_an_operator_excluded_without_an_e2e_number_states_its_reason(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    operator_id = "kernel:forge-loop:fused_recurrent_gated_delta_rule_packed_decode:vllm:0.33.0:triton:gb10"
+    ledger = [
+        {
+            "operator_id": operator_id,
+            "macro_cycle": 4,
+            "status": "infeasible_launch_bound",
+            "reason": "gate unreachable: replay term is 13.7us of a 15.7us case",
+            "e2e_gain_pct": None,
+            "e2e_tput": None,
+        }
+    ]
+    ledger_path = session / "kernel-agent" / E2E_REJECTIONS_FILENAME
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger_path.write_text(json.dumps(ledger), encoding="utf-8")
+
+    serving = build_serving_context_md(_state(), rejections=load_e2e_rejections(session))
+
+    assert f"`{operator_id}` — macro cycle 4: excluded before integration, infeasible_launch_bound" in serving
+    assert "gate unreachable: replay term is 13.7us of a 15.7us case" in serving
+    assert "launch-bound that no kernel-body rewrite can clear the gate" in serving
+
+
+def test_a_session_without_rejections_keeps_the_handoff_unchanged(tmp_path: Path) -> None:
+    assert load_e2e_rejections(tmp_path / "never-written") == []
+    assert "Already Reverted" not in build_serving_context_md(_state())

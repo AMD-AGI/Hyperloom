@@ -14,7 +14,6 @@ import os
 import pathlib
 import shutil
 import signal
-import sys
 import tempfile
 import time
 import traceback
@@ -26,6 +25,7 @@ from kernelforge.evaluation.benchmark.runner import BenchRun, bench_wallclock
 from kernelforge.evaluation.correctness.driver import test_correctness
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 from kernelforge.utils.aiter_cache import cleanup_current_owned_aiter_locks
+from kernelforge.utils.interpreter import driver_python
 
 log = logging.getLogger(__name__)
 
@@ -541,7 +541,7 @@ async def _count_graph_replays(
     env = _graph_probe_env(out_path, probe_dir, require_ranks)
     env["GRAPH_PROBE_SOURCES"] = json.dumps(dict(contract.sources) if contract is not None else {})
     cmd = [
-        sys.executable,
+        driver_python(),
         driver,
         "--warmup",
         str(warmup),

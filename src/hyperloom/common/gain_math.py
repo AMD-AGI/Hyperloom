@@ -7,6 +7,7 @@ are judged against with the two checks that apply them. Stdlib-only."""
 from __future__ import annotations
 
 import math
+import os
 import statistics
 from typing import Any
 
@@ -151,6 +152,28 @@ AGENTX_ERROR_RATE_THRESHOLD_PCT = 10.0
 # diverge.
 DEFAULT_ENABLEMENT_ACCURACY_FLOOR = 0.5
 
+#: Operator override for :data:`DEFAULT_ENABLEMENT_ACCURACY_FLOOR`. The 0.5 default is calibrated on the serving
+#: class the board table targets (large models on Instinct parts); a much smaller model -- a sub-1B checkpoint run to
+#: shake a bring-up path down -- measures below it by construction, so the baseline is stamped an eval failure and the
+#: session spends its budget in ENABLEMENT trying to fix accuracy that no serve flag can fix. Lowering the floor keeps
+#: the gate doing its job (an accuracy-destroying change still fails it) while letting such a model optimize.
+ACCURACY_FLOOR_ENV = "HYPERLOOM_ACCURACY_FLOOR"
+
+
+def enablement_accuracy_floor() -> float:
+    """The accuracy floor in force: :data:`DEFAULT_ENABLEMENT_ACCURACY_FLOOR` unless ``HYPERLOOM_ACCURACY_FLOOR``
+    sets a valid fraction."""
+    raw = os.environ.get(ACCURACY_FLOOR_ENV, "").strip()
+    if not raw:
+        return DEFAULT_ENABLEMENT_ACCURACY_FLOOR
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_ENABLEMENT_ACCURACY_FLOOR
+    # A floor outside (0, 1] would either reject every model or accept any, neither of which is a gate.
+    return value if 0.0 < value <= 1.0 else DEFAULT_ENABLEMENT_ACCURACY_FLOOR
+
+
 # The lm-eval metrics an eval score is read from, most preferred first; the thresholds above were set on these scores,
 # and the first task that reports one of them gives the score.
 ACCURACY_METRICS = ("exact_match,strict-match", "exact_match,flexible-extract", "exact_match,none", "acc,none")
@@ -186,6 +209,7 @@ def accuracy_passed(
 
 
 __all__ = [
+    "ACCURACY_FLOOR_ENV",
     "ACCURACY_METRICS",
     "ACCURACY_THRESHOLD",
     "AGENTX_ERROR_RATE_THRESHOLD_PCT",
@@ -193,6 +217,7 @@ __all__ = [
     "accuracy_meets_floor",
     "accuracy_passed",
     "conc_pair_comparison",
+    "enablement_accuracy_floor",
     "finite_score",
     "gain_pct",
     "gain_pct_or_zero",

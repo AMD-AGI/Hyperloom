@@ -348,9 +348,9 @@ class _BaselineAccuracyMixin:
             BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
             run_eval_definition_digest,
         )
-        from hyperloom.common.gain_math import DEFAULT_ENABLEMENT_ACCURACY_FLOOR
+        from hyperloom.common.gain_math import enablement_accuracy_floor
 
-        floor = DEFAULT_ENABLEMENT_ACCURACY_FLOOR
+        floor = enablement_accuracy_floor()
         result[BASELINE_EVAL_FAILED_KEY] = True
         result[BASELINE_EVAL_FAILURE_KIND_KEY] = kind
         result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] = observed_accuracy
@@ -422,11 +422,11 @@ class _BaselineAccuracyMixin:
             return
         acc = result.get("accuracy")
         eval_enablement = self._eval_enablement_active(ctx)
-        from hyperloom.common.gain_math import DEFAULT_ENABLEMENT_ACCURACY_FLOOR, accuracy_meets_floor
+        from hyperloom.common.gain_math import accuracy_meets_floor, enablement_accuracy_floor
 
         from .._accuracy_gate import request_baseline_accuracy_stop
 
-        floor = DEFAULT_ENABLEMENT_ACCURACY_FLOOR
+        floor = enablement_accuracy_floor()
         # Floor 0.0 is the non-enablement "any positive accuracy is usable" rule; ``accuracy_meets_floor`` already
         # means "finite, strictly positive and >= floor", so it rejects zero either way.
         usable_floor = floor if eval_enablement else 0.0

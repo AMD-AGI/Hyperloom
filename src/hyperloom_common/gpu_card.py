@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess  # nosec B404 - fixed probe commands.
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
@@ -47,6 +48,9 @@ _PEAK_RATES: dict[str, dict[str, int]] = {
     "gfx1201": {"fp32": _FP32_RATE, "fp16": 1024, "fp8": 2048},
     "gfx1100": {"fp32": _FP32_RATE, "fp16": 512},
     "gfx1151": {"fp16": 512},
+    # NVIDIA GB10 (Blackwell, sm_121): its white paper's dense rates over 48 SMs at the 2.4 GHz boost they are quoted
+    # at -- 125 TFLOPS BF16/FP16, 250 FP8 and 500 FP4 from the 1 PFLOP sparse figure, and 31 TFLOPS FP32.
+    "sm_121": {"fp32": 269, "fp16": 1085, "fp8": 2170, "fp4": 4340},
 }
 
 #: Unmasked, so torch numbers the cards as ROCm does.
@@ -59,18 +63,23 @@ _TORCH_PROBE = (
     "print(json.dumps({'torch': [{f: getattr(c, f, None) for f in facts} for c in cards]}))"
 )
 #: The commands a machine is asked for its cards with. Only amd-smi reports compute units, bandwidth and clock: torch
-#: counts an RDNA card's compute units by half.
+#: counts an RDNA card's compute units by half, and nvidia-smi -- read apart, below -- reports neither a compute-unit
+#: count nor the memory clock of a unified-memory part.
 PROBES = (
     "amd-smi static --json",
     "rocm-smi --showproductname --showmeminfo vram --json",
     f"python3 -c {shlex.quote(_TORCH_PROBE)}",
 )
+#: What a host with no AMD SMI is asked for its cards with: a CSV, not the JSON :func:`probed_cards` reads.
+_NVIDIA_QUERY = "index,name,compute_cap,memory.total,clocks.max.sm"
 _PROBE_TIMEOUT_SEC = 120.0
 
 #: amd-smi prints the device id as the name of a card libdrm does not know.
 _BARE_DEVICE_ID = re.compile(r"0x[0-9a-f]+", re.IGNORECASE)
-_BRAND_WORDS = frozenset({"amd", "instinct", "radeon", "pro", "ai", "graphics"})
+_BRAND_WORDS = frozenset({"amd", "instinct", "radeon", "pro", "ai", "graphics", "nvidia", "rtx"})
 _VARIANT_WORDS = frozenset({"hf", "vf", "oam", "dual", "slot"})
+#: A card's name carries its family in parentheses beside its model: "RTX Spark N1X (6144-core Blackwell RTX GPU)".
+_PARENTHETICAL = re.compile(r"\([^)]*\)")
 
 
 @dataclass(frozen=True)
@@ -113,8 +122,10 @@ def peak_rate(gfx: str, precision: str) -> int | None:
 
 
 def board_label(name: str) -> str:
-    """The model designation in a marketing name, lower case: ``AMD Instinct MI355X`` is ``mi355x``."""
-    words = [word for word in re.split(r"[\s_]+", name.strip().lower()) if word]
+    """The model designation in a marketing name, lower case: ``AMD Instinct MI355X`` is ``mi355x``, and
+    ``NVIDIA RTX Spark N1X (6144-core Blackwell RTX GPU)`` is ``sparkn1x``."""
+    designation = _PARENTHETICAL.sub(" ", name)
+    words = [word for word in re.split(r"[\s_]+", designation.strip().lower()) if word]
     kept = "".join(word for word in words if word not in _BRAND_WORDS | _VARIANT_WORDS)
     label = re.sub(r"[^a-z0-9]", "", kept)
     # A label names files, so one starting with a digit ("8060s") keeps its family word.
@@ -150,7 +161,10 @@ def probed_cards(output: str) -> list[GpuCard]:
 
 
 def read_cards() -> list[GpuCard]:
-    """This machine's cards, indexed by ROCm device number, from the first of :data:`PROBES` that describes any.
+    """This machine's cards, indexed by ROCm device number, from the first probe that describes any.
+
+    A host with no AMD SMI is asked through ``nvidia-smi`` first: it is the platform's own tool there, and the only
+    one that reports a card's arch and memory without a Python runtime that holds torch.
 
     Raises:
         AmdSmiError: no probe describes a card; the message gives each one's reason.
@@ -163,12 +177,74 @@ def read_cards() -> list[GpuCard]:
         reasons.append("amd-smi static reports no GPU")
     except AmdSmiError as exc:
         reasons.append(str(exc))
+    if shutil.which("amd-smi") is None and shutil.which("nvidia-smi") is not None:
+        try:
+            return _nvidia_cards()
+        except AmdSmiError as exc:
+            reasons.append(str(exc))
     for probe in PROBES[1:]:
         try:
             return probed_cards(_probe_output(probe))
         except AmdSmiError as exc:
             reasons.append(str(exc))
     raise AmdSmiError("; ".join(reasons))
+
+
+def _nvidia_cards() -> list[GpuCard]:
+    """The cards ``nvidia-smi`` reports, by its index: the shape a host with no AMD SMI, and so no ROCm, has.
+
+    It reports each card's name, compute capability, memory size and top SM clock, and no compute-unit count -- so a
+    card read here carries no peak. The memory clock is not published for a unified-memory part at all, which leaves
+    the bandwidth ``None`` too.
+
+    Raises:
+        AmdSmiError: ``nvidia-smi`` cannot run, or reports a card without its arch or memory size.
+    """
+    try:
+        done = subprocess.run(  # nosec B603 - a fixed query.
+            ["nvidia-smi", f"--query-gpu={_NVIDIA_QUERY}", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=_PROBE_TIMEOUT_SEC,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AmdSmiError(f"nvidia-smi could not run: {exc}") from exc
+    if done.returncode != 0:
+        said = done.stderr.strip().splitlines()[-1:]
+        raise AmdSmiError(f"nvidia-smi exited {done.returncode}" + (f": {said[0][:200]}" if said else ""))
+    rows = [[field.strip() for field in line.split(",")] for line in done.stdout.splitlines() if line.strip()]
+    cards = [_nvidia_card(index, row) for index, row in enumerate(rows)]
+    if not cards:
+        raise AmdSmiError("nvidia-smi reports no GPU")
+    return cards
+
+
+def _nvidia_card(index: int, row: list[str]) -> GpuCard:
+    """One ``nvidia-smi`` row: index, name, compute capability, memory MiB, top SM clock MHz.
+
+    Raises:
+        AmdSmiError: the row is not that wide, or reports no arch or memory size.
+    """
+    if len(row) != 5:
+        raise AmdSmiError(f"nvidia-smi: card {index} reads as {row!r}, not name, arch, memory and clock")
+    name, capability, memory_mib, clock_mhz = row[1], row[2], _positive_int(row[3]), _positive_int(row[4])
+    matched = re.fullmatch(r"(\d+)\.(\d+)", capability)
+    gfx = f"sm_{matched.group(1)}{matched.group(2)}" if matched else ""
+    if not (gfx and memory_mib):
+        missing = ", no ".join(
+            what for what, value in (("compute capability", gfx), ("memory size", memory_mib)) if not value
+        )
+        raise AmdSmiError(f"nvidia-smi: card {index} reports no {missing}")
+    return GpuCard(
+        name=_market_name(name),
+        device_id="",
+        gfx=gfx,
+        compute_units=None,
+        memory_mib=memory_mib,
+        memory_bandwidth_gbps=None,
+        engine_clock_mhz=clock_mhz,
+    )
 
 
 def rocr_uuids() -> list[str]:
@@ -292,9 +368,9 @@ def _block(row: Mapping[str, Any], key: str) -> Mapping[str, Any]:
 
 
 def _text(value: Any) -> str:
-    """A string amd-smi reported; empty for ``N/A`` and for anything else."""
+    """A string a tool reported; empty for ``N/A`` and ``[N/A]`` -- amd-smi's and nvidia-smi's -- and anything else."""
     text = value.strip() if isinstance(value, str) else ""
-    return "" if text.upper() == "N/A" else text
+    return "" if text.upper() in {"N/A", "[N/A]"} else text
 
 
 def _market_name(value: Any) -> str:
