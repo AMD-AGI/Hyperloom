@@ -1399,6 +1399,35 @@ async def test_promote_baseline_revalidation_reanchors_below_prior(session_dir):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("task_params", "measured"),
+    [({}, 1500.0), ({"reason": "enablement_eval_revalidation"}, 1200.0)],
+    ids=["higher_rebaseline", "lower_revalidation"],
+)
+async def test_a_promoted_baseline_without_a_score_leaves_no_accuracy_reference(session_dir, task_params, measured):
+    """The reference moves with the anchor: the score of the anchor it replaces does not stay under the new one."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.baseline_tput = 1400.0
+        c.shared_state.baseline_accuracy = 0.81
+        c.shared_state.baseline_accuracy_definition_digest = "sha256:" + "a" * 64
+        task = Task(
+            task_id="t-unscored",
+            kind="baseline",
+            state="queued",
+            params=task_params,
+            idempotency_key="idem-t-unscored",
+        )
+        await c.writeback.promote_to_shared_state("baseline", {"output_throughput": measured}, task=task)
+        assert c.shared_state.last_baseline["decision"] == "promoted"
+        assert c.shared_state.baseline_tput == pytest.approx(measured)
+        assert (c.shared_state.baseline_accuracy, c.shared_state.baseline_accuracy_definition_digest) == (0.0, "")
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_promote_profile_records_success_attempt(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)

@@ -85,6 +85,14 @@ def test_the_baseline_promotes_its_digest_with_its_score():
     assert (state.baseline_accuracy, state.baseline_accuracy_definition_digest) == (0.945, BASELINE_DIGEST)
 
 
+def test_a_baseline_promoted_without_a_score_leaves_no_reference_for_a_resume_to_grade_against():
+    state = SharedState(baseline_accuracy=0.81, baseline_accuracy_definition_digest=BASELINE_DIGEST)
+    promoter = SimpleNamespace(shared_state=state)
+    BaselinePromotionMixin._promote_anchor_run_facts(promoter, {"output_throughput": 1500.0}, {})
+    resumed = SharedState.from_dict(state.to_dict())
+    assert ag.AccuracyReference.of_baseline(resumed) == ag.AccuracyReference(0.0, "")
+
+
 def test_a_salvaged_sibling_score_publishes_its_digest_with_it(tmp_path):
     state = SharedState()
     salvaged = ag.parse_eval_results(suite_eval(tmp_path / "sibling", 0.93, BASELINE_DIGEST), framework="vllm")

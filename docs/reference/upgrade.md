@@ -279,6 +279,20 @@ for the warm-up's results file.
   re-baseline that scored but was not promoted (`anchor_held`) used to replace
   the reference with its own score while the throughput anchor stayed; it now
   leaves both as they were.
+* A promoted baseline that scored nothing leaves the session without an
+  accuracy reference: `baseline_accuracy` is `0.0` and
+  `baseline_accuracy_definition_digest` is empty in `state.json`. The score
+  and digest of the anchor it replaced used to stay beside the new
+  `baseline_tput`. A re-baseline whose eval left no score reaches this when
+  the run stops with `stop_reason: baseline_accuracy_failed` (`--enablement
+  off` or `launch`, or a multi-node session): its throughput becomes the
+  anchor as before, and the reference is dropped with the anchor it belonged
+  to. A session resumed after that stop grades candidates on throughput alone,
+  as it does after a first baseline that stopped the same way; it used to
+  grade them against the score of the previous stack. With `--enablement
+  eval` or `all` on a single node such a re-baseline is recorded as an eval
+  failure and not promoted, so the anchor and its reference stay as they
+  were.
 
 ### Recommended: drop `INFERENCE_OPTIMIZER_RESCUE_PATHS` and `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC`
 

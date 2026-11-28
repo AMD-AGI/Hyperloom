@@ -361,10 +361,13 @@ class BaselinePromotionMixin:
         state = self.shared_state
         state.baseline_benchmark_script = str(task_params.get("benchmark_script") or "").strip()
         state.baseline_perf = perf_snapshot_from_mapping(result) or {}
-        accuracy = result.get("accuracy")
-        if isinstance(accuracy, (int, float)):
-            state.baseline_accuracy = float(accuracy)
-            state.baseline_accuracy_definition_digest = str(result.get(ACCURACY_DEFINITION_DIGEST_KEY) or "")
+        # The accuracy reference belongs to the anchor: a result that scored nothing leaves none, never the score of
+        # the anchor it replaces.
+        accuracy, digest = result.get("accuracy"), result.get(ACCURACY_DEFINITION_DIGEST_KEY)
+        if not isinstance(accuracy, (int, float)):
+            accuracy, digest = 0.0, ""
+        state.baseline_accuracy = float(accuracy)
+        state.baseline_accuracy_definition_digest = str(digest or "")
         # Persist the materialized YAML so downstream tasks reuse the exact workload contract.
         materialized = result.get("materialized_config")
         if isinstance(materialized, str) and materialized:

@@ -233,7 +233,12 @@ it.
   no accuracy score`. Measuring such a baseline, when its score is usable, no
   longer writes the session's accuracy reference; promoting it does, so a
   re-baseline that is not promoted (`anchor_held`) leaves the reference with
-  the anchor it was measured with. See [Upgrade](reference/upgrade.md).
+  the anchor it was measured with. A promoted baseline that scored nothing
+  leaves no accuracy reference (`baseline_accuracy: 0.0`, empty digest), where
+  the score of the anchor it replaced used to stay under the new throughput;
+  a session resumed after such a re-baseline stopped the run with
+  `baseline_accuracy_failed` grades candidates on throughput alone. See
+  [Upgrade](reference/upgrade.md).
 - **A session reads its GPU from the machine; no board table is kept.** Every
   start and resume reads the visible cards and prints the one it runs on (`GPU
   card        : AMD Instinct MI325X (gfx942, 304 CUs, 262128 MiB, 2100 MHz)`).
