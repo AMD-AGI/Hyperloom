@@ -103,6 +103,10 @@ class LaunchAttempt:
             path; a mapping or list is written as JSON.
         metrics: What a served round's load reports: the fixed metrics by key,
             or the scriptable script's result document.
+        eval_scores: What the eval of a round asked to evaluate scores, by
+            lm-eval metric name.
+        eval_failed: The eval of a round asked to evaluate exits non-zero and
+            scores nothing, whatever ``eval_scores`` names.
     """
 
     outcome: str = READY
@@ -115,6 +119,8 @@ class LaunchAttempt:
     wrapper_stderr: str = ""
     artifacts: Mapping[str, Any] = field(default_factory=dict)
     metrics: Mapping[str, Any] = field(default_factory=dict)
+    eval_scores: Mapping[str, float] | None = None
+    eval_failed: bool = False
 
     def __post_init__(self) -> None:
         """Reject an attempt whose outcome or stage cannot be played.

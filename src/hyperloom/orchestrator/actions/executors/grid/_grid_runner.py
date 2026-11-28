@@ -9,6 +9,7 @@ Every round runs on inference_suite with the base launch its session froze (:fun
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import time
@@ -22,7 +23,6 @@ from inference_suite.contracts import RunLayout
 from inference_suite.server_log import death_excerpt
 
 from hyperloom.common.deadline import Deadline
-from hyperloom_common.env import env_flag
 from hyperloom.common.env_safety import redact_secret_values
 
 from ....state import failure_evidence
@@ -43,6 +43,7 @@ from .._subprocess_kill import (
     SESSION_TIME_EXHAUSTED_RETURNCODE,
 )
 from ..benchmark_result import round_succeeded
+from .._suite.held_test import HeldPass, HeldTest, RoundPurpose, warms_up
 from .._suite.rounds import SuiteRoundRefused, suite_route
 from ..benchmark_config import composed_benchmark_timeout_sec
 from ..workload._launch_evidence import RequestedLaunch, build_launch_evidence, persist_measurement_evidence
@@ -106,18 +107,11 @@ from ._variant_rows import (
 
 log = logging.getLogger(__name__)
 
-#: A variant whose warm-up setup or warm-up YAML could not be built.
-_WARMUP_YAML_BUILD_ERROR = "warmup_yaml_build_error"
 #: A variant whose composed config named a workload its benchmark cap could not be sized from.
 _BENCHMARK_CAP_ERROR = "benchmark_cap_error"
 
 
 # SKIP_VARIANTS: comma/whitespace patterns matched (exact or fnmatch) against ``GridVariant.name``.
-
-
-def _run_grid_warmup_enabled() -> bool:
-    """Whether ``run_grid`` should discard a cold warmup round when possible; a point measured once never has one."""
-    return env_flag("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", default=not os.environ.get("PYTEST_CURRENT_TEST"))
 
 
 @dataclass(frozen=True)
@@ -131,17 +125,33 @@ class GridRecipe:
 
 @dataclass(frozen=True)
 class GridLaunch:
-    """How each round of a grid is launched: the server it runs on, and what the round is for."""
+    """How each round of a grid is launched: the server it runs on, and what the round is for.
+
+    Without ``server_lifecycle`` and ``held`` the grid holds each variant's server: a variant whose point warms up
+    (:func:`._suite.held_test.warms_up`) is tested on one server, a discarded bench and then the measured one, and any
+    other variant in one round on a server of its own. ``port`` is the port a server the grid holds answers on,
+    whatever the variant's point names; without it a variant's test takes a free port, and a variant measured in one
+    round the port its point names or a free one. With ``server_lifecycle`` the caller holds the server, and each
+    variant is the one round the other fields describe. With ``held`` the caller holds a test, and the grid's one
+    variant is that round of it: the test says how the round holds the server, which seed its load draws and whether
+    it evaluates, and whether the row's launch evidence records a reused server; the caller stops the server.
+    """
 
     server_lifecycle: dict[str, Any] | None = None
     server_already_ready: bool = False
     ready_server_log: str | None = None
-    warmup_before_measure: bool | None = None
     lifecycle_boot_only: bool = False
     # The grid's measured round is itself a caller's discarded warmup, so it must not send the prompts of the
     # measured round that follows it on the same server.
     warmup_round: bool = False
     evaluation_only: bool = False  # the round only evaluates (its caller sets EVAL_ONLY): a clean exit is its success
+    held: HeldPass | None = None
+    port: int | None = None
+
+    @property
+    def caller_holds_server(self) -> bool:
+        """Whether the grid's caller, not the grid, holds and stops the server its rounds run on."""
+        return self.server_lifecycle is not None or self.held is not None
 
 
 @dataclass(frozen=True)
@@ -231,7 +241,6 @@ class _GridRun(NamedTuple):
     stop: GridStop
     rounds_per_variant: int
     mn_warmup_rounds: int
-    auto_warmup_requested: bool
 
 
 def _variant_tag(run: _GridRun, at: _VariantSlot) -> str:
@@ -385,29 +394,18 @@ def _refuse_unsupported_capability(run: _GridRun, at: _VariantSlot) -> None:
     _abort_variant(at, _VariantFailure(speculative_capability.CAPABILITY_UNSUPPORTED, reason))
 
 
-async def _variant_yaml(run: _GridRun, at: _VariantSlot, *, into: Path, lifecycle: dict[str, Any] | None) -> Path:
-    return await asyncio.to_thread(
-        _build_variant_yaml,
-        run.recipe,
-        at.variant,
-        output_subdir=into,
-        server_lifecycle=lifecycle,
-    )
-
-
-async def _variant_yaml_or_abort(
-    run: _GridRun,
-    at: _VariantSlot,
-    *,
-    into: Path,
-    lifecycle: dict[str, Any] | None,
-    failure_class: str | None = None,
-) -> Path:
-    """Materialize this variant's point YAML under ``into``, or end the variant on the build error."""
+async def _variant_yaml_or_abort(run: _GridRun, at: _VariantSlot) -> Path:
+    """Materialize this variant's point YAML in its slot, or end the variant on the build error."""
     try:
-        return await _variant_yaml(run, at, into=into, lifecycle=lifecycle)
+        return await asyncio.to_thread(
+            _build_variant_yaml,
+            run.recipe,
+            at.variant,
+            output_subdir=at.path,
+            server_lifecycle=run.launch.server_lifecycle,
+        )
     except Exception as exc:  # re-raised as _VariantAborted by _abort_variant
-        error_class = failure_class or getattr(exc, "error_class", failure_evidence.YAML_BUILD_ERROR)
+        error_class = getattr(exc, "error_class", failure_evidence.YAML_BUILD_ERROR)
         log.warning(
             "grid_runner: variant %s aborted: %s: %r",
             _variant_tag(run, at),
@@ -439,76 +437,40 @@ def _variant_cap_or_abort(run: _GridRun, at: _VariantSlot, cfg_path: Path) -> fl
 
 
 async def _prepare_variant_rounds(run: _GridRun, at: _VariantSlot) -> _VariantRounds:
-    cfg_path = await _variant_yaml_or_abort(run, at, into=at.path, lifecycle=run.launch.server_lifecycle)
-    mn_effective_args = _resolve_mn_effective_server_args(cfg_path)
-    cold = _VariantRounds(
-        cfg_path, {"eligible": False}, False, mn_effective_args, _variant_cap_or_abort(run, at, cfg_path)
-    )
-    if not run.auto_warmup_requested:
-        return cold
-    try:
-        from ..serving._server_lifecycle import resolve_lifecycle_params
-
-        lifecycle = resolve_lifecycle_params(cfg_path)
-        if not lifecycle.get("eligible"):
-            log.info(
-                "grid_runner: warmup-before-measure not eligible (%s); running single measured round.",
-                lifecycle.get("reason") or "unknown",
-            )
-            return cold._replace(lifecycle=lifecycle)
-        warmed_cfg_path = await _variant_yaml(
-            run,
-            at,
-            into=at.path,
-            lifecycle={"cleanup": True, "pid_dir": str(at.path), "port": int(lifecycle.get("port") or 0)},
-        )
-    except Exception as exc:  # re-raised as _VariantAborted by _abort_variant
-        log.warning(
-            "grid_runner: variant %s aborted: warmup-before-measure eligibility/materialization failed: %r",
-            _variant_tag(run, at),
-            exc,
-            exc_info=True,
-        )
-        _abort_variant(at, _VariantFailure(_WARMUP_YAML_BUILD_ERROR, repr(exc), f"{_WARMUP_YAML_BUILD_ERROR}: {exc!r}"))
+    cfg_path = await _variant_yaml_or_abort(run, at)
     return _VariantRounds(
-        warmed_cfg_path, lifecycle, True, mn_effective_args, _variant_cap_or_abort(run, at, warmed_cfg_path)
+        cfg_path,
+        not run.launch.caller_holds_server and warms_up(cfg_path),
+        _resolve_mn_effective_server_args(cfg_path),
+        _variant_cap_or_abort(run, at, cfg_path),
     )
 
 
-async def _run_warmup_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRounds) -> float | None:
-    """Run and discard one benchmark pass so the measured round starts on a warm server."""
+async def _run_warmup_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRounds, test: HeldTest) -> float | None:
+    """Run and discard the bench that boots ``test``'s server, so the measured round starts on a warm one."""
     warmup_slot = at.path / WARMUP_ROUND_DIR
-    warmup_server_log = warmup_slot / "server.log"
-    cfg_path = await _variant_yaml_or_abort(
-        run,
-        at,
-        into=warmup_slot,
-        lifecycle={"cleanup": False, "pid_dir": str(at.path), "port": int(rounds.lifecycle.get("port") or 0)},
-        failure_class=_WARMUP_YAML_BUILD_ERROR,
-    )
     started_unix = time.time()
     proc = await _reported_round(
         run,
         at,
         "warmup",
         GridRound(
-            config_path=cfg_path,
+            config_path=rounds.cfg_path,
             output_dir=warmup_slot,
             timeout_sec=rounds.benchmark_timeout_sec,
             session_deadline_sec=run.stop.session_deadline_sec,
-            warmup=True,
+            held=HeldPass(test, RoundPurpose.WARMUP),
         ),
     )
     stopped = stopped_by_the_run(proc.returncode)
     if stopped is not None:
-        survivors = teardown_variant_server(at.path)
-        attempt = _RoundAttempt(at, proc.returncode, started_unix, warmup_server_log, tuple(survivors))
+        attempt = _RoundAttempt(at, proc.returncode, started_unix, warmup_slot / "server.log", test.stop())
         _abort_on_round_stop(run, stopped, attempt, round_label="warmup")
-    return _warmup_throughput(run, at, _BenchmarkPass(proc, started_unix))
+    return _warmup_throughput(run, at, _BenchmarkPass(proc, started_unix), test)
 
 
-def _warmup_throughput(run: _GridRun, at: _VariantSlot, pass_: _BenchmarkPass) -> float | None:
-    """The throughput the warmup pass measured, or end the variant when it measured none."""
+def _warmup_throughput(run: _GridRun, at: _VariantSlot, pass_: _BenchmarkPass, test: HeldTest) -> float | None:
+    """The throughput the warmup pass measured, or stop ``test``'s server and end the variant when it measured none."""
     warmup_slot = at.path / WARMUP_ROUND_DIR
     workspace = pass_.proc.run_dir
     measurement = record_round(workspace, started_unix=pass_.started_unix)
@@ -521,7 +483,7 @@ def _warmup_throughput(run: _GridRun, at: _VariantSlot, pass_: _BenchmarkPass) -
             warmup_tput or 0.0,
         )
         return warmup_tput
-    teardown_variant_server(at.path)
+    test.stop()
     warmup_server_log = warmup_slot / "server.log"
     found = argv_refusal(measurement_server_log_path(warmup_server_log, workspace)) or RoundError(
         death_excerpt(str(warmup_server_log)) or redact_secret_values(pass_.proc.detail[-2000:])
@@ -612,11 +574,19 @@ async def _run_multi_node_warmup(run: _GridRun, at: _VariantSlot, rounds: _Varia
         _abort_on_round_stop(run, stopped, attempt, round_label="mn_warmup")
 
 
-async def _run_measured_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRounds) -> _BenchmarkPass:
+async def _run_measured_round(
+    run: _GridRun, at: _VariantSlot, rounds: _VariantRounds, test: HeldTest | None
+) -> _BenchmarkPass:
+    """Run the variant's measured round: as the round of the test its launch holds, on ``test``'s server when the
+    variant warmed one up, else as its launch says.
+
+    The server the round leaves in the variant's slot is stopped; the server of a test the launch holds is left to
+    the launch's caller.
+    """
     from .._multi_node_env import is_multi_node
 
+    held = run.launch.held or (None if test is None else HeldPass(test, RoundPurpose.MEASURE))
     started_unix = time.time()
-    measure_cap_sec = rounds.benchmark_timeout_sec
     try:
         proc = await _reported_round(
             run,
@@ -625,17 +595,26 @@ async def _run_measured_round(run: _GridRun, at: _VariantSlot, rounds: _VariantR
             GridRound(
                 config_path=rounds.cfg_path,
                 output_dir=at.path,
-                timeout_sec=measure_cap_sec,
-                server_already_ready=(run.launch.server_already_ready or rounds.auto_warmup or is_multi_node()),
+                timeout_sec=rounds.benchmark_timeout_sec,
+                server_already_ready=(run.launch.server_already_ready or is_multi_node()),
                 session_deadline_sec=run.stop.session_deadline_sec,
                 warmup=run.launch.warmup_round,
                 boot_only=run.launch.lifecycle_boot_only,
                 checkpoint=run.stop.checkpoint,
+                held=held,
+                port=run.launch.port,
             ),
         )
     finally:
-        round_survivors = teardown_variant_server(at.path)
-    return _BenchmarkPass(proc, started_unix, tuple(round_survivors))
+        round_survivors = _stop_variant_server(run, at, test)
+    return _BenchmarkPass(proc, started_unix, round_survivors)
+
+
+def _stop_variant_server(run: _GridRun, at: _VariantSlot, test: HeldTest | None) -> tuple[int, ...]:
+    """Stop the server the variant's rounds left up, unless its launch's caller holds it; the pids that survived."""
+    if run.launch.held is not None:
+        return ()
+    return tuple(teardown_variant_server(at.path)) if test is None else test.stop()
 
 
 def _abort_on_early_stop(at: _VariantSlot, round_: _BenchmarkPass) -> NoReturn:
@@ -740,18 +719,19 @@ async def _measure_variant(run: _GridRun, at: _VariantSlot) -> VariantResult:
     # none, because no round of this variant was ever granted time.
     at = at._replace(benchmark_timeout_sec=rounds.benchmark_timeout_sec)
     warm_run = run._replace(stop=run.stop.for_warmup())
-    warmup_tput = await _run_warmup_round(warm_run, at, rounds) if rounds.auto_warmup else None
-    _log_variant_banner(run, at)
-    await _restart_multi_node_server(run, at, rounds)
-    # The restart above is a launch of its own and is under no cap, so the budget admitted at the top of the
-    # loop may no longer be there.
-    spent_on = "this variant's server restart"
-    if _warn_budget_cannot_admit(run, at.idx, rounds_left=1 + run.mn_warmup_rounds, spent_on=spent_on):
-        if rounds.auto_warmup:
-            teardown_variant_server(at.path)
-        _abandon_rest_of_grid(run, at)
-    await _run_multi_node_warmup(warm_run, at, rounds)
-    round_ = await _run_measured_round(run, at, rounds)
+    with contextlib.ExitStack() as server:
+        # A variant that warms up is tested on one server, which leaving this block stops however its rounds ended.
+        test = server.enter_context(HeldTest(at.path, port=run.launch.port)) if rounds.warms_up else None
+        warmup_tput = None if test is None else await _run_warmup_round(warm_run, at, rounds, test)
+        _log_variant_banner(run, at)
+        await _restart_multi_node_server(run, at, rounds)
+        # The restart above is a launch of its own and is under no cap, so the budget admitted at the top of the
+        # loop may no longer be there.
+        spent_on = "this variant's server restart"
+        if _warn_budget_cannot_admit(run, at.idx, rounds_left=1 + run.mn_warmup_rounds, spent_on=spent_on):
+            _abandon_rest_of_grid(run, at)
+        await _run_multi_node_warmup(warm_run, at, rounds)
+        round_ = await _run_measured_round(run, at, rounds, test)
     _refuse_reaped_round(run, at, round_)
     return _variant_row(run, at, _MeasuredVariant(rounds, round_, warmup_tput))
 
@@ -768,13 +748,9 @@ async def run_grid(
 
     ``launch.ready_server_log`` is the log of the caller's ready server, measured when no variant log exists.
     """
-    warmup_before_measure = launch.warmup_before_measure
-    if warmup_before_measure is None:
-        warmup_before_measure = _run_grid_warmup_enabled()
-    auto_warmup_requested = (
-        bool(warmup_before_measure and launch.server_lifecycle is None)
-        and not read_benchmark_point(recipe.base_yaml_path).measured_once
-    )
+    # Admission precedes a variant's config, which is what says whether this host can hold its server for a
+    # discarded bench: a default launch of a point not measured once is admitted for that bench too.
+    admits_warmup = not launch.caller_holds_server and not read_benchmark_point(recipe.base_yaml_path).measured_once
     # This function names the working directory, so it creates it: callers and the per-variant config writer both
     # happen to create it first today, and neither is a contract.
     output_root.mkdir(parents=True, exist_ok=True)
@@ -786,9 +762,8 @@ async def run_grid(
         recipe=recipe,
         launch=launch,
         stop=stop,
-        rounds_per_variant=1 + (1 if auto_warmup_requested else 0) + mn_warmup_rounds,
+        rounds_per_variant=1 + (1 if admits_warmup else 0) + mn_warmup_rounds,
         mn_warmup_rounds=mn_warmup_rounds,
-        auto_warmup_requested=auto_warmup_requested,
     )
     results: list[VariantResult] = []
     for i, variant in enumerate(grid):
@@ -812,12 +787,13 @@ async def run_grid(
                 break
         else:
             await _report_finished_variant(grid, results, i)
+    held_reuses_server = launch.held is not None and launch.held.reuses_server
     await asyncio.to_thread(
         _attach_grid_launch_evidence,
         results,
         grid=grid,
         output_root=output_root,
-        caller_reused_ready_server=launch.server_already_ready,
+        caller_reused_ready_server=launch.server_already_ready or held_reuses_server,
         ready_server_log=launch.ready_server_log,
     )
     return results
@@ -847,7 +823,6 @@ def _attach_grid_launch_evidence(
             speculative_capability.CAPABILITY_UNSUPPORTED,
             failure_evidence.YAML_BUILD_ERROR,
             _BENCHMARK_CAP_ERROR,
-            _WARMUP_YAML_BUILD_ERROR,
             SpeculativeDecodingPinnedError.error_class,
             ServerArgvInvalidError.error_class,
         }:

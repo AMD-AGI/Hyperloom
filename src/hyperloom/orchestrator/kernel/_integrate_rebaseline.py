@@ -17,7 +17,6 @@ from hyperloom_common.coerce import to_str_list
 from . import patch_jit_cache
 from ..actions.executors._kernel_agent_tool import HandlerResult
 from ._integrate_outcomes import _FRAMEWORK_APPLYBACK_ARTIFACT_KIND, _FailureVerdict, _integrate_failure
-from ._integrate_payload import _is_paired_gemm_measurement
 
 log = logging.getLogger(__name__)
 
@@ -243,13 +242,7 @@ class _IntegrateRebaseline(NamedTuple):
     ctx: Any
 
 
-def _integrate_rebaseline(
-    payload: dict,
-    state: Any,
-    *,
-    session_dir: Path,
-    performance_policy: dict[str, float],
-) -> _IntegrateRebaseline:
+def _integrate_rebaseline(payload: dict, state: Any, *, session_dir: Path) -> _IntegrateRebaseline:
     from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
     from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
     from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, unique_runs_dir
@@ -263,9 +256,6 @@ def _integrate_rebaseline(
     # It is a legal id but not a legal directory name everywhere -- fold it.
     task_id = f"integrate-{fs_safe_id(payload.get('kernel_id'))}"
     workspace = unique_runs_dir(session_dir, "integrate", task_id)
-    keep_policy = (
-        {} if _is_paired_gemm_measurement(payload) else {"post_measure_accuracy_keep_policy": performance_policy}
-    )
     task = Task(
         task_id=task_id,
         kind="baseline",
@@ -282,13 +272,10 @@ def _integrate_rebaseline(
             # The only artifact that patches FlyDSL sources, so the only run that
             # needs the JIT cache key widened.
             "flydsl_source_dirs": (str(payload.get("artifact_kind") or "") == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND),
-            "defer_accuracy_until_after_measure": True,
-            "post_measure_accuracy_min_tput": performance_policy["base_tput"]
-            * (1.0 + performance_policy["keep_threshold_pct"] / 100.0),
-            **keep_policy,
             # Synthetic kind="baseline": candidate A/B validation against the
-            # already-anchored reference. It runs eval for the kernel accuracy
-            # gate but never establishes a replacement quality reference.
+            # already-anchored reference. Its measured round runs the eval for
+            # the kernel accuracy gate but never establishes a replacement
+            # quality reference.
             "quality_ref_exempt": True,
             # A sub-step of the KERNEL phase's own event, not a dispatched
             # measurement, so it records into that event rather than leaving a

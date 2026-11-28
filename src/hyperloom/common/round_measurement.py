@@ -209,12 +209,17 @@ def _positive(value: object) -> bool:
     return isinstance(value, (int, float)) and value > 0
 
 
+def load_measured(report: Report) -> bool:
+    """Whether the round's load ran to its end, whatever a step after it did."""
+    return report.run_status in _LOAD_MEASURED
+
+
 def _load_valid(report: Report, measurement: Mapping[str, Any]) -> bool:
     """A round whose load ran and served: positive throughput, and a request served unless a script measured it.
 
     An AgentX round is judged by its counts instead, and an MLPerf round also by the harness's submission verdict.
     """
-    if report.run_status not in _LOAD_MEASURED or not _positive(measurement[_OUTPUT_THROUGHPUT]):
+    if not load_measured(report) or not _positive(measurement[_OUTPUT_THROUGHPUT]):
         return False
     if report.agentx is not None:
         return _agentx_valid(report.agentx, measurement)
@@ -241,4 +246,10 @@ def round_measurement(report: Report, launch: Launch | None) -> dict[str, Any]:
     return measurement
 
 
-__all__ = ["AGENTX_CONTEXT_OVERFLOW_SKIPPED", "AGENTX_ERROR_OSL_NOT_EXPORTED", "LATENCY_SOURCE", "round_measurement"]
+__all__ = [
+    "AGENTX_CONTEXT_OVERFLOW_SKIPPED",
+    "AGENTX_ERROR_OSL_NOT_EXPORTED",
+    "LATENCY_SOURCE",
+    "load_measured",
+    "round_measurement",
+]

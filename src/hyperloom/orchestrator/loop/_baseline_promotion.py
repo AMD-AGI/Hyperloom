@@ -303,6 +303,13 @@ class BaselinePromotionMixin:
         accuracy = result.get("accuracy")
         floor = float(getattr(enablement, "accuracy_floor", 0.0) or 0.0)
         generation = int(getattr(enablement, "revalidation_generation", 0) or 0)
+        if result.get("measure_round_dropped"):
+            # The budget kept the round that evaluates from running, so nothing was scored: the window stays open.
+            await self._reopen_revalidation_window()
+            enablement_event.record_revalidation_stopped(
+                generation=generation, task_id=promoting_tid, accuracy_floor=floor
+            )
+            return
         if accuracy_meets_floor(accuracy, floor):
             await self._close_enablement_lane(generation, accuracy, floor, promoting_tid)
             return
@@ -361,10 +368,13 @@ class BaselinePromotionMixin:
         state = self.shared_state
         state.baseline_benchmark_script = str(task_params.get("benchmark_script") or "").strip()
         state.baseline_perf = perf_snapshot_from_mapping(result) or {}
-        accuracy = result.get("accuracy")
-        if isinstance(accuracy, (int, float)):
-            state.baseline_accuracy = float(accuracy)
-            state.baseline_accuracy_definition_digest = str(result.get(ACCURACY_DEFINITION_DIGEST_KEY) or "")
+        # The accuracy reference belongs to the anchor: a result that scored nothing leaves none, never the score of
+        # the anchor it replaces.
+        accuracy, digest = result.get("accuracy"), result.get(ACCURACY_DEFINITION_DIGEST_KEY)
+        if not isinstance(accuracy, (int, float)):
+            accuracy, digest = 0.0, ""
+        state.baseline_accuracy = float(accuracy)
+        state.baseline_accuracy_definition_digest = str(digest or "")
         # Persist the materialized YAML so downstream tasks reuse the exact workload contract.
         materialized = result.get("materialized_config")
         if isinstance(materialized, str) and materialized:

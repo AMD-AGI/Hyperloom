@@ -1220,12 +1220,7 @@ class TestKernelE2EMeasurementPromotion:
 
         async def measure(payload, *, session_dir):
             payloads.append(deepcopy(payload))
-            attempt = integrate_rebaseline._integrate_rebaseline(
-                payload,
-                state,
-                session_dir=session_dir,
-                performance_policy={"base_tput": 100.0, "keep_threshold_pct": 1.0},
-            )
+            attempt = integrate_rebaseline._integrate_rebaseline(payload, state, session_dir=session_dir)
             native_params.append(attempt.ctx.task.params)
             return {"status": "ok", "decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0, "bench_result": bench}
 
@@ -1707,7 +1702,7 @@ class TestKernelE2EMeasurementPromotion:
         assert params["extra_server_args"] == ""
         assert params["extra_envs"] == {}
         assert "disable_run_eval" not in params
-        assert params["defer_accuracy_until_after_measure"] is True
+        assert not [name for name in params if "accuracy" in name]
         assert params["quality_ref_exempt"] is True
         assert anchor == coord.shared_state.current_best
         assert result["status"] == "ok"

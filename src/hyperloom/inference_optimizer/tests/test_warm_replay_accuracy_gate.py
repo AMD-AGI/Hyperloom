@@ -14,6 +14,7 @@ from .test_warm_replay import _make_coord, _StubTask, _warm_recipe_t1
 RISKY_ENVS = {"VLLM_ROCM_USE_AITER": "1"}
 SAFE_ARGS = "--max-num-seqs 2048"
 BASELINE_ACC = 0.90
+NO_SCORE = "the replay's result carries no accuracy score"
 
 
 def _coord_with_baseline(tmp_path: Path, accuracy: float) -> Coordinator:
@@ -46,18 +47,17 @@ def _promoted(coord: Coordinator) -> bool:
     return bool(coord.shared_state.optimization_stack)
 
 
-def _double_run_dirs(tmp_path: Path, warmup_score: float | None) -> dict:
-    """Build a replay task directory shaped like a real cold-start double run."""
+def _double_run_dirs(tmp_path: Path, warmup_score: float) -> dict:
+    """A measured round's result without a score, in a replay task directory whose warm-up round left a results file."""
     root = tmp_path / "runs" / "replay_warm_recipe" / "task-warm-replay-prelude"
     warm_bench = root / "warmup_round" / "benchmark_vllm_1"
     measure_bench = root / "measure_round" / "benchmark_vllm_2"
     warm_bench.mkdir(parents=True, exist_ok=True)
     measure_bench.mkdir(parents=True, exist_ok=True)
-    if warmup_score is not None:
-        (warm_bench / "results_2026-08-19T00-00-00.json").write_text(
-            json.dumps({"results": {"gsm8k": {"exact_match,strict-match": warmup_score}}}),
-            encoding="utf-8",
-        )
+    (warm_bench / "results_2026-08-19T00-00-00.json").write_text(
+        json.dumps({"results": {"gsm8k": {"exact_match,strict-match": warmup_score}}}),
+        encoding="utf-8",
+    )
     return {
         "status": "succeeded",
         "output_throughput": 738.0,
@@ -66,38 +66,30 @@ def _double_run_dirs(tmp_path: Path, warmup_score: float | None) -> dict:
     }
 
 
-class TestScoreIsFoundWhereTheDoubleRunWritesIt:
-    """The deciding round carries no score of its own; the warmup round does."""
+class TestTheReplayIsJudgedOnTheScoreItsResultCarries:
+    """The replay's rounds hand their score to its result; a results file under its task directory rules nothing."""
 
-    def test_a_warmup_round_score_is_read(self, tmp_path):
+    def test_a_results_file_under_the_task_directory_does_not_rescue_a_result_without_a_score(self, tmp_path):
         coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
         result = _double_run_dirs(tmp_path, warmup_score=0.89)
         coord.phase_prelude.promote_warm_replay(result, task=_risky_task())
 
-        outcome = coord.shared_state.warm_replay_outcome
-        assert outcome["eval_ran"] is True
-        assert outcome["replay_accuracy"] == pytest.approx(0.89)
         assert _promoted(coord) is True
+        outcome = coord.shared_state.warm_replay_outcome
+        assert outcome["eval_ran"] is False
+        assert outcome["replay_accuracy"] is None
+        assert outcome["eval_error"] == NO_SCORE
 
-    def test_a_collapsed_warmup_round_score_blocks_promotion(self, tmp_path):
+    def test_a_collapsed_score_on_the_result_rejects_whatever_a_results_file_holds(self, tmp_path):
         coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
-        result = _double_run_dirs(tmp_path, warmup_score=0.0076)
+        result = _double_run_dirs(tmp_path, warmup_score=0.89) | {"accuracy": 0.0076}
         coord.phase_prelude.promote_warm_replay(result, task=_risky_task())
 
         assert _promoted(coord) is False
         outcome = coord.shared_state.warm_replay_outcome
         assert outcome["status"] == "accuracy_failed"
+        assert outcome["eval_ran"] is True
         assert outcome["replay_accuracy"] == pytest.approx(0.0076)
-
-    def test_no_results_file_anywhere_records_that_no_eval_ran(self, tmp_path):
-        coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
-        result = _double_run_dirs(tmp_path, warmup_score=None)
-        coord.phase_prelude.promote_warm_replay(result, task=_risky_task())
-
-        outcome = coord.shared_state.warm_replay_outcome
-        assert outcome["eval_ran"] is False
-        assert outcome["replay_accuracy"] is None
-        assert "no results" in outcome["eval_error"]
 
 
 class TestWarmReplayRejectsBrokenConfigs:
@@ -159,8 +151,23 @@ class TestEveryReplayIsJudged:
         assert _promoted(coord) is True
 
 
+class TestAReplayWhoseOwnEvalLeftNoScoreIsNotAdopted:
+    """Its attempt ends failed, under the eval's class or the run's stop, and the settle rolls it back."""
+
+    @pytest.mark.parametrize("error_class", ["eval_failed", "session_time_exhausted"])
+    def test_the_failed_attempt_is_rolled_back_under_its_class(self, tmp_path, error_class):
+        coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
+        coord.phase_prelude.promote_warm_replay(
+            {"status": "failed", "error_class": error_class, "error": "no score"},
+            task=_risky_task(),
+        )
+        assert _promoted(coord) is False
+        outcome = coord.shared_state.warm_replay_outcome
+        assert (outcome["status"], outcome["error_class"]) == ("failed", error_class)
+
+
 class TestAbsentEvidenceDoesNotBlock:
-    """A failed measurement never stops the run."""
+    """A replay whose rounds ran no eval is admitted, and marked as not judged."""
 
     def test_a_missing_verdict_still_promotes_and_is_marked(self, tmp_path):
         coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
@@ -172,60 +179,7 @@ class TestAbsentEvidenceDoesNotBlock:
         outcome = coord.shared_state.warm_replay_outcome
         assert outcome["eval_ran"] is False
         assert outcome["replay_accuracy"] is None
-        assert outcome["eval_error"]
-
-    def test_an_unscorable_results_file_promotes_and_records_why(self, tmp_path):
-        """The eval ran and produced a file with no metric this parser knows — a different state from an eval that never ran, and still not a reason to stop."""
-        coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
-        result = _double_run_dirs(tmp_path, warmup_score=None)
-        bench = Path(result["output_dir"]).parent / "warmup_round" / "benchmark_vllm_1"
-        (bench / "results_2026-08-19T00-00-00.json").write_text(
-            json.dumps({"results": {"gsm8k": {"unknown_metric": 1.0}}}),
-            encoding="utf-8",
-        )
-        coord.phase_prelude.promote_warm_replay(result, task=_risky_task())
-
-        assert _promoted(coord) is True
-        outcome = coord.shared_state.warm_replay_outcome
-        assert outcome["eval_ran"] is True
-        assert outcome["replay_accuracy"] is None
-        assert "no recognized metric" in outcome["eval_error"]
-
-    def test_an_undecodable_results_file_is_an_eval_that_ran(self, tmp_path):
-        """A file the parser could not decode still proves the eval ran."""
-        coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
-        result = _double_run_dirs(tmp_path, warmup_score=None)
-        bench = Path(result["output_dir"]).parent / "warmup_round" / "benchmark_vllm_1"
-        (bench / "results_2026-08-19T00-00-00.json").write_text(
-            "{ this is not json",
-            encoding="utf-8",
-        )
-        coord.phase_prelude.promote_warm_replay(result, task=_risky_task())
-
-        assert _promoted(coord) is True
-        outcome = coord.shared_state.warm_replay_outcome
-        assert outcome["eval_ran"] is True
-        assert outcome["replay_accuracy"] is None
-        assert "parse error" in outcome["eval_error"]
-
-    def test_a_parser_crash_is_not_an_eval_that_ran(self, tmp_path, monkeypatch):
-        """A parser that raised read no file, so nothing says the eval ran."""
-        coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
-        result = _double_run_dirs(tmp_path, warmup_score=None)
-
-        from hyperloom.orchestrator.actions.executors import _accuracy_gate
-
-        def _raise(*_args, **_kwargs):
-            raise OSError("results directory vanished mid-read")
-
-        monkeypatch.setattr(_accuracy_gate, "parse_eval_results", _raise)
-        coord.phase_prelude.promote_warm_replay(result, task=_risky_task())
-
-        assert _promoted(coord) is True
-        outcome = coord.shared_state.warm_replay_outcome
-        assert outcome["eval_ran"] is False
-        assert outcome["replay_accuracy"] is None
-        assert "eval parse raised" in outcome["eval_error"]
+        assert outcome["eval_error"] == NO_SCORE
 
     def test_a_passing_replay_records_no_eval_error(self, tmp_path):
         coord = _coord_with_baseline(tmp_path, BASELINE_ACC)

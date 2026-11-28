@@ -24,7 +24,7 @@ class _RoundSequence(_BenchmarkRoundsMixin):
         self.calls += 1
         return receipt
 
-    def _cold_anchor_when_hot_pass_unaffordable(self, *_args, **_kwargs):
+    def _hot_pass_shortfall(self, *_args, **_kwargs):
         return None
 
 
@@ -41,18 +41,17 @@ def _run_rounds(tmp_path: Path, *, warmup: float, measured: float, kind="baselin
                 "output_throughput": throughput,
                 "output_dir": str(directory),
                 "workspace": str(directory),
+                "subprocess_runtime_sec": 747.0 if slot == "warmup_round" else 2073.0,
             }
         )
-        if slot == "warmup_round":
+        if slot == "measure_round":
             receipts[-1]["accuracy"] = 0.96
     rounds = _RoundSequence(receipts)
     attempt = SimpleNamespace(
         ctx=SimpleNamespace(task=SimpleNamespace(kind=kind)),
         params={"quality_ref_exempt": exempt},
     )
-    result = asyncio.run(
-        rounds._run_cold_start_guarded_rounds(attempt, tmp_path, {"port": 8888}, [], defer_accuracy=False)
-    )
+    result = asyncio.run(rounds._run_cold_start_guarded_rounds(attempt, tmp_path, []))
     assert rounds.calls == 2
     return result, receipts
 
@@ -72,6 +71,8 @@ def test_stock_baseline_retains_the_higher_anchor_without_failing_or_dropping_a_
     assert rejected["delta_pct"] == pytest.approx(-38.7, abs=0.01)
     assert rejected["output_dir"] == receipts[1]["output_dir"]
     assert rejected["workspace"] == receipts[1]["workspace"]
+    # The rejected round ran, so the session still prices its next measured round at what this one took.
+    assert (result["subprocess_runtime_sec"], result["measure_round_runtime_sec"]) == (747.0, 2073.0)
     assert "baseline_downward_drift_anchor" in result["nonfatal_warnings"]
     assert not result.get("measure_round_dropped")
     assert "baseline_downward_drift_anchor" not in receipts[0].get("nonfatal_warnings", [])

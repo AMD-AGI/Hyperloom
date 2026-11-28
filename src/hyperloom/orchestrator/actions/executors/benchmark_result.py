@@ -14,7 +14,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.benchmark_config import read_benchmark_point
 from hyperloom_common.coerce import to_float, to_int
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50_CHECKPOINT
 from inference_suite.contracts import Report
@@ -265,22 +264,9 @@ def _find_server_logs(slot: Path) -> list[Path]:
     return sorted(logs, key=_size, reverse=True)
 
 
-def double_run_requested(params: dict | None, config_path: Path) -> bool:
-    """Whether a discarded warmup round precedes the measured one; ``baseline_double_run`` decides, on by default,
-    except for a point measured once (an AgentX replay), which never has one."""
-    from hyperloom_common.env import is_truthy
-
-    if read_benchmark_point(config_path).measured_once:
-        return False
-    if params and "baseline_double_run" in params:
-        return is_truthy(params["baseline_double_run"])
-    return True
-
-
 __all__ = [
     "extract_benchmark_measurement",
     "harvest_mn_gpu_metrics",
-    "double_run_requested",
     "is_valid_measurement",
     "round_succeeded",
     "served_complete_protocol",

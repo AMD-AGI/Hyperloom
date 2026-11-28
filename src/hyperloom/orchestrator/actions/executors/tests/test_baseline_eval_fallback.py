@@ -20,9 +20,6 @@ from hyperloom.orchestrator.actions.executors.baseline import (
 )
 
 
-_ACCURACY_LOGGER = "hyperloom.orchestrator.actions.executors.benchmark_run.accuracy"
-
-
 def _make_ctx(params: dict, *, enablement_mode: str = "off") -> SimpleNamespace:
     task = SimpleNamespace(task_id="t-eval-1", params=params)
     return SimpleNamespace(task=task, extra={"shared_state": SharedState(enablement_mode=enablement_mode)})
@@ -246,10 +243,10 @@ def test_no_stop_when_baseline_failed():
     assert reason == ""
 
 
-# --- session-level salvage (sibling attempt already measured accuracy) -------
-def _write_gsm8k_results(measure_round: Path, score: float) -> None:
-    """Write a minimal lm-eval ``results*.json`` under a measure round dir."""
-    d = measure_round / "benchmark_vllm_x"
+# --- the eval reader ---------------------------------------------------------
+def _write_gsm8k_results(round_dir: Path, score: float) -> None:
+    """Write a minimal lm-eval ``results*.json`` under a round dir."""
+    d = round_dir / "benchmark_vllm_x"
     d.mkdir(parents=True, exist_ok=True)
     (d / "results_x.json").write_text(
         json.dumps({"results": {"gsm8k": {"exact_match,strict-match": score}}}),
@@ -257,125 +254,14 @@ def _write_gsm8k_results(measure_round: Path, score: float) -> None:
     )
 
 
-def test_salvage_sibling_attempt_accuracy_prevents_stop(tmp_path):
-    # A sibling attempt already produced a valid gsm8k result; the deciding attempt's own RESULT_DIR is empty.
-    runs_baseline = tmp_path / "runs" / "baseline"
-    good = runs_baseline / "786a793e" / "measure_round"
-    _write_gsm8k_results(good, 0.9128)
-    deciding = runs_baseline / "retry2_bootsafe"
-    deciding.mkdir(parents=True, exist_ok=True)
-
-    executor = BaselineExecutor()
-    rec = SharedState(enablement_mode="off")
-    result = {
-        "status": "succeeded",
-        "run_eval_disabled": False,
-        "output_dir": str(deciding),
-    }
-    executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx("vllm", rec), result)
-
-    assert rec.stop_reason == ""
-    assert result["accuracy"] == pytest.approx(0.9128)
-    assert rec.baseline_accuracy == pytest.approx(0.9128)
-    assert "baseline_accuracy_salvaged_from_sibling_attempt" in result.get("nonfatal_warnings", [])
-
-
-def test_an_unreachable_server_does_not_discard_a_salvaged_under_floor_accuracy(tmp_path):
-    """A salvaged score is a real verdict; the unreachable short-circuit must not eat it.
-
-    The short-circuit exists because a broken measurement says nothing about accuracy.
-    But the salvage runs first, and a sibling round that DID reach a verdict can supply
-    one. Returning on the marker alone throws that away, so a genuinely under-floor
-    model anchors nothing and the run continues with no verdict at all.
-    """
-    # Enablement is what puts a real floor under the score: without it any positive
-    # accuracy counts as usable and the salvage returns before this branch is reached.
-    runs_baseline = tmp_path / "runs" / "baseline"
-    _write_gsm8k_results(runs_baseline / "786a793e" / "measure_round", 0.12)
-    deciding = runs_baseline / "retry2_bootsafe"
-    deciding.mkdir(parents=True, exist_ok=True)
-
-    executor = BaselineExecutor()
-    rec = SharedState(enablement_mode="eval")
-    result = {
-        "status": "failed",
-        "run_eval_disabled": False,
-        "output_dir": str(deciding),
-        # Verbatim shape: the client's request is refused first, and only then does
-        # run_eval report a non-zero exit -- so both markers are present.
-        "error": (
-            "aiohttp.client_exceptions.ClientConnectorError: Cannot connect to host 0.0.0.0:41099\n"
-            "ERROR: run_eval failed with exit code 1\n"
-        ),
-    }
-    executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx("vllm", rec), result)
-
-    assert result["accuracy"] == pytest.approx(0.12)
-    assert result.get("baseline_eval_failed") is True, "the salvaged under-floor score must still be stamped"
-
-
-def test_salvage_uses_a_warmup_score_when_it_is_the_only_one(tmp_path):
-    """A warmup-round eval is a valid accuracy source, so the run must not stop."""
-    runs_baseline = tmp_path / "runs" / "baseline"
-    _write_gsm8k_results(runs_baseline / "786a793e" / "warmup_round", 0.9)
-    deciding = runs_baseline / "retry2_bootsafe"
-    deciding.mkdir(parents=True, exist_ok=True)
-
-    reason = _stopped(
-        "vllm",
-        {"status": "succeeded", "run_eval_disabled": False, "output_dir": str(deciding)},
-    )
-    assert reason == ""
-
-
-def test_the_double_run_handoff_is_not_reported_as_a_recovery(tmp_path, caplog):
-    """Every healthy double-run baseline reads its accuracy from the warmup round."""
+def test_the_eval_reader_prefers_a_measured_rounds_file_over_a_warmups(tmp_path):
     attempt = tmp_path / "runs" / "baseline" / "786a793e"
-    _write_gsm8k_results(attempt / "warmup_round", 0.9128)
-    deciding = attempt / "measure_round"
-    deciding.mkdir(parents=True, exist_ok=True)
-
-    executor = BaselineExecutor()
-    rec = SharedState(enablement_mode="off")
-    result = {"status": "succeeded", "run_eval_disabled": False, "output_dir": str(deciding)}
-    with caplog.at_level(logging.INFO, logger=_ACCURACY_LOGGER):
-        executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx("vllm", rec), result)
-
-    assert rec.stop_reason == ""
-    assert result["accuracy"] == pytest.approx(0.9128)
-    assert not [r for r in caplog.records if r.levelno >= logging.WARNING and "salvag" in r.getMessage()]
-    assert any("cold-start guard" in r.getMessage() for r in caplog.records)
-    assert "baseline_accuracy_salvaged_from_sibling_attempt" not in result.get("nonfatal_warnings", [])
-
-
-def test_an_unexpected_gap_is_still_reported_as_a_salvage(tmp_path, caplog):
-    """A retry attempt reading another attempt's score is a recovery, and says so."""
-    runs_baseline = tmp_path / "runs" / "baseline"
-    _write_gsm8k_results(runs_baseline / "786a793e" / "measure_round", 0.9128)
-    deciding = runs_baseline / "retry2_bootsafe"
-    deciding.mkdir(parents=True, exist_ok=True)
-
-    executor = BaselineExecutor()
-    rec = SharedState(enablement_mode="off")
-    result = {"status": "succeeded", "run_eval_disabled": False, "output_dir": str(deciding)}
-    with caplog.at_level(logging.INFO, logger=_ACCURACY_LOGGER):
-        executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx("vllm", rec), result)
-
-    assert any(r.levelno == logging.WARNING and "salvaged" in r.getMessage() for r in caplog.records)
-    assert "baseline_accuracy_salvaged_from_sibling_attempt" in result.get("nonfatal_warnings", [])
-
-
-def test_salvage_prefers_a_measured_round_over_a_warmup(tmp_path):
-    """The warmup is a fallback, not a substitute: a real round still wins."""
-    runs_baseline = tmp_path / "runs" / "baseline"
-    _write_gsm8k_results(runs_baseline / "786a793e" / "warmup_round", 0.10)
-    _write_gsm8k_results(runs_baseline / "786a793e" / "measure_round", 0.90)
-    deciding = runs_baseline / "retry2_bootsafe"
-    deciding.mkdir(parents=True, exist_ok=True)
+    _write_gsm8k_results(attempt / "warmup_round", 0.10)
+    _write_gsm8k_results(attempt / "measure_round", 0.90)
 
     from hyperloom.orchestrator.actions.executors._accuracy_gate import parse_eval_results
 
-    parsed = parse_eval_results(runs_baseline, framework="vllm")
+    parsed = parse_eval_results(attempt, framework="vllm")
     assert parsed["accuracy"] == pytest.approx(0.90)
 
 
@@ -522,3 +408,235 @@ def test_scriptable_baseline_without_a_quality_gate_stops_instead_of_enablement(
     stop_line = next(r.getMessage() for r in caplog.records if "stopping run" in r.getMessage())
     assert "quality_gate" in stop_line
     assert str(report) in stop_line
+
+
+# --- the ruling reads the attempt's own result, never a results file outside it ---
+def _attempt_beside_a_scored_one(tmp_path: Path) -> Path:
+    """A single-round attempt's directory, next to an earlier attempt whose measured round scored 0.93."""
+    runs_baseline = tmp_path / "runs" / "baseline"
+    _write_gsm8k_results(runs_baseline / "786a793e" / "measure_round", 0.93)
+    deciding = runs_baseline / "retry2_bootsafe"
+    deciding.mkdir(parents=True)
+    return deciding
+
+
+def _measured_round_beside_a_scored_warmup(tmp_path: Path) -> Path:
+    """A pair's measured round directory, next to a warm-up round directory that holds a 0.93 results file."""
+    attempt = tmp_path / "runs" / "baseline" / "786a793e"
+    _write_gsm8k_results(attempt / "warmup_round", 0.93)
+    deciding = attempt / "measure_round"
+    deciding.mkdir(parents=True)
+    return deciding
+
+
+_SCORED_OUTSIDE_THE_RESULT = pytest.mark.parametrize(
+    "output_dir",
+    [_attempt_beside_a_scored_one, _measured_round_beside_a_scored_warmup],
+    ids=["by_another_attempt", "in_the_pairs_warmup_directory"],
+)
+
+
+def _ruled(
+    output_dir: Path, *, enablement_mode: str, accuracy: float | None = None, reference: float = 0.0
+) -> tuple[dict, SharedState]:
+    """Rule a succeeded genuine baseline whose result carries ``accuracy``, in a session that holds ``reference``."""
+    state = SharedState(enablement_mode=enablement_mode, baseline_accuracy=reference)
+    result = {"status": "succeeded", "run_eval_disabled": False, "output_dir": str(output_dir)}
+    if accuracy is not None:
+        result["accuracy"] = accuracy
+    BaselineExecutor()._maybe_stop_on_missing_baseline_accuracy(_stop_ctx("vllm", state), result)
+    return result, state
+
+
+@_SCORED_OUTSIDE_THE_RESULT
+@pytest.mark.parametrize("reference", [0.0, 0.81], ids=["first_baseline", "session_holds_a_reference"])
+def test_a_baseline_without_a_score_stops_whatever_was_scored_outside_its_result(tmp_path, output_dir, reference):
+    result, state = _ruled(output_dir(tmp_path), enablement_mode="off", reference=reference)
+
+    assert state.stop_reason == "baseline_accuracy_failed"
+    assert "accuracy" not in result
+    assert "nonfatal_warnings" not in result
+    assert state.baseline_accuracy == reference
+
+
+@_SCORED_OUTSIDE_THE_RESULT
+def test_a_baseline_without_a_score_is_an_eval_failure_whatever_was_scored_outside_its_result(tmp_path, output_dir):
+    result, state = _ruled(output_dir(tmp_path), enablement_mode="eval", reference=0.81)
+
+    assert state.stop_reason == ""
+    assert result[BASELINE_EVAL_FAILED_KEY] is True
+    assert result[BASELINE_EVAL_FAILURE_KIND_KEY] == EVAL_KIND_ACCURACY_UNAVAILABLE
+    assert result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] is None
+    assert "accuracy" not in result
+    assert state.baseline_accuracy == 0.81
+
+
+@pytest.mark.parametrize(
+    ("enablement_mode", "measured", "stop_reason"),
+    [
+        ("off", 0.0, "baseline_accuracy_failed"),
+        ("eval", 0.0, ""),
+        ("eval", DEFAULT_ENABLEMENT_ACCURACY_FLOOR / 2, ""),
+    ],
+    ids=["zero_stops", "zero_is_an_eval_failure", "under_the_floor_is_an_eval_failure"],
+)
+def test_a_baseline_is_ruled_on_the_unusable_score_it_measured(tmp_path, enablement_mode, measured, stop_reason):
+    result, state = _ruled(_attempt_beside_a_scored_one(tmp_path), enablement_mode=enablement_mode, accuracy=measured)
+
+    assert state.stop_reason == stop_reason
+    assert result["accuracy"] == measured
+    assert result.get(BASELINE_EVAL_OBSERVED_ACCURACY_KEY) == (measured if enablement_mode == "eval" else None)
+    assert state.baseline_accuracy == 0.0
+
+
+@pytest.mark.parametrize("enablement_mode", ["off", "eval"])
+def test_an_eval_that_never_reached_the_server_is_neither_stopped_nor_an_eval_failure(
+    tmp_path, monkeypatch, enablement_mode
+):
+    """A refused connection is a broken measurement: it carries no verdict, and no other attempt's score fills in."""
+    state = SharedState(enablement_mode=enablement_mode, baseline_accuracy=0.81)
+    played = {
+        "status": "failed",
+        "run_eval_disabled": False,
+        "output_dir": str(_attempt_beside_a_scored_one(tmp_path)),
+        # The client's request is refused first, and only then does run_eval report a non-zero exit.
+        "error": (
+            "aiohttp.client_exceptions.ClientConnectorError: Cannot connect to host 0.0.0.0:41099\n"
+            "ERROR: run_eval failed with exit code 1\n"
+        ),
+    }
+    executor = BaselineExecutor()
+
+    async def run_pass(ctx, *, recorder=None):
+        return played
+
+    monkeypatch.setattr(executor, "_run_pass", run_pass)
+    result = _run(executor._run_with_accuracy(_stop_ctx("vllm", state)))
+
+    assert state.stop_reason == ""
+    assert BASELINE_EVAL_FAILED_KEY not in result
+    assert "accuracy" not in result
+    assert result["nonfatal_warnings"] == ["eval_failed_server_unreachable"]
+    assert state.baseline_accuracy == 0.81
+
+
+# --- a bench that measured, then an eval that left no score ----------------
+def _bench_then_eval(error_class: str, error: str = "the eval exited with code 1") -> dict:
+    """The result of a pair whose measured bench stands and whose eval, run after it, stopped at ``error_class``."""
+    return {
+        "status": "succeeded",
+        "output_throughput": 4701.6,
+        "run_eval_disabled": False,
+        "nonfatal_warnings": ["post_measure_accuracy_failed"],
+        "accuracy_stage": {"status": "failed", "error_class": error_class, "error": error, "workspace": "/w/run"},
+    }
+
+
+def _ruled_after_its_pass(played: dict, *, enablement_mode: str, params: dict | None = None):
+    """Rule on ``played`` as ``_run_with_accuracy`` does once the attempt's rounds returned it."""
+    state = SharedState(enablement_mode=enablement_mode, baseline_accuracy=0.81)
+    executor = BaselineExecutor()
+
+    async def run_pass(ctx, *, recorder=None):
+        return played
+
+    executor._run_pass = run_pass
+    result = _run(executor._run_with_accuracy(_stop_ctx("vllm", state, params)))
+    assert result is played
+    assert (result["status"], result["output_throughput"]) == ("succeeded", 4701.6)
+    return result, state
+
+
+def test_a_failed_eval_after_the_bench_stops_a_genuine_baseline_and_keeps_its_bench():
+    result, state = _ruled_after_its_pass(_bench_then_eval("eval_failed"), enablement_mode="off")
+
+    assert state.stop_reason == "baseline_accuracy_failed"
+    assert result["accuracy_source"] == "eval_unavailable"
+    assert "eval_failed_no_fallback_baseline_requires_accuracy" in result["nonfatal_warnings"]
+    assert BASELINE_EVAL_FAILED_KEY not in result
+
+
+def test_a_failed_eval_after_the_bench_goes_to_enablement_as_a_runtime_failure_with_the_evals_own_error():
+    result, state = _ruled_after_its_pass(_bench_then_eval("eval_failed"), enablement_mode="eval")
+
+    assert state.stop_reason == ""
+    assert result[BASELINE_EVAL_FAILED_KEY] is True
+    assert result[BASELINE_EVAL_FAILURE_KIND_KEY] == "eval_runtime_failure"
+    assert result[BASELINE_EVAL_EVIDENCE_KEY] == "the eval exited with code 1"
+    assert result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] is None
+
+
+def test_a_failed_eval_after_the_bench_of_a_candidate_neither_stops_the_run_nor_opens_enablement():
+    """A kernel re-baseline, a stack validation: the caller's accuracy gate rules on the missing score."""
+    played = _bench_then_eval("eval_failed")
+    result, state = _ruled_after_its_pass(played, enablement_mode="eval", params={"quality_ref_exempt": True})
+
+    assert state.stop_reason == ""
+    assert BASELINE_EVAL_FAILED_KEY not in result
+    assert result["accuracy_source"] == "eval_unavailable"
+    assert "accuracy" not in result
+
+
+_STOPPED_EVAL_CLASSES = pytest.mark.parametrize("error_class", ["round_timeout", "server_died", "server_stalled"])
+
+
+@_STOPPED_EVAL_CLASSES
+def test_an_eval_stopped_after_the_bench_stops_a_genuine_baseline_as_a_missing_score(error_class):
+    result, state = _ruled_after_its_pass(_bench_then_eval(error_class, "stopped"), enablement_mode="off")
+
+    assert state.stop_reason == "baseline_accuracy_failed"
+    assert result["nonfatal_warnings"] == ["post_measure_accuracy_failed"]
+    assert "accuracy_source" not in result
+
+
+@_STOPPED_EVAL_CLASSES
+def test_an_eval_stopped_after_the_bench_goes_to_enablement_as_an_unavailable_score(error_class):
+    result, state = _ruled_after_its_pass(_bench_then_eval(error_class, "stopped"), enablement_mode="eval")
+
+    assert state.stop_reason == ""
+    assert result[BASELINE_EVAL_FAILURE_KIND_KEY] == EVAL_KIND_ACCURACY_UNAVAILABLE
+    assert result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] is None
+
+
+@pytest.mark.parametrize("enablement_mode", ["off", "eval"])
+def test_an_eval_the_run_itself_stopped_after_the_bench_is_not_ruled_on_accuracy(enablement_mode):
+    """The session's clock kept the eval from finishing, which is no verdict on the baseline's accuracy."""
+    played = _bench_then_eval("session_time_exhausted", "stopped")
+    result, state = _ruled_after_its_pass(played, enablement_mode=enablement_mode)
+
+    assert state.stop_reason == ""
+    assert BASELINE_EVAL_FAILED_KEY not in result
+    assert result["nonfatal_warnings"] == ["post_measure_accuracy_failed"]
+    assert state.baseline_accuracy == 0.81
+
+
+@pytest.mark.parametrize(("enablement_mode", "stop_reason"), [("off", "baseline_accuracy_failed"), ("eval", "")])
+def test_an_eval_that_never_reached_the_server_after_the_bench_is_a_missing_score(enablement_mode, stop_reason):
+    """A refused connection is no verdict of the eval: the bench is ruled like any result without a score."""
+    refused = "aiohttp.client_exceptions.ClientConnectorError: Cannot connect to host 0.0.0.0:41099"
+    played = _bench_then_eval("eval_failed")
+    played["nonfatal_warnings"].append(refused)
+    result, state = _ruled_after_its_pass(played, enablement_mode=enablement_mode)
+
+    assert state.stop_reason == stop_reason
+    assert result["nonfatal_warnings"][-1] == "eval_failed_server_unreachable"
+    assert "eval_failed_no_fallback_baseline_requires_accuracy" not in result["nonfatal_warnings"]
+    assert result.get(BASELINE_EVAL_FAILURE_KIND_KEY) == (EVAL_KIND_ACCURACY_UNAVAILABLE if not stop_reason else None)
+
+
+@pytest.mark.parametrize("enablement_mode", ["off", "eval"])
+def test_a_baseline_standing_on_its_cold_warmup_is_not_ruled_on_accuracy(enablement_mode):
+    """The budget refused the round that evaluates, so the anchor has no score: that is no accuracy failure."""
+    cold = {
+        "status": "succeeded",
+        "output_throughput": 4701.6,
+        "run_eval_disabled": True,
+        "nonfatal_warnings": ["baseline_measure_round_dropped_low_budget"],
+        "measure_round_dropped": {"priced_by": "session_hot_pass", "expected_cost_sec": 400.0},
+    }
+    result, state = _ruled_after_its_pass(cold, enablement_mode=enablement_mode)
+
+    assert state.stop_reason == ""
+    assert BASELINE_EVAL_FAILED_KEY not in result
+    assert result["nonfatal_warnings"] == ["baseline_measure_round_dropped_low_budget"]
+    assert state.baseline_accuracy == 0.81

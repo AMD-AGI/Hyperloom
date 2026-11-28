@@ -11,12 +11,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, Mapping, NamedTuple
 
-import yaml
-
 from ...stop_attribution import StoppedByTheRun
 from .._accuracy_gate import ACCURACY_DEFINITION_DIGEST_KEY, EVAL_DEFINITION_DIGEST_KEY
 from ..grid._grid_runner import stopped_by_the_run
 from ..serving._server_argv import ConfigUnreadable, config_point
+from .._suite.held_test import HeldPass
 from .._suite.rounds import SuiteRoute
 from inference_suite.contracts import RunLayout
 
@@ -35,8 +34,6 @@ MEASURE_ROUND_DROPPED_WARNING = "baseline_measure_round_dropped_low_budget"
 _WARMUP_ROUND_DIR = "warmup_round"
 _MEASURE_ROUND_DIR = "measure_round"
 _DOUBLE_RUN_ROUND_DIRS = (_WARMUP_ROUND_DIR, _MEASURE_ROUND_DIR)
-#: The staged accuracy pass's slot, run on the server the measured pass leaves hot.
-_ACCURACY_ROUND_DIR = "accuracy_round"
 
 
 def _config_framework(config_path: Path | str) -> str:
@@ -167,17 +164,6 @@ def _cold_anchor_from_warmup(
     return warmup_result
 
 
-def _set_materialized_run_eval(config_path: Path, *, enabled: bool) -> None:
-    """Set the effective eval mode after lifecycle eligibility is known."""
-    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    benchmark = cfg.setdefault("benchmark", {})
-    benchmark.setdefault("envs", {})["RUN_EVAL"] = "true" if enabled else "false"
-    config_path.write_text(
-        yaml.safe_dump(cfg, sort_keys=False),
-        encoding="utf-8",
-    )
-
-
 def _should_establish_quality_ref(task_kind: str | None, params: dict[str, Any] | None = None) -> bool:
     """Only a genuine ``baseline`` task may establish/overwrite the quality reference."""
     if str(task_kind or "") != "baseline":
@@ -199,9 +185,28 @@ EVAL_SCORE_KEYS = (
 )
 
 
-def carry_eval_score(result: dict[str, Any], scored: Mapping[str, Any]) -> None:
-    """Copy the score ``record_eval_score`` wrote on ``scored`` into ``result``."""
-    result.update({key: scored[key] for key in EVAL_SCORE_KEYS if scored.get(key) is not None})
+#: What a measured round records when the eval after its bench failed: the result keeps the bench.
+ACCURACY_STAGE_KEY = "accuracy_stage"
+_POST_MEASURE_ACCURACY_FAILED = "post_measure_accuracy_failed"
+
+
+def record_failed_eval(result: dict[str, Any], stage: Mapping[str, Any]) -> None:
+    """Record on ``result``, a bench that measured, the ``stage`` its eval failed at."""
+    result[ACCURACY_STAGE_KEY] = dict(stage)
+    warnings = result.setdefault("nonfatal_warnings", [])
+    if _POST_MEASURE_ACCURACY_FAILED not in warnings:
+        warnings.append(_POST_MEASURE_ACCURACY_FAILED)
+
+
+def carry_eval_score(result: dict[str, Any], scored: Mapping[str, Any]) -> dict[str, Any]:
+    """Hand ``result`` what the eval of ``scored`` left, the round of its attempt that ran it, and return ``result``.
+
+    That is whether the round evaluated, and its score or the stage its eval failed at.
+    """
+    result.update({key: scored[key] for key in ("run_eval_disabled", *EVAL_SCORE_KEYS) if scored.get(key) is not None})
+    if stage := scored.get(ACCURACY_STAGE_KEY):
+        record_failed_eval(result, stage)
+    return result
 
 
 def record_eval_score(result: dict[str, Any], eval_data: Mapping[str, Any]) -> bool:
@@ -221,18 +226,6 @@ def record_eval_score(result: dict[str, Any], eval_data: Mapping[str, Any]) -> b
 
 def _requested_framework(params: dict[str, Any]) -> str | None:
     return str(params.get("framework") or "").strip() or os.environ.get("FRAMEWORK", "").strip() or None
-
-
-def _is_double_run_accuracy_handoff(
-    result: dict[str, Any],
-    salvaged: dict[str, Any] | None,
-) -> bool:
-    """Whether accuracy came from the warmup round because that is the design."""
-    out_dir = str((result or {}).get("output_dir") or "")
-    if not out_dir or Path(out_dir).name != _MEASURE_ROUND_DIR:
-        return False
-    source = str((salvaged or {}).get("source_file") or "")
-    return _WARMUP_ROUND_DIR in Path(source).parts
 
 
 _LOG_NAMES = ("benchmark_stderr.log", "benchmark_stdout.log", "server.log")
@@ -278,8 +271,8 @@ class BenchmarkAttempt:
 
 
 class _BenchmarkRound(NamedTuple):
+    #: The attempt's materialized config, which every round of the attempt runs.
     config_path: Path
-    materialized_config_path: Path
     output_dir: Path
     ctx_extra: Mapping[str, Any]
     framework: str
@@ -287,7 +280,8 @@ class _BenchmarkRound(NamedTuple):
     capture_meta: dict[str, Any]
     timeout_sec: int
     session_deadline_sec: Any
-    server_already_ready: bool
+    #: The round's place in the test that holds its server; ``None`` for a round that owns its own.
+    held: HeldPass | None
     run_eval_disabled: bool
 
 

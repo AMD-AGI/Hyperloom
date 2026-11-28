@@ -156,14 +156,14 @@ def test_mapping_form_args_pass_the_grid_argv_gate():
 
 def test_a_variants_experience_citations_survive_its_rebuild_into_a_derived_variant():
     from hyperloom.orchestrator.actions.executors.explore_prefilter.grid_payload import grid_variants_from_payload
-    from hyperloom.orchestrator.actions.executors.grid._explore_variants import decision_fields, variant_with_eval_off
+    from hyperloom.orchestrator.actions.executors.grid._explore_variants import decision_fields, staged_variant
 
     citation = {"id": "exp-" + "1" * 32, "stance": "adopt", "claim": "Kept on the same model."}
     [variant] = grid_variants_from_payload(
         [{"name": "v", "extra_args": "--x 1", "reasoning": "why", "experience_citations": [citation]}]
     )
 
-    assert decision_fields(variant_with_eval_off(variant)) == {
+    assert decision_fields(staged_variant(variant, {"STACK_ENV": "1"}, [])) == {
         "note": "why",
         "reasoning_origin": "action_payload.reasoning",
         "experience_citations": [citation],

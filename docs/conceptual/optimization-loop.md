@@ -114,7 +114,12 @@ PRELUDE establishes the session baseline:
    `--no-target-advisory` disables prompt hints, not the final comparison.
    External references never change Objective, scoring, or KEEP/REVERT.
 2. `baseline` measures the starting throughput and records the benchmark
-   invocation needed to reproduce it.
+   invocation needed to reproduce it. On a single node a served fixed
+   workload is tested in two rounds on one server: a bench that boots the
+   server and is discarded, then the measured bench, which the accuracy eval
+   follows. Every later test of a candidate runs in the same order, so a
+   candidate and the anchor it is graded against are measured on a server no
+   eval has loaded.
 3. `roofline` or `profile` captures the first performance analysis.
    `roofline` is the preferred composite path when enabled; it wraps
    profiling, trace analysis, and `analysis.md` snapshot publication.

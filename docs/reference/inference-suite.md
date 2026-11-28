@@ -273,6 +273,11 @@ A round holds its server in one of four modes:
 | `reuse` | Runs against the server `pid_dir` records, once it has shown it owns that server (`reuse_not_owned` otherwise). |
 | `external` | Runs the client only, against a server something else starts and stops. Multi-node rounds and rounds given a `BENCHMARK_BASE_URL` use it. |
 
+A round runs its load and then, when its config enables it, the accuracy eval.
+`hyperloom optimize` tests a single-node fixed workload in a `boot` round whose
+load is discarded and which runs no eval, then a `reuse` round whose load is the
+measurement and which the eval follows.
+
 Before `own` or `boot` starts a server, the round refuses a port something already
 listens on (`port_in_use`) and GPUs that `amd-smi` does not list or that another
 process holds (`gpus_unavailable`, naming each GPU, its amd-smi card and its holder; a

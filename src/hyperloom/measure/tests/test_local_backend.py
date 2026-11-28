@@ -33,6 +33,7 @@ from hyperloom.measure.tests.run_dirs import write_run_dir
 from hyperloom.orchestrator.actions.executors import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
+    GridLaunch,
     PatchedServer,
     VariantResult,
 )
@@ -166,11 +167,11 @@ def test_a_single_point_test_is_one_run_grid_call_with_one_variant(grid, unheld,
     assert outcome.sandbox.backend == "local"
 
 
-@pytest.mark.parametrize(("plan", "expected"), [(None, None), (0, False), (1, True)])
-def test_the_warmup_plan_reaches_run_grid_as_it_was_stated(grid, unheld, tmp_path, plan, expected):
+@pytest.mark.parametrize("plan", [None, 0, 1])
+def test_a_test_whose_server_cannot_be_held_is_left_to_run_grid_whatever_warmup_it_plans(grid, unheld, tmp_path, plan):
     _run(_call(tmp_path, rounds=RoundPlan(warmup_rounds=plan)))
 
-    assert grid.calls[0]["launch"].warmup_before_measure is expected
+    assert [c["launch"] for c in grid.calls] == [GridLaunch()]
 
 
 def test_a_discarded_warmup_round_is_reported_as_its_own_round(grid, tmp_path):
@@ -326,7 +327,6 @@ def test_the_rounds_of_a_graded_test_share_one_server_that_its_last_round_reclai
         {**held, "cleanup": True},
     ]
     assert [c["launch"].server_already_ready for c in grid.calls] == [False, True, True], "one boot, in the warmup"
-    assert all(c["launch"].warmup_before_measure is False for c in grid.calls), "run_grid does not warm up"
     assert not any(c["launch"].lifecycle_boot_only for c in grid.calls), "every round runs its client"
     assert [c["recipe"].base.extra_envs for c in grid.calls] == [
         {"RUN_EVAL": "false"},
@@ -749,7 +749,7 @@ def test_an_agentx_test_is_measured_once_with_no_warmup_round_before_it(monkeypa
 
     (kwargs,) = grid.calls
     assert kwargs["grid"][0].name == "test"
-    assert kwargs["launch"].warmup_before_measure is False and not kwargs["launch"].server_already_ready
+    assert not kwargs["launch"].server_already_ready
     assert [r.phase for r in outcome.rounds] == ["measure"]
 
 
@@ -762,7 +762,7 @@ def test_a_graded_test_on_a_framework_that_cannot_hold_a_server_evaluates_in_its
     outcome = _run(_graded_call(tmp_path))
 
     (kwargs,) = grid.calls
-    assert kwargs["grid"][0].name == "test" and kwargs["launch"].warmup_before_measure is True
+    assert kwargs["grid"][0].name == "test"
     assert kwargs["launch"].server_lifecycle is None and kwargs["recipe"].base.extra_envs is None
     assert [r.phase for r in outcome.rounds] == ["measure", "accuracy"]
     assert outcome.rounds[1].accuracy[0].score == 0.64
@@ -1058,7 +1058,6 @@ def test_a_sweep_boots_the_server_once_and_measures_the_levels_from_high_to_low_
     assert {(_lifecycle(c)["pid_dir"], _lifecycle(c)["port"]) for c in grid.calls} == {
         (str(tmp_path / "out" / "server_arm"), 8123)
     }
-    assert all(c["launch"].warmup_before_measure is False for c in grid.calls)
     assert [r.point for r in outcome.rounds] == [1, 0 + 2, 0]  # c8, c4, c2 by their positions in the call
     assert len(server.teardowns) == 1
 
@@ -1641,7 +1640,7 @@ def test_a_profile_test_is_one_profiled_round_with_no_warmup_before_it(grid, tmp
 
     (kwargs,) = grid.calls
     assert [v.name for v in kwargs["grid"]] == ["test"]
-    assert kwargs["launch"].warmup_before_measure is False, "a profiled round is not a statistic: no warmup before it"
+    assert kwargs["launch"] == GridLaunch(), "a profiled round is not a statistic: run_grid warms no profiled point"
     assert outcome.returncode == 0 and [r.phase for r in outcome.rounds] == ["measure"]
 
 
@@ -1807,7 +1806,7 @@ def test_an_agentx_profile_test_is_one_profiled_round_that_turns_the_profiler_on
     outcome = _run(_call(tmp_path, point, kind="profile", rounds=RoundPlan(warmup_rounds=1)))
 
     (kwargs,) = grid.calls
-    assert kwargs["launch"].warmup_before_measure is False and grid.configs[0] == yaml.safe_load(point.read_text())
+    assert grid.configs[0] == yaml.safe_load(point.read_text())
     assert outcome.returncode == 0
     assert (tmp_path / "out" / "profile" / "torch_trace" / capture / "rank0.pt.trace.json.gz").is_file()
 
@@ -1878,7 +1877,7 @@ def test_a_repro_test_boots_the_server_runs_the_case_against_it_and_reports_the_
 
     (kwargs,) = grid.calls
     assert [v.name for v in kwargs["grid"]] == ["repro"]
-    assert kwargs["launch"].lifecycle_boot_only is True and kwargs["launch"].warmup_before_measure is False
+    assert kwargs["launch"].lifecycle_boot_only is True
     assert kwargs["recipe"].base.extra_envs == BOOT_ENVS, "the repro boot is not an evaluation"
     assert kwargs["launch"].server_lifecycle["cleanup"] is False and kwargs["launch"].server_lifecycle["port"] == 8123
     assert (tmp_path / "case-ran").read_text() == "http://127.0.0.1:8123 /models/m\n"
@@ -1893,7 +1892,7 @@ def test_a_repro_test_runs_no_warmup_even_when_the_call_plans_one(grid, server, 
 
     _run(_repro_call(tmp_path, rounds=RoundPlan(warmup_rounds=1)))
 
-    assert [c["launch"].warmup_before_measure for c in grid.calls] == [False]
+    assert [(c["grid"][0].name, c["launch"].lifecycle_boot_only) for c in grid.calls] == [("repro", True)]
 
 
 @pytest.mark.parametrize(

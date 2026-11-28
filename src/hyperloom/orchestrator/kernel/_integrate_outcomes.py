@@ -16,7 +16,7 @@ from ..actions.executors._kernel_agent_tool import (
     _maybe_finalize_kernel_patch,
     _maybe_revert_kernel_patch,
 )
-from ..actions.stop_attribution import stopped_by_the_run_class
+from ..actions.stop_attribution import SESSION_TIME_EXHAUSTED_CLASS, STOPPED_BY_THE_RUN, stopped_by_the_run_class
 from ._integrate_payload import _integrate_mode, _is_paired_gemm_measurement, _preapplied_snapshot_payload
 from .keep_thresholds import STACK_INCREMENTAL_KEEP_THRESHOLD_PCT
 from .patch_lifecycle import cleanup_verdict as _cleanup_verdict
@@ -83,11 +83,19 @@ def _unmeasured_integration_failure(
     apply_result: dict[str, Any],
     bench_result: Any,
 ) -> HandlerResult:
-    rebaseline_error_class = (
-        str((bench_result or {}).get("error_class") or "").strip() if isinstance(bench_result, dict) else ""
-    ) or "bench_exception"
+    """The failure of a re-baseline that left no measured bench of the patch.
+
+    A re-baseline standing on its discarded warm-up is one the run stopped: the session's clock kept its measured
+    round from finishing, and the warm-up's figure is no measurement to grade the patch on.
+    """
+    left = bench_result if isinstance(bench_result, dict) else {}
+    rebaseline_error_class = str(left.get("error_class") or "").strip() or "bench_exception"
     # A run the stop class claims measured nothing, so the patch has no verdict to answer for.
-    stopped = stopped_by_the_run_class(rebaseline_error_class)
+    stopped = (
+        STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS]
+        if left.get("measure_round_dropped")
+        else stopped_by_the_run_class(rebaseline_error_class)
+    )
     verdict = (
         _FailureVerdict(stopped.error_class, stopped.interrupted, "NEEDS_REVIEW")
         if stopped is not None

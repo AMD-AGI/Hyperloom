@@ -70,7 +70,6 @@ ANCHORING_BASELINE_STATUSES = frozenset({"succeeded", "degraded"})
 ROUND_SINGLE = "single"
 ROUND_WARMUP = "warmup"
 ROUND_MEASURE = "measure"
-ROUND_ACCURACY = "accuracy"
 
 # Where the recorded ``framework_args`` came from. The ordinary answer is
 # ``launch_extra_server_args``, including when the string is empty -- a
@@ -114,7 +113,6 @@ __all__ = [
     "EVENT_KIND",
     "EVENT_TYPE",
     "PRODUCER",
-    "ROUND_ACCURACY",
     "ROUND_MEASURE",
     "ROUND_SINGLE",
     "ROUND_WARMUP",

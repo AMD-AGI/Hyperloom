@@ -236,6 +236,280 @@ round, and that search is removed:
   multi-node it also no longer writes a merged `gpu_metrics.csv` at the top of
   those files; each round's run directory still gets its own.
 
+### Required: the accuracy eval runs after the measured bench
+
+On a single node, `hyperloom optimize` tests a served fixed workload in two
+rounds on one server: a bench that boots the server and is discarded, then the
+measured bench. The accuracy eval now runs after the measured bench, in the
+measured round, and never in the discarded one. This holds for a genuine
+baseline and its retries, a PRELUDE warm replay, the KERNEL stack validation,
+the KERNEL integrate re-baseline, the FRAMEWORK integrate bench and an EXPLORE
+variant. In 1.2.x the eval ran in the discarded round, before the measured
+bench; the integrate bench ran it in both rounds, and the KERNEL re-baseline
+ran it in a third round after a second load. An eval before the measured bench
+left the server's KV pool filled, so the measured bench read lower, and a
+KERNEL candidate measured on a server no eval had touched was graded against
+an anchor measured after one.
+
+* **Throughput shifts once.** Every figure a single-node fixed-workload
+  session measures is now taken on a server no eval has loaded. A session's
+  anchor and its candidates move together. Do not resume a session started on
+  an earlier build: its anchor was measured after an eval, and the candidates
+  measured after the upgrade would be graded against it. Do not compare
+  sessions, reports or Recipe KB records taken before and after the upgrade.
+  Multi-node sessions do not move: their discarded pass still runs the eval
+  before the measured pass. AgentX, MLPerf and scriptable workloads, profiled
+  rounds and concurrency sweeps run the rounds they ran, with two exceptions
+  for an MLPerf point: a specialist's rebench of it (see *allow a specialist's
+  rebench two benches* below), and a warm replay of it, which is still refused
+  (`yaml_build_error`: the harness scores an MLPerf point inline, so the eval
+  a replay forces has no round to run in) but now by its measured round,
+  after the discarded bench ran; it used to be refused before any round.
+* The integrate bench runs the eval once, in its measured round; it ran it
+  twice.
+* The KERNEL integrate re-baseline evaluates every candidate in its measured
+  round. It used to evaluate only a candidate whose throughput cleared the
+  KEEP gate, in a third round that repeated the load. Its task directory has
+  no `accuracy_round/`, and its result no longer carries `accuracy_stage` with
+  `status: succeeded` or `skipped`. The task parameters
+  `defer_accuracy_until_after_measure`, `post_measure_accuracy_min_tput` and
+  `post_measure_accuracy_keep_policy` are no longer read. Every candidate
+  now pays for an eval: a re-baseline is a boot, two loads and an eval,
+  where a candidate below the KEEP gate cost a boot and two loads, so fewer
+  candidates fit a KERNEL budget when the eval is long.
+* A KERNEL candidate whose measured round did not run to its end gets no
+  verdict. The re-baseline is now held to the budget check a baseline's
+  measured round is, at the price of the session's last measured round with
+  its eval. When the session cannot pay for the round, or its clock stops
+  the round, the integrate request fails with `decision: NEEDS_REVIEW` and
+  `error_class: session_time_exhausted`, the patch is reverted, and
+  `rebaseline_detail` carries the re-baseline's result with
+  `measure_round_dropped`. In 1.2.x the round was not checked against the
+  budget: it ran into the session clock, and a candidate the clock stopped
+  there was graded on its discarded bench, which usually read as a REVERT.
+  A candidate the session has time to measure but not to evaluate is no
+  longer measured.
+* An EXPLORE variant's decision round evaluates and its warm-up round does
+  not (`eval.enabled: false` in the `config.yaml` of the warm-up's run
+  directory). The eval's results file lies under the decision round's run
+  directory (`vNN_<name>/variant_00_<name>/`), no longer under
+  `vNN_<name>/warmup_round/`.
+* An eval that fails after the measured bench leaves the bench standing. The
+  attempt's result is `succeeded` with its throughput, carries
+  `accuracy_stage` (`status: failed`, the eval's `error_class` and `error`,
+  and the run directory as `workspace`) and `post_measure_accuracy_failed` in
+  `nonfatal_warnings`, and has no `accuracy`. In 1.2.x the eval failed the
+  warm-up round and the attempt with it (`baseline_warmup_round_failed`),
+  before any measured bench ran. What follows depends on the caller:
+  * A genuine baseline whose eval exited non-zero (`eval_failed`) is ruled as
+    an eval failure, as before: with `--enablement eval` or `all` on a single
+    node it is recorded with `baseline_eval_failure_kind:
+    eval_runtime_failure` and not promoted; otherwise the run stops with
+    `stop_reason: baseline_accuracy_failed`. In the second case the baseline
+    is now promoted with its throughput and no accuracy reference, where it
+    used to be a failed baseline.
+  * A genuine baseline whose eval was stopped by the round's cap, or whose
+    server died during the eval, is ruled like any baseline without a score:
+    recorded as an eval failure of kind `accuracy_unavailable` and not
+    promoted, or the run stops with `baseline_accuracy_failed`.
+    `accuracy_stage.error_class` names the stop (`round_timeout`, a
+    server-death class). In 1.2.x the same stop ended the warm-up round, and
+    the attempt ended under that class.
+  * A genuine baseline whose eval the session clock stopped
+    (`accuracy_stage.error_class: session_time_exhausted`) is not ruled on
+    accuracy: the run's own stop is neither an eval failure nor a reason for
+    `baseline_accuracy_failed`. The baseline is promoted with its throughput
+    and leaves `baseline_accuracy: 0.0` in `state.json`. In 1.2.x the clock
+    stopped the warm-up round and the attempt ended as
+    `session_time_exhausted` with no baseline.
+  * A warm replay has no result without its score, so its bench does not
+    stand: the replay fails under the eval's class (`eval_failed`, or
+    `session_time_exhausted` when the session clock stopped the eval) and is
+    rolled back, as a replay whose eval failed was in 1.2.x.
+  * A KERNEL re-baseline is graded on its throughput, and a KEEP-eligible
+    candidate ends `NEEDS_REVIEW` in a session that holds an accuracy
+    reference, as one whose third round failed did.
+  * An integrate bench or EXPLORE variant keeps its row
+    (`nonzero_rc_after_complete_protocol:1` in its warnings) and its accuracy
+    gate rules on the missing score (`accuracy_unavailable`). One whose eval
+    the session clock stopped is skipped and stays out of the ledger, as a
+    round the clock stops anywhere is.
+* A baseline that kept its cold warm-up figure
+  (`baseline_measure_round_dropped_low_budget`) carries no accuracy and has
+  `run_eval_disabled: true`: the round the budget refused is the one that
+  evaluates. It used to carry the warm-up's score. It is not ruled on
+  accuracy: it neither stops the run nor is recorded as an eval failure, and
+  an enablement revalidation that ends this way leaves its window open for
+  another revalidation (recorded as a window the run stopped). Once promoted
+  it leaves `baseline_accuracy: 0.0` in `state.json`. PRELUDE still retries a
+  cold anchor or closes on it (`baseline_anchor: cold`).
+* A warm replay keeps no cold warm-up figure. When the budget refuses its
+  measured round, or the session clock stops that round, the replay ends
+  `failed` with `error_class: session_time_exhausted` (and the gate's
+  evidence as `budget_shortfall` when the round was refused) and is rolled
+  back. In 1.2.x it kept the warm-up's figure with the warm-up's score and
+  was judged on them.
+* An eval the round refuses before it starts (`eval_context_too_short`, eval
+  tooling that is not staged) is reported by the measured round, after the
+  discarded bench ran. The warm-up used to report it before it booted.
+* The measured round's wall-clock, which `state.json` keeps as
+  `baseline_warm_runtime_sec` and which prices the next measured round, an
+  EXPLORE decision round and one more variant, now includes the eval. The
+  warm-up's wall-clock no longer does: `baseline_runtime_sec` and
+  `baseline_post_ready_runtime_sec` in `state.json`, and `runtime_sec` and
+  `post_ready_runtime_sec` in the PRELUDE inputs of
+  `session_breakdown.json`, are a boot and a load, and a load. For a
+  workload whose eval is long these drop by most of their value while
+  `baseline_warm_runtime_sec` and `warm_runtime_sec` grow by the same
+  amount; one test of the point costs what it did. Do not compare these
+  fields across the upgrade. A session's first measured round is priced at
+  its warm-up's time after ready, which holds no eval, so that one round can
+  be admitted with less time left than its eval needs: `priced_by` in
+  `measure_round_dropped` reads `warmup_post_ready` (was
+  `warmup_post_ready_less_eval`), and `eval_runtime_sec` is no longer
+  subtracted anywhere.
+* A baseline that kept its warm-up's figure because the measured bench fell
+  more than 25% below it (`baseline_downward_drift_anchor`) now carries the
+  rejected round's wall-clock as `measure_round_runtime_sec`, so
+  `baseline_warm_runtime_sec` is set after such an anchor too. It was `0`,
+  which priced every later measured round at the warm-up's time after ready.
+* CLOSE waits for its full-stack revalidation twice what one test of the
+  point cost the baseline (`baseline_runtime_sec` plus
+  `baseline_warm_runtime_sec`), no less than 600 s. It waited twice
+  `baseline_runtime_sec`, which no longer covers a revalidation whose eval
+  outlasts its boot. A point measured in one round keeps the old wait.
+* A specialist that benches is admitted only when one test of the point and
+  ten minutes of startup fit (`baseline_runtime_sec` plus
+  `baseline_warm_runtime_sec`, plus 10 min), since its rebench runs that
+  test. The floor was `baseline_runtime_sec` plus 10 min.
+* In `session_breakdown.json`, a baseline action has no round row labelled
+  `accuracy`. Its `measure` row carries the eval's figures and
+  `run_eval_disabled: false`; its `warmup` row has `run_eval_disabled: true`
+  and no accuracy.
+* The error lines for an eval-rooted baseline failure read `the accuracy eval
+  failed on a genuine baseline, ...` and `the accuracy eval failed; the
+  attempt is not run again without it.` (they named `InferenceX run_eval`),
+  and the line for an eval that never reached its server ends `it is not
+  ruled on as an eval failure.`
+
+### Required: a baseline takes its accuracy from its own attempt
+
+A benchmark attempt that runs a discarded warm-up round and then a measured
+round on the same server (a genuine baseline, a PRELUDE warm replay, the KERNEL
+stack validation) runs the accuracy eval after its measured bench (see the
+section above). The result the attempt returns carries that round's score. In
+1.2.x the eval ran in the warm-up round, the result of the measured round
+carried no score, and each reader searched the attempt's directory for the
+warm-up's results file. A baseline is no longer given a score found by
+searching the directory above its round: it is ruled on what its own attempt
+measured.
+
+* The result of such an attempt carries `accuracy`, `accuracy_task`,
+  `accuracy_metric`, `accuracy_source`, `accuracy_definition_digest` and
+  `accuracy_eval_kind` of the round that ran the eval. The `measurement` the
+  session breakdown records for the action carries the first four of them;
+  for a warm replay and a stack validation its `accuracy` was `null`.
+  `accuracy_eval_kind` did not appear on such a result before; it is `""` for
+  an `lm-eval` score. The score, and every verdict taken on it, is the one
+  the search found.
+* A warm replay evaluates even when its recipe sets `RUN_EVAL=false`. The
+  round that runs the forced eval, now the measured round, is recorded as one
+  that evaluated: its round row has `run_eval_disabled: false` and its score.
+  In 1.2.x the forced eval ran in the warm-up round, whose row had `true` and
+  no score.
+* A warm replay is judged on the score its result carries; it no longer looks
+  for an `lm-eval` results file under its task directory. `eval_ran` in
+  `warm_replay_outcome` (`state.json`) and in the warm-replay `measurement` of
+  `session_breakdown.json` is `true` when the replay's result carries a score
+  and `false` otherwise. A results file that could not be decoded, or that held
+  no recognised metric, used to give `eval_ran: true` with no score; it now
+  gives `false`. For a replay without a score, `eval_error`, the reason on its
+  accuracy gate row and the log line `warm-replay admitted without an accuracy
+  verdict` read `the replay's result carries no accuracy score`, where they
+  quoted the results-file search (such as `no results*.json in <directory>`).
+  The verdict on a score is unchanged: a collapsed score rejects the replay,
+  and a score taken under another eval definition than the baseline's is no
+  verdict. A replay without a score is admitted and marked as before, now also
+  when a results file lies elsewhere under its task directory; for a
+  multi-node replay that file was its own discarded warm pass's (see below).
+* A genuine baseline whose own attempt left no usable score no longer
+  continues on a score found in the directory above its round. For an attempt
+  of one round (a multi-node, AgentX or scriptable baseline) that directory is
+  `runs/baseline`, so the score could come from any other attempt of the
+  session, and nothing tied it to this attempt's launch. The search also
+  replaced a score the attempt itself measured as zero or below the
+  enablement floor; the baseline is now ruled on the score it measured.
+  Such a baseline takes the route a first baseline without a usable score
+  always took. With `--enablement eval` or `all` on a single node it is
+  recorded as an eval failure and not promoted: a first baseline opens the
+  enablement lane, a re-baseline leaves the anchor and its reference as they
+  were. A re-baseline that used to pass this ruling on the score the search
+  found now leaves what a failed baseline leaves: a `baseline` row in
+  `last_action_failures` (`state.json`, shown to the model each turn), the gap
+  derived from that row, and a `what_failed` entry in the published recipe.
+  Otherwise, and in a multi-node session, the run stops with
+  `stop_reason: baseline_accuracy_failed`; so does a genuine baseline whose
+  eval aborted its round, which another attempt's score used to keep
+  running. The stop line and the round's eval output name the failure to fix.
+  A run that used to continue on another attempt's score now takes one of
+  these two routes.
+* In a multi-node session the searched directory also held the attempt's own
+  discarded warm pass (`mn_warmup`), which runs the same eval as the measured
+  pass, so the score the search found could be that pass's as well as another
+  attempt's. A multi-node attempt is ruled on its measured pass alone, and
+  three outcomes change when that pass has no usable score of its own. A
+  baseline whose measured pass succeeded without one stops the run with
+  `baseline_accuracy_failed`, where the found score let the run continue on
+  it. A baseline whose measured pass was aborted by its eval stops the
+  run on that attempt, where the found score left a failed attempt that was
+  retried. A warm replay whose measured pass left no score is admitted
+  without an accuracy verdict and marked (`eval_ran: false`), where it was
+  judged on its warm pass's score and rejected when that score had collapsed.
+  A multi-node attempt whose measured pass scores is unchanged.
+* A native AgentX baseline whose accuracy round did not run, because it was
+  refused before it started or stopped by the run (the session clock, a
+  shutdown), has no score and is ruled like any baseline without one:
+  recorded as an eval failure and not promoted, with the
+  `last_action_failures` row above, or the run stops with
+  `baseline_accuracy_failed`. That was already the ruling for the first
+  baseline of a session; a later attempt used to pass on the score an earlier
+  attempt's accuracy round had left. `agentx_accuracy_round.error_class` on
+  the result names why the round did not run.
+* The session's accuracy reference (`baseline_accuracy` and its digest in
+  `state.json`) is written only when a baseline is promoted, together with
+  its throughput. Measuring a baseline used to write the score the search
+  found into the session state while the baseline was still running, so a
+  baseline that was not promoted (`anchor_held`, an eval failure, a failed
+  attempt) replaced the reference while the throughput anchor stayed; it now
+  leaves both as they were.
+* `baseline_accuracy_salvaged_from_sibling_attempt` no longer appears in a
+  result's `nonfatal_warnings`. Every log line that names a salvage or a
+  sibling attempt is gone: `cold-start guard — reading accuracy=... from the
+  warmup round`, `salvaged a measured baseline accuracy=... from a sibling
+  attempt`, `eval-rooted baseline failure, but salvaged a valid baseline
+  accuracy=... from a sibling attempt (...); not stopping the run` and
+  `eval-rooted baseline failure and the sibling attempt measured
+  accuracy=... (...); stopping the run`. The warning for an eval failure that
+  goes to enablement reads `eval-rooted failure; routing to enablement
+  (RUN_EVAL stays on).`
+* A promoted baseline that scored nothing leaves the session without an
+  accuracy reference: `baseline_accuracy` is `0.0` and
+  `baseline_accuracy_definition_digest` is empty in `state.json`. The score
+  and digest of the anchor it replaced used to stay beside the new
+  `baseline_tput`. A re-baseline whose eval left no score reaches this when
+  the run stops with `stop_reason: baseline_accuracy_failed` (`--enablement
+  off` or `launch`, or a multi-node session) and it is promoted: it measured
+  higher than the anchor, it is an enablement revalidation, or it corrects a
+  cold anchor. Its throughput becomes the anchor as before, and the reference
+  is dropped with the anchor it belonged to. One that is not promoted
+  (`anchor_held`) leaves the anchor and its reference as they were. A session
+  resumed after a promoted one stopped the run grades candidates on
+  throughput alone, as it does after a first baseline that stopped the same
+  way; it used to grade them against the score of the previous stack. With
+  `--enablement eval` or `all` on a single node such a re-baseline is recorded
+  as an eval failure and not promoted, so the anchor and its reference stay
+  as they were.
+
 ### Recommended: drop `INFERENCE_OPTIMIZER_RESCUE_PATHS` and `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC`
 
 Both are no longer read and are silently ignored. Since 1.2.0 the first has
@@ -284,6 +558,205 @@ own harness has a `benchmark_report.json` per replayed point under
 files out. They stay in the session directory. A round's `report.json`,
 `launch.json`, `config.yaml`, `phase_marks.json` and
 `inferencex_result.json` are collected as before.
+
+### Recommended: drop the EXPLORE pre-filter settings
+
+The opt-in EXPLORE pre-filters are removed: the cross-session measurement
+store, the InferaSim projection, the recording of measured anchors and the
+anchor harvest. A session that set none of their switches measures the same
+variants and reaches the same verdicts as before. Its explore result no longer
+carries `projection`, which was `null` unless the projection was on.
+
+These variables are no longer read and are silently ignored, so drop them:
+
+* `HYPERLOOM_MEASUREMENT_STORE` and `HYPERLOOM_MEASUREMENT_MAX_AGE_DAYS`;
+* `HYPERLOOM_EXPLORE_PROJECTION`, `HYPERLOOM_EXPLORE_PROJECTION_MARGIN_PCT`,
+  `HYPERLOOM_EXPLORE_PROJECTION_CALIBRATED_MARGIN_PCT` and
+  `HYPERLOOM_EXPLORE_PROJECTION_TOP_K`;
+* `HYPERLOOM_INFERASIM_ROOT`, `HYPERLOOM_INFERASIM_MODE`,
+  `HYPERLOOM_INFERASIM_ESTIMATOR`, `HYPERLOOM_INFERASIM_MODEL`,
+  `HYPERLOOM_INFERASIM_WORKLOAD`, `HYPERLOOM_INFERASIM_GPU_ARCH`,
+  `HYPERLOOM_INFERASIM_HBM_GB` and `HYPERLOOM_INFERASIM_SERVING_MODEL`;
+* `HYPERLOOM_INFERASIM_ANCHOR_STORE`, `HYPERLOOM_INFERASIM_ANCHOR`,
+  `HYPERLOOM_INFERASIM_ANCHOR_SCALING`, `HYPERLOOM_INFERASIM_HARVEST`,
+  `HYPERLOOM_INFERASIM_HARVEST_PYTHON`, `HYPERLOOM_INFERASIM_HARVEST_GPUS` and
+  `HYPERLOOM_INFERASIM_HARVEST_TIMEOUT_SEC`.
+
+A session that had set one of the switches now sees this:
+
+* A variant a filter used to drop is benchmarked. The `skipped_dup` reasons
+  `measured_revert_before`, `projection_decisively_slower` and
+  `projection_outranked` no longer occur, and a round takes as long as its
+  whole grid. Nothing replaces the cross-session skip: a launch that REVERTed
+  in an earlier session is measured again in a new one.
+* A round no longer writes `_projection/` or `_anchor_spec/` under its output
+  directory.
+* Hyperloom no longer writes into the anchor-store directory: no
+  `measured/*.json` point from a decision round, no `harvested/*.json`, no
+  index update and no `.harvest-*.lock`. Files already there are left as they
+  are. Tooling outside Hyperloom that read the measured anchors gets no new
+  point from a session.
+* The measurement-store directory is no longer read or written. Its records
+  are left in place and can be deleted.
+* No server is booted for an anchor harvest
+  (`HYPERLOOM_INFERASIM_MODE=benchmark` booted one when the store had no anchor
+  for the regime).
+
+Two packaging changes come with it:
+
+* The `inferasim` extra is removed: drop it from install commands.
+* The wheel no longer ships the projection's workload template,
+  `hyperloom/inference_optimizer/assets/inferasim/inferasim_workload.yaml`.
+
+The multi-node `infera` backend is a different thing and is unchanged.
+
+### Recommended: read a baseline round's config from its run directory
+
+A benchmark attempt that runs a discarded warm-up round and a measured round
+on one server (a genuine baseline, a PRELUDE warm replay, the KERNEL stack
+validation and the KERNEL integrate re-baseline) used to write a copy of its
+config for each round, `warmup_round/baseline_lifecycle.yaml` and
+`measure_round/baseline_lifecycle.yaml`, with a `server_lifecycle` block, a
+pinned `PORT` and that round's `RUN_EVAL`. Neither file is written. Both
+rounds run the attempt's one config, `baseline_config.with_envs.yaml`; which
+round boots the server, the port it answers on and which round evaluates are
+set on the round, and the rounds they produce are the ones they produced.
+
+* If you read `baseline_lifecycle.yaml`, read `config.yaml` in the round's
+  run directory (`warmup_round/suite_run_<n>/`, `measure_round/suite_run_<n>/`)
+  instead: it holds what the round ran, its port and its eval switch included.
+* `baseline_config.with_envs.yaml` of such an attempt now carries the round's
+  cap as `timeout_seconds` and `PYTHONUNBUFFERED: '1'` under `envs`, as the
+  config of a single-round attempt (multi-node, AgentX, a profiled round)
+  already did. The server was started with that variable before; the
+  attempt's `launch_evidence.json` now also lists it in
+  `requested_server_env`, and its `recipe_digest` is the digest of the file
+  with those two values.
+* A single-round attempt no longer looks for a server record in its task
+  directory when it ends; its round stops the server it started, as before.
+  The info line `cold-start double-run not eligible (...)` is no longer
+  logged.
+
+### Recommended: drop `INFERENCE_OPTIMIZER_RUN_GRID_WARMUP` from `hyperloom optimize` launches
+
+The FRAMEWORK integrate bench discards a first bench exactly where a baseline
+does: on a single node, for a served fixed workload that is not profiled.
+There it boots one server, runs the discarded bench, then the measured bench
+and its eval, and stops the server. `hyperloom optimize` no longer reads
+`INFERENCE_OPTIMIZER_RUN_GRID_WARMUP`: set to `0` it used to make the bench a
+single round on a server booted for it, while the baseline the bench is
+graded against was measured on a warmed one.
+
+* Remove the variable from `hyperloom optimize` launches. A launch that set it
+  to `0` now runs the discarded bench: the integrate bench takes one more
+  load, and its row carries `run_grid_warmup_discarded_first` and
+  `warmup_round_tput:<value>` in `nonfatal_warnings`. A launch that left it
+  unset runs the rounds it ran.
+* `hyperloom-multibranch` still reads the variable, as the default of a test
+  whose request names no warm-up count.
+* A variant's two rounds run from its one config,
+  `variant_NN_<name>/config.yaml`. `variant_NN_<name>/warmup_round/config.yaml`
+  is no longer written, and the variant's `config.yaml` no longer carries a
+  `server_lifecycle` block or the port picked for the pair (it keeps a `PORT`
+  the point itself names, which the pair does not run on). Read
+  `config.yaml` in a round's run directory
+  (`variant_NN_<name>/warmup_round/suite_run_<n>/`,
+  `variant_NN_<name>/suite_run_<n>/`) for what the round ran, its port
+  included. The variant's `launch_evidence.json` follows the file: its
+  `requested_server_env` no longer lists the picked `PORT`, and its
+  `recipe_digest` is the digest of the file without the block.
+* A variant whose discarded bench failed (`warmup_round_failed`) leaves a
+  `config.yaml` that carries the round's cap as `timeout_seconds` and
+  `PYTHONUNBUFFERED: '1'`, as one whose measured bench ran always did.
+* The error class `warmup_yaml_build_error` no longer occurs: the variant's
+  config is built once, and a build that fails is `yaml_build_error` or the
+  refusal's own class, as before.
+* The info line `warmup-before-measure not eligible (...)` is no longer
+  logged. Server pids that outlive the stop of the pair's server are logged
+  as `held test: pids ... outlived SIGKILL` (was `grid: pids ...`).
+* On a multi-node host, and for a profiled or scriptable point, a launch
+  that set the variable to `0` runs the rounds it ran, but an integrate bench
+  or an EXPLORE variant there must now have session time for one more round
+  before it starts, as on a launch that left the variable unset.
+
+### Recommended: read an EXPLORE variant's round config from its run directory
+
+An EXPLORE variant whose server can be held (a single node, a served workload
+that is not profiled) runs the rounds it ran: for a fixed workload a
+discarded warm-up bench and then the decision bench with its eval, on one
+server in the variant's directory `vNN_<name>/`; for AgentX one round. Which
+round boots the server, the port it answers on and which round evaluates are
+now set on the round. They are no longer written into the two configs the
+rounds run from.
+
+* `vNN_<name>/warmup_round/variant_00_<name>/config.yaml` and
+  `vNN_<name>/variant_00_<name>/config.yaml` no longer carry a
+  `server_lifecycle` block or the port picked for the variant (each keeps a
+  `PORT` the point itself names, which the rounds do not run on), and the
+  warm-up's file carries the variant's own `RUN_EVAL`, where it used to say
+  `false`. Read `config.yaml` in a round's run directory
+  (`.../warmup_round/variant_00_<name>/suite_run_<n>/`,
+  `.../variant_00_<name>/suite_run_<n>/`) for what the round ran: its
+  `lifecycle`, its `server.port` and `eval.enabled`, which is `false` for
+  the warm-up whatever the variant asks.
+* The `launch_evidence.json` beside each of the two configs follows its file,
+  and so does the `launch_evidence` of the variant's ledger row and of a
+  KEEP: `requested_server_env` no longer lists the picked `PORT`,
+  `recipe_digest` is the digest of the file without the block, and the
+  evidence of a variant whose warm-up failed lists the variant's own
+  `RUN_EVAL`.
+* Every variant is tested on a port of its own. The variants of one EXPLORE
+  round used to share one port, one after the other.
+* An `explore` task's `baseline_double_run` parameter is no longer read.
+  Hyperloom never set it on an `explore` task; a task that carried `false`
+  ran the variant's decision bench on a freshly booted server, without the
+  warm-up the baseline it is graded against had. A variant of a fixed
+  workload whose server can be held now always runs both rounds.
+* A variant's server is stopped once, when the variant ends or before its
+  AgentX accuracy round. Server pids that outlive the stop are logged once,
+  as `held test: pids ... outlived SIGKILL` (was `explore: pids ...`).
+
+### Recommended: allow a specialist's rebench two benches
+
+The optional rebench a GPU specialist can run on its leased cards
+(`python -m hyperloom.orchestrator.specialists.rebench`) now measures the way
+the integrate bench does. On a single node, for a served fixed workload that
+is not profiled, it boots one server on `--port`, runs a bench it discards,
+then the measured bench and the eval the point asks for, and stops the
+server. In 1.2.x it ran one bench on a server booted for it, while the
+integrate bench its figure is compared with was measured on a warmed server.
+The flags and the keys of the JSON result are unchanged, and `port` still
+reports the port the server answered on.
+
+* `output_throughput` and the latency figures are the second bench's. Do not
+  compare a rebench result from before the upgrade with one from after.
+* A rebench takes about two benches of wall time: one boot, as before, and
+  one more load. The specialist prompt says so.
+* `warnings` of a rebench that measured carries
+  `run_grid_warmup_discarded_first` and `warmup_round_tput:<value>`. A rebench
+  whose discarded bench failed is `ok: false` with `status: failed`, carries
+  `run_grid_warmup_round_failed` beside `rebench_failed:<error>` in
+  `warnings`, and names the discarded bench's run directory as `workspace`;
+  its `abort_reason.json` has `error_class: warmup_round_failed`.
+* The discarded bench writes its run directory under
+  `<output>/variant_00_specialist-rebench/warmup_round/`. The variant's
+  `config.yaml` no longer carries a `server_lifecycle` block or `--port` as
+  `PORT` (it keeps a `PORT` the point itself names, which the rounds do not
+  run on); read `config.yaml` in a round's run directory for the port and for
+  which round evaluates. `launch_evidence.json` follows the file: its
+  `requested_server_env` no longer lists that `PORT`, and its `recipe_digest`
+  is the digest of the file without the block.
+* A rebench of an MLPerf point is two harness runs on one server too, as
+  the integrate bench of an MLPerf point is; it was one. The harness takes
+  no warm-up seed, so the discarded run sends the trajectories the measured
+  run sends, and neither runs the eval.
+* A rebench of a point that is measured in one round runs the rounds it ran:
+  one round on a server of its own on `--port` for an AgentX or profiled
+  point, and on a multi-node host the cluster's restart, its discarded pass
+  and its measured pass. The `config.yaml` and `launch_evidence.json` changes
+  above apply there too. On a single node where `BENCHMARK_BASE_URL` is
+  exported, the rebench sends both benches to that server, as the integrate
+  bench does.
 
 ---
 

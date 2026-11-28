@@ -424,7 +424,8 @@ def _lm_eval_accuracy_result(workspace: Path) -> dict[str, Any]:
     result_files: list[Path] = []
     for pattern in search_paths:
         result_files.extend(Path(f) for f in glob.glob(str(pattern), recursive=True))
-    # Prefer a non-warmup round, but fall back to the warmup's eval rather than reporting no accuracy at all.
+    # A measured round's score comes first. Of the discarded rounds only a multi-node warm-up pass evaluates, and
+    # its score stands in when the measured pass left none.
     discarded_warmup_dirs = {"warmup_round", "mn_warmup"}
     measured = [p for p in result_files if discarded_warmup_dirs.isdisjoint(p.relative_to(workspace).parts)]
     result_files = measured or result_files

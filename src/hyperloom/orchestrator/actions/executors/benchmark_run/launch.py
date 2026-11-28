@@ -9,7 +9,7 @@ import asyncio
 import logging
 import os
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -19,7 +19,8 @@ from hyperloom.common.perf_metric import agentx_active
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import BaselineInvocation
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows
-from inference_suite.contracts import FailedStep, LifecycleMode, RunLayout
+from inference_suite import RoundResult
+from inference_suite.contracts import FailedStep, Lifecycle, LifecycleMode, RunLayout
 from ..grid._grid_inputs import sanitize_script_name
 from ..workload._launch_evidence import RequestedLaunch, build_launch_evidence, persist_measurement_evidence
 from ..workload._workload_envs import (
@@ -36,7 +37,8 @@ from ..benchmark_result import (
 from .._failed_step import failed_step_error_class
 from ....state.failure_evidence import with_failure_hint
 from .._round_folder import RoundFolder
-from .._suite.rounds import SuiteRound, SuiteRoundRefused, SuiteRoute, deadline_unix, round_lifecycle, run_suite_round
+from .._suite.held_test import HeldRound, RoundPurpose
+from .._suite.rounds import SuiteRound, SuiteRoundRefused, SuiteRoute, deadline_unix, run_suite_round
 from ..agentx_point import ServerArgvInvalidError
 from .bringup import open_bringup_attempt, read_bringup_log, server_child_elapsed_sec
 from .records import (
@@ -46,6 +48,7 @@ from .records import (
     _BenchProcess,
     _round_post_ready_sec,
     _should_establish_quality_ref,
+    record_failed_eval,
 )
 
 if TYPE_CHECKING:
@@ -173,21 +176,26 @@ def _attempt_options(ctx: RunnerContext, shared_state: Any) -> MaterializeOption
     )
 
 
+def _failed_step_error(measurement: dict[str, Any]) -> tuple[str, str]:
+    """The error class and message of the step the round's report names."""
+    step = measurement["failed_step"]
+    detail = measurement.get("failure_detail") or ""
+    error_class = failed_step_error_class(FailedStep(step), detail)
+    return error_class, redact_secret_values(with_failure_hint(error_class, detail or step))
+
+
 def _suite_round_failure(
     round_: _BenchmarkRound, finished: _BenchProcess, measurement: dict[str, Any], warnings: list[str]
 ) -> dict[str, Any]:
     """The failed result of an inference_suite round: the step it stopped at, or a load that measured nothing."""
-    step = measurement.get("failed_step")
-    if step is not None:
-        detail = measurement.get("failure_detail") or ""
-        error_class = failed_step_error_class(FailedStep(step), detail)
-        error = with_failure_hint(error_class, detail or step)
+    if measurement.get("failed_step") is not None:
+        error_class, error = _failed_step_error(measurement)
     else:
         error_class, error = "invalid_measurement", "the round report holds no positive throughput and served requests"
     return {
         "status": "failed",
         "error_class": error_class,
-        "error": redact_secret_values(error),
+        "error": error,
         "returncode": finished.returncode,
         "run_status": measurement.get("run_status"),
         "output_dir": str(round_.output_dir),
@@ -198,6 +206,16 @@ def _suite_round_failure(
         "nonfatal_warnings": warnings,
         **round_.capture_meta,
     }
+
+
+def _run_round(round_: _BenchmarkRound, route: SuiteRoute, on_poll: Callable[[], None]) -> RoundResult:
+    """Run ``round_`` on ``route``: as its round of the test that holds its server, else on a server of its own."""
+    deadline = deadline_unix(round_.session_deadline_sec)
+    if round_.held is not None:
+        held_round = HeldRound(round_.config_path, round_.output_dir, deadline_unix=deadline)
+        return round_.held.run(route, held_round, on_poll=on_poll)
+    request = SuiteRound(round_.config_path, round_.output_dir, Lifecycle(LifecycleMode.OWN), deadline_unix=deadline)
+    return run_suite_round(route, request, on_poll=on_poll)
 
 
 class _BenchmarkLaunchMixin:
@@ -322,28 +340,17 @@ class _BenchmarkLaunchMixin:
         return None
 
     async def _suite_round_result(
-        self, round_: _BenchmarkRound, route: SuiteRoute, *, warmup: bool, warnings: Sequence[str] = ()
+        self, round_: _BenchmarkRound, route: SuiteRoute, *, warnings: Sequence[str] = ()
     ) -> dict[str, Any]:
         """Run ``round_`` on inference_suite and read the run_dir it wrote into the round's result.
 
         ``warnings`` are what the passes before this round left for its result to carry.
         """
-        # A lone round owns its server; a cold-start warmup boots the one the rounds after it reuse.
-        mode = (
-            LifecycleMode.REUSE if round_.server_already_ready else LifecycleMode.BOOT if warmup else LifecycleMode.OWN
-        )
-        request = SuiteRound(
-            config_path=round_.config_path,
-            round_dir=round_.output_dir,
-            lifecycle=round_lifecycle(round_.output_dir, mode),
-            warmup=warmup,
-            deadline_unix=deadline_unix(round_.session_deadline_sec),
-        )
         attempt_index = open_bringup_attempt(round_.output_dir)
         started_unix = time.time()
         try:
             async with heartbeat_while_output_flows(unit="baseline_round", label="benchmark") as activity:
-                ran = await asyncio.to_thread(run_suite_round, route, request, on_poll=activity.note)
+                ran = await asyncio.to_thread(_run_round, round_, route, activity.note)
         except SuiteRoundRefused as exc:
             log.error("baseline_executor: round refused before it ran: %s", exc)
             return _attempt_failure(exc.error_class, exc, round_.output_dir) | round_.capture_meta
@@ -366,10 +373,22 @@ class _BenchmarkLaunchMixin:
         # The run_dir is where this round's server log and ready stamp are.
         ran_round = round_._replace(watchdog_server_log=str(layout.server_log))
         warnings = [*warnings, *(measurement.pop("nonfatal_warnings", []) or [])]
-        if ran.report.failed_step is not None or not self._measurement_succeeded(measurement):
+        step = ran.report.failed_step
+        # The measured round of a held test evaluates after its bench, so a step that failed after a bench that
+        # measured is the eval's and the bench stands, unless the test must evaluate. Every other round fails on
+        # any failed step.
+        held = round_.held
+        bench_stands = held is not None and held.purpose is RoundPurpose.MEASURE and not held.test.must_evaluate
+        if not self._measurement_succeeded(measurement) or (step is not None and not bench_stands):
             return _suite_round_failure(ran_round, finished, measurement, warnings)
         result = await self._succeeded_round_result(ran_round, finished, measurement, warnings)
-        self._stamp_round_quality(ran_round, result, measurement, warnings)
+        if step is None:
+            self._stamp_round_quality(ran_round, result, measurement, warnings)
+            return result
+        error_class, error = _failed_step_error(measurement)
+        log.warning("baseline_executor: the bench measured and the eval after it failed (%s); the bench stands", error)
+        stage = {"status": "failed", "error_class": error_class, "error": error, "workspace": str(layout.root)}
+        record_failed_eval(result, stage)
         return result
 
     def _record_argv_refusal(self, round_: _BenchmarkRound, attempt_index: int, detail: str) -> None:
@@ -429,7 +448,7 @@ class _BenchmarkLaunchMixin:
             "report_path": str(RunLayout(finished.workspace).report),
             "workspace": str(finished.workspace),
             # Materialized YAML for THIS baseline.
-            "materialized_config": str(round_.materialized_config_path),
+            "materialized_config": str(round_.config_path),
             # The round's wall-clock (success path only).
             "subprocess_runtime_sec": round(finished.runtime_sec, 2),
             # That wall-clock after the boot: the benchmark, and the accuracy eval when this round ran one.
@@ -447,7 +466,7 @@ class _BenchmarkLaunchMixin:
         await asyncio.to_thread(
             _attach_baseline_launch_evidence,
             result,
-            config_path=round_.materialized_config_path,
+            config_path=round_.config_path,
             output_dir=round_.output_dir,
             framework=round_.framework,
         )

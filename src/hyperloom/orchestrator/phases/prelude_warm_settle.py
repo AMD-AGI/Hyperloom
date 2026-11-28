@@ -218,9 +218,11 @@ class _WarmReplaySettleMixin:
         outcome["baseline_accuracy"] = reference
 
         if measured is None:
-            # A measurement that failed is not evidence the config broke the model, so it must not stop the run: the
-            # replay is admitted and the reason it could not be judged is recorded instead. Ran but could not rule is
-            # a verdict of its own: recording a pass here would claim evidence there is none.
+            # A replay whose rounds run no eval (an AgentX point), or whose score the baseline's eval definition
+            # cannot judge, is no evidence the config broke the model, so it must not stop the run: the replay is
+            # admitted and the reason it could not be judged is recorded instead. A replay whose own eval left no
+            # score never gets here: its attempt failed. Ran but could not rule is a verdict of its own: recording a
+            # pass here would claim evidence there is none.
             log.warning(
                 "warm-replay admitted without an accuracy verdict (eval_ran=%s, baseline %.4f): %s",
                 eval_ran,

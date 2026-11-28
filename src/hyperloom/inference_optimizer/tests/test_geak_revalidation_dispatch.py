@@ -17,6 +17,8 @@ from inference_suite.argv import flag_occurrences
 
 from hyperloom.orchestrator.actions.executors.grid._grid_runner import GridVariant, GridRecipe
 from hyperloom.orchestrator.actions.executors._proposal_identity import BaseControls, effective_fingerprint
+from hyperloom.orchestrator.actions.executors._suite.held_test import RoundPurpose
+from hyperloom.orchestrator.actions.executors.serving import _server_lifecycle
 from hyperloom.orchestrator.actions.executors.serving._server_lifecycle import GpuHandoff
 from hyperloom_common.proctree import REAP_MARK_ENV
 from hyperloom.orchestrator.actions.executors._subprocess_kill import run_with_session_kill
@@ -308,9 +310,8 @@ async def test_geak_launch_controls_reach_materialized_rebench(
 
     monkeypatch.setattr(explore, "run_grid", capture_grid)
     monkeypatch.setattr(explore, "effective_fingerprint", observe_fingerprint)
-    monkeypatch.setattr(explore, "teardown_variant_server", lambda *_args: [])
     # One cold decision round, so the single capture is the materialized rebench.
-    monkeypatch.setattr(explore, "resolve_lifecycle_params", lambda _path: {"eligible": False})
+    monkeypatch.setattr(_server_lifecycle, "resolve_lifecycle_params", lambda _path: {"eligible": False})
     result = await ExploreExecutor(session_dir=coordinator.session_dir)(
         SimpleNamespace(task=task, extra={"shared_state": state})
     )
@@ -399,8 +400,7 @@ async def test_a_rebench_the_executor_reverts_on_the_keep_threshold_refuses_the_
         ]
 
     monkeypatch.setattr(explore, "run_grid", below_the_keep_threshold)
-    monkeypatch.setattr(explore, "teardown_variant_server", lambda *_args: [])
-    monkeypatch.setattr(explore, "resolve_lifecycle_params", lambda _path: {"eligible": False})
+    monkeypatch.setattr(_server_lifecycle, "resolve_lifecycle_params", lambda _path: {"eligible": False})
     result = await ExploreExecutor(session_dir=coordinator.session_dir)(
         SimpleNamespace(task=task, extra={"shared_state": state})
     )
@@ -1237,7 +1237,6 @@ async def test_internal_stack_rebench_preserves_baseline_script(
         return [VariantResult(variant.name, variant.extra_server_args, dict(variant.extra_envs), status="failed")]
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.run_grid", capture_grid)
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.teardown_variant_server", lambda *_args: [])
     await ExploreExecutor(session_dir=coordinator.session_dir)(
         SimpleNamespace(task=task, extra={"shared_state": state})
     )
@@ -1245,7 +1244,7 @@ async def test_internal_stack_rebench_preserves_baseline_script(
     assert len(calls) == 1
     assert calls[0][1]["benchmark_script"] == "sglang_custom.sh"
     assert "runner_type" not in calls[0][1]
-    assert calls[0][0]["launch"].server_lifecycle is not None
+    assert calls[0][0]["launch"].held.purpose is RoundPurpose.WARMUP
 
 
 @pytest.mark.asyncio

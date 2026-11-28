@@ -89,6 +89,6 @@ async def test_a_round_of_a_point_that_names_no_timeout_runs_under_the_executors
         ctx=SimpleNamespace(extra={}),
     )
 
-    await executor._run_single_benchmark(attempt, config_path=config, output_dir=tmp_path / "round")
+    await executor._run_single_benchmark(attempt, output_dir=tmp_path / "round")
 
     assert seen["timeout_seconds"] == attempt.timeout_sec

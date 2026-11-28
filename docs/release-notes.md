@@ -195,8 +195,101 @@ it.
   GPUs, and it was off by default. `HYPERLOOM_EXPLORE_SCREEN` and its
   `_MARGIN_PCT`, `_GPUS`, `_MODEL`, `_LAYERS`, `_ATTENTION_BACKEND` and
   `_TIMEOUT_SEC` settings are no longer read, and no variant is skipped as
-  `screen_decisively_slower`. The measurement store and the InferaSim
-  projection are unchanged, and so is a run that never set the switch.
+  `screen_decisively_slower`. A run that never set the switch is unchanged.
+- **The EXPLORE measurement store and InferaSim projection are removed.** The
+  two opt-in pre-filters that 1.2.0 added behind `HYPERLOOM_MEASUREMENT_STORE`
+  and `HYPERLOOM_EXPLORE_PROJECTION=1` are gone, and with them the recording of
+  measured anchors into `HYPERLOOM_INFERASIM_ANCHOR_STORE`, the anchor harvest
+  that booted a server in benchmark mode, the `inferasim` extra, and the
+  workload template the wheel shipped as
+  `hyperloom/inference_optimizer/assets/inferasim/inferasim_workload.yaml`.
+  Their 21 `HYPERLOOM_MEASUREMENT_*`, `HYPERLOOM_EXPLORE_PROJECTION*` and
+  `HYPERLOOM_INFERASIM_*` settings are no longer read. Every variant of a round
+  is benchmarked: none is skipped as `measured_revert_before`,
+  `projection_decisively_slower` or `projection_outranked`, and a launch that
+  REVERTed in an earlier session is measured again. A round writes no
+  `_projection/` or `_anchor_spec/` directory, and nothing is read from or
+  written to a measurement-store or anchor-store directory; what those
+  directories hold is left as it is. A run that never set a switch measures
+  the same variants and reaches the same verdicts; its explore result no
+  longer carries `projection` (always `null` there), and a decision round that
+  REVERTs on performance no longer hashes the directories on its launch's
+  `PYTHONPATH`, which it did with the store unset whenever the session had
+  recorded an image digest and an engine version. See
+  [Upgrade](reference/upgrade.md).
+- **The accuracy eval runs after the measured bench.** A single-node test of
+  a served fixed workload runs a discarded bench that boots the server and
+  then the measured bench on it; the eval now follows the measured bench, in
+  that round, for the baseline, a PRELUDE warm replay, the KERNEL stack
+  validation and integrate re-baseline, the FRAMEWORK integrate bench and an
+  EXPLORE variant. It used to run in the discarded round, before the measured
+  bench (twice in the integrate bench, and in a third round after a second
+  load in the KERNEL re-baseline), which left the server's KV pool filled for
+  the measured bench and graded a KERNEL candidate measured without an eval
+  against an anchor measured after one. **Breaking:** every throughput such a
+  session measures shifts once; a session started on an earlier build must
+  not be resumed, and sessions, reports and Recipe KB records from before and
+  after are not comparable. Multi-node sessions, AgentX, MLPerf, scriptable
+  and profiled rounds and concurrency sweeps run the rounds they ran, except
+  that a warm replay of an MLPerf point is refused after its discarded bench
+  instead of before it. An eval that fails or is stopped after the measured
+  bench no longer fails a baseline, a stack validation or a KERNEL
+  re-baseline: the result keeps its throughput and carries `accuracy_stage`
+  (`status: failed`) and `post_measure_accuracy_failed`, and the missing score
+  takes the route a baseline without a score takes (an eval failure under
+  `--enablement eval` or `all`, else `baseline_accuracy_failed`), unless the
+  session clock stopped the eval, which is not ruled on accuracy. A warm
+  replay has no result without its score: it fails and is rolled back when
+  its eval fails, and when the budget or the clock keeps its measured round
+  from finishing. A baseline that kept its cold warm-up figure carries no
+  accuracy and is not ruled on it. The KERNEL re-baseline evaluates every
+  candidate, so each costs one more eval; it writes no `accuracy_round/`, no
+  longer reads `defer_accuracy_until_after_measure`,
+  `post_measure_accuracy_min_tput` or `post_measure_accuracy_keep_policy`,
+  and a candidate whose measured round the budget refused or the clock
+  stopped ends `NEEDS_REVIEW` with `session_time_exhausted` instead of being
+  graded on its discarded bench. In `state.json`, `baseline_runtime_sec` and
+  `baseline_post_ready_runtime_sec` no longer include the eval and
+  `baseline_warm_runtime_sec` now does; CLOSE's wait for its stack
+  revalidation and a benching specialist's admission floor are sized on the
+  two together. The baseline timeline has no `accuracy` round row, and
+  `priced_by` reads `warmup_post_ready` where it read
+  `warmup_post_ready_less_eval`. See [Upgrade](reference/upgrade.md).
+- **A baseline takes its accuracy from its own attempt.** A genuine baseline,
+  a PRELUDE warm replay and the KERNEL stack validation run a discarded
+  warm-up round and a measured round on one server, and the measured round
+  runs the accuracy eval. The result the attempt returns carries that round's
+  `accuracy`, `accuracy_task`, `accuracy_metric`, `accuracy_source`,
+  `accuracy_definition_digest` and `accuracy_eval_kind`; the measured round's
+  result used to carry none, and each reader searched the attempt's directory
+  for the warm-up's results file. An attempt whose score is usable is judged
+  as before. The round of a warm replay that evaluates is recorded as one
+  that evaluated even when its recipe sets `RUN_EVAL=false`, and the replay is judged on the
+  score its result carries: `eval_ran` in `warm_replay_outcome` is `true`
+  exactly when there is one, and a replay without one is still admitted and
+  marked, with `eval_error` reading `the replay's result carries no accuracy
+  score`. A genuine baseline whose own attempt left no usable score no longer
+  continues on a score found under another attempt of the session, and a score
+  it measured as zero or below the enablement floor is no longer replaced by
+  one: with `--enablement eval` or `all` on a single node it is recorded as an
+  eval failure and not promoted, otherwise the run stops with
+  `baseline_accuracy_failed`. A native AgentX baseline whose accuracy round
+  was refused or stopped by the session clock is ruled the same way, also
+  when an earlier attempt scored. In a multi-node session the score found
+  could also be that of the attempt's own discarded warm pass: a multi-node
+  baseline is ruled on its measured pass alone and stops the run when that
+  pass has no usable score or its eval aborted it, and a multi-node warm
+  replay whose measured pass left no score is admitted without a verdict
+  where its warm pass's score used to judge it. The warning
+  `baseline_accuracy_salvaged_from_sibling_attempt` is gone. Measuring a
+  baseline no longer writes the session's accuracy reference; promoting it
+  does, so a baseline that is not promoted (`anchor_held`, an eval failure, a
+  failed attempt) leaves the reference with the anchor it was measured with. A
+  promoted baseline that scored nothing leaves no accuracy reference
+  (`baseline_accuracy: 0.0`, empty digest), where the score of the anchor it
+  replaced used to stay under the new throughput; a session resumed after such
+  a re-baseline stopped the run with `baseline_accuracy_failed` grades
+  candidates on throughput alone. See [Upgrade](reference/upgrade.md).
 - **A session reads its GPU from the machine; no board table is kept.** Every
   start and resume reads the visible cards and prints the one it runs on (`GPU
   card        : AMD Instinct MI325X (gfx942, 304 CUs, 262128 MiB, 2100 MHz)`).
@@ -266,8 +359,7 @@ it.
   required, and a `trace_analyze` request with no GPU type fails with
   `gpu_label_missing`. A custom workload no longer looks for `custom_mi355x.sh`
   when nothing names the machine. `MLPERF_AGENTIC_HARDWARE` defaults to the
-  session's GPU type. An InferaSim projection with no GPU to price is refused,
-  and its HBM capacity defaults to the card's memory.
+  session's GPU type.
 - **Recipe KB borrows across GPU types only between rows that record the same
   `gfx_arch`** and topology suffix, locally and remotely. Rows written before
   this release match only their own GPU type until a session on it writes them
@@ -329,6 +421,50 @@ it.
   `summary.txt`.** No round writes either file; a round's `report.json`,
   `launch.json`, `config.yaml`, `phase_marks.json` and
   `inferencex_result.json` are collected as before. See
+  [Upgrade](reference/upgrade.md).
+- **A baseline's warm-up and measured rounds run from one config.** The
+  attempt no longer writes `warmup_round/baseline_lifecycle.yaml` and
+  `measure_round/baseline_lifecycle.yaml`; each round's `config.yaml` in its
+  run directory still records what it ran. The attempt's
+  `baseline_config.with_envs.yaml` now carries the round's cap and
+  `PYTHONUNBUFFERED`, as a single-round attempt's did, so its
+  `launch_evidence.json` lists that variable. The rounds themselves are
+  unchanged. See [Upgrade](reference/upgrade.md).
+- **The integrate bench discards a first bench exactly where a baseline
+  does.** On a single node, for a served fixed workload that is not profiled,
+  the FRAMEWORK integrate bench boots one server, runs a discarded bench, then
+  the measured bench and its eval. `hyperloom optimize` no longer reads
+  `INFERENCE_OPTIMIZER_RUN_GRID_WARMUP`, which set to `0` made the bench one
+  round on a cold server; `hyperloom-multibranch` still reads it as the
+  default of a test that names no warm-up count. Both rounds run from the
+  variant's one `config.yaml`: `warmup_round/config.yaml` is no longer
+  written, the variant's `config.yaml` carries no `server_lifecycle` block or
+  picked `PORT` (each round's `config.yaml` in its run directory records
+  them), its `launch_evidence.json` follows, and the error class
+  `warmup_yaml_build_error` no longer occurs. See
+  [Upgrade](reference/upgrade.md).
+- **An EXPLORE variant's rounds run on one held test.** The variant's
+  warm-up and decision rounds are the rounds they were, on a port picked for
+  the variant instead of one port for the whole EXPLORE round. The two
+  `config.yaml` files the rounds run from carry no `server_lifecycle` block
+  or picked `PORT`, and the warm-up's carries the variant's own `RUN_EVAL`
+  (each round's `config.yaml` in its run directory records the port and that
+  the warm-up does not evaluate); `launch_evidence.json` and the
+  `launch_evidence` of ledger rows follow. An `explore` task's
+  `baseline_double_run` parameter, which Hyperloom never set, is no longer
+  read. See [Upgrade](reference/upgrade.md).
+- **A specialist's rebench measures the way the integrate bench does.** On a
+  single node, for a served fixed workload that is not profiled,
+  `python -m hyperloom.orchestrator.specialists.rebench` boots one server on
+  `--port`, runs a bench it discards, then the measured bench and its eval; it
+  ran one bench on a cold server, so its figure was not comparable with the
+  gate's. It takes about two benches of wall time, `output_throughput` is the
+  second bench's, and `warnings` gains `run_grid_warmup_discarded_first` and
+  `warmup_round_tput:<value>` (`run_grid_warmup_round_failed` when the
+  discarded bench failed). Flags and result keys are unchanged. The variant's
+  `config.yaml` carries no `server_lifecycle` block or `--port` as `PORT`.
+  An MLPerf point is tested in two harness runs, as at the integrate bench;
+  multi-node, AgentX and profiled points run the rounds they ran. See
   [Upgrade](reference/upgrade.md).
 
 ## Hyperloom 1.2.0 release

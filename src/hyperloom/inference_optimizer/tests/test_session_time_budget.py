@@ -166,6 +166,27 @@ class TestTheCostIsAnchoredOnWhatThisSessionMeasured:
         )
 
 
+class TestABenchingSpecialistIsAdmittedWithRoomForOneTestOfThePoint:
+    """Its rebench runs the point's test: for a point that warms up, a discarded bench and a measured round."""
+
+    _BENCHES = {"mode": "patch", "bench": True}
+
+    def test_a_point_that_warms_up_reserves_both_rounds_of_its_test(self):
+        state = SharedState(baseline_runtime_sec=1500.0, baseline_warm_runtime_sec=3000.0)
+
+        assert time_budget.specialist_admission_minutes(state, self._BENCHES) == pytest.approx(75.0 + 10.0)
+
+    def test_a_point_measured_in_one_round_reserves_that_round(self):
+        state = SharedState(baseline_runtime_sec=4200.0, baseline_post_ready_runtime_sec=3600.0)
+
+        assert time_budget.specialist_admission_minutes(state, self._BENCHES) == pytest.approx(70.0 + 10.0)
+
+    def test_a_specialist_that_does_not_bench_reserves_no_round(self):
+        state = SharedState(baseline_runtime_sec=1500.0, baseline_warm_runtime_sec=3000.0)
+
+        assert time_budget.specialist_admission_minutes(state, {"mode": "patch"}) == 60.0
+
+
 class TestFitDecision:
     """The pure fit rule, independent of any Coordinator."""
 

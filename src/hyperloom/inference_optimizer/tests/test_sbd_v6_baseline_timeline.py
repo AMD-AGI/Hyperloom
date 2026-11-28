@@ -13,7 +13,6 @@ import pytest
 
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     PRODUCER,
-    ROUND_ACCURACY,
     ROUND_MEASURE,
     ROUND_SINGLE,
     ROUND_WARMUP,
@@ -257,7 +256,7 @@ def test_rounds_that_start_in_the_same_second_keep_the_order_they_ran_in(tmp_pat
     recorder = _recorder()
     recorder.begin_run()
     same_second = "2026-09-02T15:07:09+00:00"
-    for label in (ROUND_WARMUP, ROUND_MEASURE, ROUND_ACCURACY):
+    for label in (ROUND_WARMUP, ROUND_MEASURE):
         recorder.record_round(
             round_=BaselineRound(
                 label=label,
@@ -270,7 +269,7 @@ def test_rounds_that_start_in_the_same_second_keep_the_order_they_ran_in(tmp_pat
     recorder.finish(_measured())
 
     rounds = _actions(tmp_path)[0]["runs"][0]["rounds"]
-    assert [row["label"] for row in rounds] == [ROUND_WARMUP, ROUND_MEASURE, ROUND_ACCURACY]
+    assert [row["label"] for row in rounds] == [ROUND_WARMUP, ROUND_MEASURE]
     # The ordinal that fixed the order is recording-side bookkeeping and does not reach the wire; the array's own
     # order carries it.
     assert all("ordinal" not in row for row in rounds)
@@ -506,7 +505,6 @@ async def test_the_executor_records_the_rounds_it_actually_ran(tmp_path: Path) -
                     recorder=recorder,
                 ),
                 label=label,
-                config_path=Path("/cfg.yaml"),
                 output_dir=tmp_path / label,
             )
         return _measured()
@@ -839,22 +837,27 @@ def test_a_missing_accuracy_stop_without_enablement_stamps_is_still_recorded(tmp
     assert _events(tmp_path)[0]["ext"]["anchoring_eval"]["status"] == "failed"
 
 
-def test_an_eval_failure_carries_accuracy_stage_when_present(tmp_path: Path) -> None:
+def test_a_measured_bench_whose_eval_failed_keeps_its_figures_and_carries_the_accuracy_stage(tmp_path: Path) -> None:
+    """The eval runs after the measured bench, in the same round: its failure leaves the throughput standing."""
+    stage = {
+        "status": "failed",
+        "error_class": "eval_failed",
+        "error": "the eval exited with code 1",
+        "workspace": "/w/measure_round/suite_run_0",
+    }
     recorder = _recorder()
-    recorder.finish(
-        _eval_failed(
-            accuracy_stage={
-                "status": "failed",
-                "error_class": "subprocess_nonzero",
-                "workspace": "/w/accuracy_round",
-            }
-        )
-    )
+    recorder.finish(_measured(accuracy_stage=stage, nonfatal_warnings=["post_measure_accuracy_failed"]))
 
-    stage = _actions(tmp_path)[0]["eval_failure"]["accuracy_stage"]
-    assert stage["status"] == "failed"
-    assert stage["error_class"] == "subprocess_nonzero"
-    assert stage["workspace"] == "/w/accuracy_round"
+    action = _actions(tmp_path)[0]
+    assert action["status"] == "failed"
+    assert action["measurement"]["output_throughput"] == pytest.approx(15630.28)
+    assert action["accuracy_stage"] == stage
+    assert action["eval_failure"]["kind"] == "accuracy_unavailable"
+    assert action["eval_failure"]["accuracy_stage"] == {
+        "status": "failed",
+        "error_class": "eval_failed",
+        "workspace": "/w/measure_round/suite_run_0",
+    }
 
 
 def test_a_succeeded_baseline_projects_anchoring_eval_on_the_event(tmp_path: Path) -> None:

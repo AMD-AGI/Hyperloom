@@ -543,8 +543,8 @@ class TestIntegrateHandlerHonoursStateDefault:
         assert captured["shared_state"].baseline_tput == 1000.0
         assert captured["shared_state"].baseline_config_path == "/tmp/base.yaml"
         assert captured["params"]["extra_envs"] == {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"}
-        assert captured["params"]["defer_accuracy_until_after_measure"] is True
-        assert captured["params"]["post_measure_accuracy_min_tput"] == pytest.approx(1010.0)
+        assert captured["params"]["quality_ref_exempt"] is True
+        assert not [name for name in captured["params"] if "accuracy" in name]
         assert "env_only" in result["advisory"]
 
 

@@ -88,15 +88,15 @@ class _RoundAttempt(NamedTuple):
 
 
 class _VariantRounds(NamedTuple):
-    """The config one variant's rounds share, the server they were given, and the time they are granted.
+    """The config one variant's rounds share, whether a discarded bench precedes its measured one, and the time they
+    are granted.
 
     ``benchmark_timeout_sec`` is sized from ``cfg_path`` and not from the variant spec,
     because that config is where every layer of the launch env has already landed.
     """
 
     cfg_path: Path
-    lifecycle: dict[str, Any]
-    auto_warmup: bool
+    warms_up: bool
     mn_effective_args: str
     benchmark_timeout_sec: float
 

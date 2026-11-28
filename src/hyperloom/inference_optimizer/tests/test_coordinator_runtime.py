@@ -1399,6 +1399,88 @@ async def test_promote_baseline_revalidation_reanchors_below_prior(session_dir):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("task_params", "measured"),
+    [({}, 1500.0), ({"reason": "enablement_eval_revalidation"}, 1200.0)],
+    ids=["higher_rebaseline", "lower_revalidation"],
+)
+async def test_a_promoted_baseline_without_a_score_leaves_no_accuracy_reference(session_dir, task_params, measured):
+    """The reference moves with the anchor: the score of the anchor it replaces does not stay under the new one."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.baseline_tput = 1400.0
+        c.shared_state.baseline_accuracy = 0.81
+        c.shared_state.baseline_accuracy_definition_digest = "sha256:" + "a" * 64
+        task = Task(
+            task_id="t-unscored",
+            kind="baseline",
+            state="queued",
+            params=task_params,
+            idempotency_key="idem-t-unscored",
+        )
+        await c.writeback.promote_to_shared_state("baseline", {"output_throughput": measured}, task=task)
+        assert c.shared_state.last_baseline["decision"] == "promoted"
+        assert c.shared_state.baseline_tput == pytest.approx(measured)
+        assert (c.shared_state.baseline_accuracy, c.shared_state.baseline_accuracy_definition_digest) == (0.0, "")
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("enablement_mode", "stop_reason", "anchor_and_reference"),
+    [
+        ("off", "baseline_accuracy_failed", (1500.0, 0.0, "")),
+        ("all", "", (1400.0, 0.81, "sha256:" + "a" * 64)),
+    ],
+    ids=["the_stop_drops_the_reference_with_the_anchor", "an_eval_failure_moves_neither"],
+)
+async def test_a_rebaseline_whose_eval_left_no_score_never_pairs_its_anchor_with_the_old_reference(
+    session_dir, monkeypatch, enablement_mode, stop_reason, anchor_and_reference
+):
+    """The executor's ruling, then the write-back that settles its result as the dispatcher does."""
+    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+
+    for name in ("HYPERLOOM_AGENTX", "HYPERLOOM_AGENTIC_BACKEND", "HYPERLOOM_BENCHMARK_CONFIG"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        state = c.shared_state
+        state.enablement_mode = enablement_mode
+        state.baseline_tput = 1400.0
+        state.baseline_accuracy = 0.81
+        state.baseline_accuracy_definition_digest = "sha256:" + "a" * 64
+        executor = BaselineExecutor(session_dir=session_dir, shared_state=state)
+
+        async def run_pass(ctx, **kwargs):
+            return {
+                "status": "succeeded",
+                "valid_measurement": True,
+                "output_throughput": 1500.0,
+                "completed_requests": 100,
+            }
+
+        monkeypatch.setattr(executor, "_run_pass", run_pass)
+        task = _mk_task("baseline", "t-unscored")
+        result = await executor._run_with_accuracy(SimpleNamespace(task=task, extra={"shared_state": state}))
+        if c.writeback.is_promotable_result("baseline", result):
+            await c.writeback.promote_to_shared_state("baseline", result, task=task)
+        else:
+            await c.writeback.handle_unpromotable_result(task, result)
+
+        assert state.stop_reason == stop_reason
+        assert (
+            state.baseline_tput,
+            state.baseline_accuracy,
+            state.baseline_accuracy_definition_digest,
+        ) == anchor_and_reference
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_promote_profile_records_success_attempt(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)

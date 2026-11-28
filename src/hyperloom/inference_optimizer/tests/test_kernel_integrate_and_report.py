@@ -152,13 +152,9 @@ def graded_integrate_case(native_benchmark, session_dir, tmp_path, monkeypatch):
 
     async def _measure(ctx):
         assert ctx.task.kind == "baseline"
-        assert ctx.task.params["defer_accuracy_until_after_measure"] is True
-        assert ctx.task.params["post_measure_accuracy_min_tput"] == 101.0
-        assert ctx.task.params["post_measure_accuracy_keep_policy"] == {
-            "base_tput": 100.0,
-            "keep_threshold_pct": 1.0,
-            "stack_incremental_keep_threshold_pct": 0.5,
-        }
+        # The re-baseline's measured round runs the eval: no parameter places or gates it.
+        assert ctx.task.params["quality_ref_exempt"] is True
+        assert not [name for name in ctx.task.params if "accuracy" in name]
         assert target.read_text(encoding="utf-8") == patch_file.read_text(encoding="utf-8")
         workspace = Path(ctx.task.params["output_dir"]) / "benchmark_sglang_e2e"
         workspace.mkdir(parents=True, exist_ok=True)
@@ -182,9 +178,7 @@ def graded_integrate_case(native_benchmark, session_dir, tmp_path, monkeypatch):
 def integrate_recipe_case(session_dir, tmp_path, monkeypatch):
     from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.baseline.double_run_requested", lambda params, config_path: False
-    )
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors.baseline.warms_up", lambda config_path: False)
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
@@ -235,8 +229,8 @@ def integrate_recipe_case(session_dir, tmp_path, monkeypatch):
     state.save(session_dir)
     benchmarks = []
 
-    async def _measure(executor, _attempt, *, config_path, output_dir, **_kwargs):
-        benchmark = yaml.safe_load(config_path.read_text(encoding="utf-8"))["benchmark"]
+    async def _measure(executor, attempt, *, output_dir, **_kwargs):
+        benchmark = yaml.safe_load(attempt.materialized_config_path.read_text(encoding="utf-8"))["benchmark"]
         benchmarks.append(benchmark)
         tput = 100.0 if benchmark["envs"].get("LEG") == "A" else 110.0
         return {

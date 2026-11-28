@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -15,7 +16,9 @@ import yaml
 from hyperloom.orchestrator.state.tests._session_base import freeze_base
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
 from hyperloom.orchestrator.actions.executors.workload import _agentx_checkpoint
+from hyperloom.orchestrator.actions.executors._suite import held_test
 from hyperloom.orchestrator.actions.executors._suite import rounds as suite_rounds
+from hyperloom.orchestrator.actions.executors._suite.held_test import HeldPass, HeldTest, RoundPurpose
 from hyperloom.orchestrator.actions.executors.workload._agentx_checkpoint import (
     CHECKPOINT_ARTIFACT_NAME,
     AgentxCheckpoint,
@@ -36,14 +39,13 @@ from hyperloom.orchestrator.actions.executors._suite.rounds import (
     SuiteRound,
     SuiteRoundRefused,
     inherited_env_names,
-    round_lifecycle,
     run_suite_round,
     session_route,
     suite_route,
 )
 from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _base, _launch, _point
 from hyperloom.orchestrator.rehearsal import READY, LaunchAttempt, LaunchScenario, ScriptedRounds, VirtualClock
-from inference_suite.contracts import FailedStep, LifecycleMode, RunStatus
+from inference_suite.contracts import FailedStep, Lifecycle, LifecycleMode, RunStatus
 
 _STAGED = b'{"schema": "inference-suite-staging/1", "tools": {}}\n'
 
@@ -108,9 +110,7 @@ def test_a_client_only_session_runs_external_rounds_against_its_server(session, 
     route = suite_route(session)
     assert route is not None and route.server_url == "http://10.0.0.2:30000"
 
-    ran = run_suite_round(
-        route, SuiteRound(point, point.parent, round_lifecycle(point.parent, LifecycleMode.OWN)), on_poll=lambda: None
-    )
+    ran = run_suite_round(route, SuiteRound(point, point.parent, Lifecycle(LifecycleMode.OWN)), on_poll=lambda: None)
 
     assert ran.report.run_status is RunStatus.COMPLETED
     (config,) = [call.config for call in rounds.calls]
@@ -118,22 +118,12 @@ def test_a_client_only_session_runs_external_rounds_against_its_server(session, 
     assert (config.server.host, config.server.port) == ("10.0.0.2", 30000)
 
 
-def test_a_lone_round_owns_its_server_and_a_cold_start_pair_shares_one_through_the_slot(tmp_path: Path) -> None:
-    slot = tmp_path / "slot"
-
-    assert round_lifecycle(slot, LifecycleMode.OWN).mode is LifecycleMode.OWN
-    boot = round_lifecycle(slot / "warmup_round", LifecycleMode.BOOT)
-    reuse = round_lifecycle(slot / "measure_round", LifecycleMode.REUSE)
-    assert (boot.mode, boot.pid_dir) == (LifecycleMode.BOOT, str(slot))
-    assert (reuse.mode, reuse.pid_dir) == (LifecycleMode.REUSE, str(slot))
-
-
 def test_each_round_writes_a_fresh_run_dir_so_a_retry_in_the_same_directory_runs(session, tmp_path, monkeypatch):
     rounds = _rounds(2)
     monkeypatch.setattr(suite_rounds, "run_round", rounds.run_round)
     route = suite_route(session)
     point = _write_point(tmp_path / "slot" / "point.yaml")
-    request = SuiteRound(point, tmp_path / "slot", round_lifecycle(tmp_path, LifecycleMode.OWN))
+    request = SuiteRound(point, tmp_path / "slot", Lifecycle(LifecycleMode.OWN))
 
     first = run_suite_round(route, request, on_poll=lambda: None)
     second = run_suite_round(route, request, on_poll=lambda: None)
@@ -147,7 +137,7 @@ def test_a_discarded_warmup_round_draws_its_prompts_with_the_warmup_seed(session
     rounds = _rounds()
     monkeypatch.setattr(suite_rounds, "run_round", rounds.run_round)
     point = _write_point(tmp_path / "slot" / "point.yaml")
-    lifecycle = round_lifecycle(point.parent / "warmup_round", LifecycleMode.BOOT if warmup else LifecycleMode.OWN)
+    lifecycle = Lifecycle(LifecycleMode.BOOT, str(point.parent)) if warmup else Lifecycle(LifecycleMode.OWN)
 
     run_suite_round(suite_route(session), SuiteRound(point, point.parent, lifecycle, warmup), on_poll=lambda: None)
 
@@ -190,7 +180,7 @@ def _maskless_round(path: Path) -> SuiteRound:
     point = yaml.safe_load(path.read_text(encoding="utf-8"))
     del point["benchmark"]["envs"]["ROCR_VISIBLE_DEVICES"]
     path.write_text(yaml.safe_dump(point), encoding="utf-8")
-    return SuiteRound(path, path.parent, round_lifecycle(path.parent, LifecycleMode.OWN))
+    return SuiteRound(path, path.parent, Lifecycle(LifecycleMode.OWN))
 
 
 def _portless_point(path: Path) -> Path:
@@ -213,7 +203,7 @@ def test_each_round_of_a_point_without_a_port_boots_on_a_free_port_of_its_own(se
     written = [point.read_text(encoding="utf-8") for point in points]
 
     for point in points:
-        request = SuiteRound(point, point.parent, round_lifecycle(point.parent, LifecycleMode.OWN))
+        request = SuiteRound(point, point.parent, Lifecycle(LifecycleMode.OWN))
         run_suite_round(suite_route(session), request, on_poll=lambda: None)
 
     assert [call.config.server.port for call in rounds.calls] == [23001, 23002]
@@ -231,12 +221,30 @@ def test_a_point_that_names_its_port_keeps_it(session, tmp_path, monkeypatch) ->
 
     run_suite_round(
         suite_route(session),
-        SuiteRound(point, point.parent, round_lifecycle(point.parent, LifecycleMode.OWN)),
+        SuiteRound(point, point.parent, Lifecycle(LifecycleMode.OWN)),
         on_poll=lambda: None,
     )
 
     (config,) = [call.config for call in rounds.calls]
     assert config.server.port == 8123
+
+
+def test_a_round_given_a_port_runs_on_it_whatever_its_point_names(session, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(suite_rounds, "pick_server_port", lambda: pytest.fail("the round's port was replaced"))
+    rounds = _rounds(2)
+    monkeypatch.setattr(suite_rounds, "run_round", rounds.run_round)
+    points = [
+        _write_point(tmp_path / "named" / "point.yaml", PORT="8123"),
+        _portless_point(tmp_path / "p" / "point.yaml"),
+    ]
+    written = [point.read_text(encoding="utf-8") for point in points]
+
+    for point in points:
+        request = SuiteRound(point, point.parent, Lifecycle(LifecycleMode.OWN), port=23007)
+        run_suite_round(suite_route(session), request, on_poll=lambda: None)
+
+    assert [call.config.server.port for call in rounds.calls] == [23007, 23007]
+    assert [point.read_text(encoding="utf-8") for point in points] == written
 
 
 @pytest.mark.parametrize(("budget", "ready"), [(None, "10800"), ("14400", "18000"), ("5400", "10800")])
@@ -255,7 +263,7 @@ def test_a_rounds_framework_ready_timeout_follows_the_boot_budget_of_its_test(
 
     run_suite_round(
         suite_route(session),
-        SuiteRound(point, point.parent, round_lifecycle(point.parent, LifecycleMode.OWN)),
+        SuiteRound(point, point.parent, Lifecycle(LifecycleMode.OWN)),
         on_poll=lambda: None,
     )
 
@@ -269,7 +277,7 @@ def test_a_rounds_framework_ready_timeout_follows_the_boot_budget_of_its_test(
 def test_a_boot_budget_that_is_not_a_positive_number_refuses_the_round(session, tmp_path, monkeypatch, budget) -> None:
     monkeypatch.setenv(BOOT_BUDGET_ENV, budget)
     point = _write_point(tmp_path / "slot" / "point.yaml")
-    lifecycle = round_lifecycle(point.parent, LifecycleMode.OWN)
+    lifecycle = Lifecycle(LifecycleMode.OWN)
 
     with pytest.raises(SuiteRoundRefused) as refused:
         run_suite_round(suite_route(session), SuiteRound(point, point.parent, lifecycle), on_poll=lambda: None)
@@ -287,7 +295,7 @@ def test_the_round_sees_the_host_environment_but_not_its_gpu_masks() -> None:
 def test_a_cache_with_nothing_staged_refuses_the_round_as_staging_missing(session, tmp_path, monkeypatch) -> None:
     monkeypatch.setenv(TOOL_CACHE_ENV, str(tmp_path / "empty"))
     point = _write_point(tmp_path / "slot" / "point.yaml")
-    lifecycle = round_lifecycle(point.parent, LifecycleMode.OWN)
+    lifecycle = Lifecycle(LifecycleMode.OWN)
 
     with pytest.raises(SuiteRoundRefused) as refused:
         run_suite_round(suite_route(session), SuiteRound(point, point.parent, lifecycle), on_poll=lambda: None)
@@ -299,7 +307,7 @@ def test_a_point_that_does_not_translate_refuses_the_round_as_config_invalid(ses
     point = _write_point(tmp_path / "slot" / "point.yaml")
     route = suite_route(session)
     _write_point(point, TP="4")
-    lifecycle = round_lifecycle(point.parent, LifecycleMode.OWN)
+    lifecycle = Lifecycle(LifecycleMode.OWN)
 
     with pytest.raises(SuiteRoundRefused) as refused:
         run_suite_round(route, SuiteRound(point, point.parent, lifecycle), on_poll=lambda: None)
@@ -312,7 +320,7 @@ def test_the_actions_cancel_scope_cancels_the_round_and_each_poll_is_heard(sessi
     rounds = _rounds()
     monkeypatch.setattr(suite_rounds, "run_round", rounds.run_round)
     point = _write_point(tmp_path / "slot" / "point.yaml")
-    lifecycle = round_lifecycle(point.parent, LifecycleMode.OWN)
+    lifecycle = Lifecycle(LifecycleMode.OWN)
     scope = CancelScope()
     scope.cancel(reason="the coordinator stopped the action")
     polls: list[None] = []
@@ -333,7 +341,7 @@ def test_a_point_naming_an_unknown_framework_runs_on_the_suite_and_is_refused_th
     document["benchmark"]["framework"] = "tgi"
     point.write_text(yaml.safe_dump(document), encoding="utf-8")
     route = suite_route(session)
-    lifecycle = round_lifecycle(point.parent, LifecycleMode.OWN)
+    lifecycle = Lifecycle(LifecycleMode.OWN)
 
     with pytest.raises(SuiteRoundRefused) as refused:
         run_suite_round(route, SuiteRound(point, point.parent, lifecycle), on_poll=lambda: None)
@@ -361,19 +369,20 @@ def due_checkpoint(monkeypatch: pytest.MonkeyPatch) -> Callable[[float], None]:
     return reads
 
 
+@pytest.mark.parametrize("held", [False, True], ids=["own-server", "held-test"])
 def test_a_round_trailing_its_checkpoint_is_stopped_and_exits_as_an_early_stop(
-    session, tmp_path, monkeypatch, due_checkpoint
+    session, tmp_path, monkeypatch, due_checkpoint, held
 ) -> None:
     monkeypatch.setattr(suite_rounds, "run_round", _rounds().run_round)
     due_checkpoint(90.0)
     point = _write_point(tmp_path / "slot" / "point.yaml")
+    round_ = _grid_round(point, AgentxCheckpoint(100.0, enforce=True))
+    if held:
+        # The one round of a held test of a point measured once, which the AgentX point a checkpoint judges is.
+        monkeypatch.setattr(held_test, "warms_up", lambda config_path: False)
+        round_ = replace(round_, held=HeldPass(HeldTest(point.parent), RoundPurpose.MEASURE))
 
-    ended = run_grid_suite_round(
-        suite_route(session),
-        _grid_round(point, AgentxCheckpoint(100.0, enforce=True)),
-        env_drop=frozenset(),
-        on_poll=lambda: None,
-    )
+    ended = run_grid_suite_round(suite_route(session), round_, env_drop=frozenset(), on_poll=lambda: None)
 
     ruling = read_checkpoint(point.parent)
     assert ended.returncode == AGENTX_EARLY_STOP_RETURNCODE

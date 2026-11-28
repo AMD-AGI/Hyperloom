@@ -15,6 +15,7 @@ import yaml
 from hyperloom.orchestrator.actions.executors.grid import _grid_runner
 from hyperloom.orchestrator.actions.executors.integrate import _integrate_bench, _integrate_results
 from hyperloom.orchestrator.actions.executors import explore, integrate_patch
+from hyperloom.orchestrator.actions.executors.serving import _server_lifecycle
 from hyperloom.orchestrator.actions.executors.grid._grid_base import GridVariant, VariantResult
 from hyperloom.orchestrator.actions.executors.workload._launch_evidence import persist_launch_evidence
 from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
@@ -154,7 +155,7 @@ def _stub_gpu(monkeypatch, session, *, effective):
     monkeypatch.setattr(explore, "run_grid", run_grid)
     monkeypatch.setattr(_integrate_bench, "run_grid", run_grid)
     # One cold decision round per explore, so each captured launch is one candidate's.
-    monkeypatch.setattr(explore, "resolve_lifecycle_params", lambda _path: {"eligible": False})
+    monkeypatch.setattr(_server_lifecycle, "resolve_lifecycle_params", lambda _path: {"eligible": False})
     return observed
 
 

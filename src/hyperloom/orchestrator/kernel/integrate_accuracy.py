@@ -81,8 +81,8 @@ def grade_integrate_accuracy(
 ) -> dict[str, Any]:
     """Grade a kernel re-baseline's accuracy against the session baseline ``reference``.
 
-    The staged re-baseline already ran the serving eval after hot throughput passed, so the score is read
-    back rather than re-measured.
+    The re-baseline's measured round ran the serving eval after its bench, so the score is read from its result
+    rather than re-measured.
     """
     from hyperloom.common.gain_math import accuracy_passed
 
@@ -164,8 +164,6 @@ async def _integrate_accuracy_verdict(
         session = rebaseline.executor.session_dir
         outcome = await run_candidate_accuracy_round(rebaseline.workspace, launch, state, session=session)
         record_accuracy_round(bench_result, outcome)
-    # Read after the re-baseline and its accuracy round, not before them: the executor shares this state object and
-    # a salvaged sibling accuracy during the run republishes the reference this candidate is graded against.
     gate = grade_integrate_accuracy(
         bench_result,
         reference=AccuracyReference.of_baseline(state),

@@ -320,8 +320,9 @@ class WarmReplayEventRecorder:
 
         ``before_tput`` is the enqueue-time anchor the gain was computed
         against, recorded here because the phase drops it. ``cold_tput`` is the
-        discarded warmup, kept for audit; ``eval_ran`` separates "scored
-        nothing" from "no score could be read".
+        discarded warmup, kept for audit; ``eval_ran`` says whether the
+        replay's result carried a score, which separates a score the baseline
+        could not judge from no score at all.
         """
         self._sink.record(
             SECTION_EVENT,
