@@ -179,7 +179,7 @@ async def test_busy_lanes_cancel_the_rebench_instead_of_leaving_it_queued(coordi
 
 
 def test_the_wait_covers_the_pair_a_revalidation_of_a_point_that_warms_up_runs(coordinator) -> None:
-    """The discarded bench no longer holds the eval, so twice its wall-clock can be less than one revalidation."""
+    """The discarded bench holds no eval, so twice its wall-clock can be less than one revalidation."""
     from hyperloom.orchestrator.actions.executors.benchmark_run.rounds import _BenchmarkRoundsMixin
 
     c = coordinator
