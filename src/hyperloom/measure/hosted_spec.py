@@ -48,8 +48,11 @@ __all__ = [
     "dir_entries",
     "dir_manifest_sha256",
     "gpu_count_of",
-    "split_result_dir",
 ]
+
+#: What ``outputs.result_dir`` of every sheet says. The sheet schema requires the field; a test's rounds write into
+#: their run_dirs, and nothing is written to or read from the directory it names.
+_SHEET_RESULT_DIR = "results"
 
 #: Process variables of the application that a sheet passes on; every other variable stays behind.
 PROCESS_ENV_WHITELIST = (
@@ -439,7 +442,7 @@ def build_spec(call: TestCall, *, request_id: str, ctx: SpecContext, deadline_un
         "environment": _environment_document(call.environment, ctx),
         "model_hashes": dict(ctx.model_hashes),
         "procedure": _procedure_section(call, first, deadline_unix),
-        "outputs": {"result_dir": split_result_dir(call)[0], **_max_bytes(ctx)},
+        "outputs": {"result_dir": _SHEET_RESULT_DIR, **_max_bytes(ctx)},
     }
     try:
         return MeasurementSpec.from_document(sheet)
@@ -449,25 +452,3 @@ def build_spec(call: TestCall, *, request_id: str, ctx: SpecContext, deadline_un
 
 def _max_bytes(ctx: SpecContext) -> dict[str, int]:
     return {"max_total_bytes": ctx.max_total_bytes or DEFAULT_MAX_TOTAL_BYTES}
-
-
-def split_result_dir(call: TestCall) -> tuple[str, Path | None]:
-    """``(result_dir as the sheet says it, the original location to copy it to afterwards)``.
-
-    The sheet names the directory relative to the output directory. A location outside the output directory is
-    renamed to a sibling below it, and the original location is returned so the backend can put the files there once
-    the result has landed.
-    """
-    raw = call.result_dir
-    if not raw:
-        return "results", None
-    path = Path(raw)
-    if not path.is_absolute():
-        if ".." in path.parts:
-            raise SpecRefused("result_dir_unsafe", f"{raw!r} climbs out of the output directory")
-        return path.as_posix(), None
-    output = Path(call.output_dir)
-    try:
-        return path.relative_to(output).as_posix(), None
-    except ValueError:
-        return f"result_dir_{path.name or 'results'}", path

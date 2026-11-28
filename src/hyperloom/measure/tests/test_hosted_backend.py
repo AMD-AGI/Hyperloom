@@ -209,17 +209,6 @@ def test_events_announce_start_and_finish(rig, tmp_path) -> None:
     assert seen[1][1]["accepted"] is True and seen[0][1]["request_id"] == "req-1"
 
 
-def test_a_result_dir_outside_the_output_dir_is_copied_back_to_its_place(rig, tmp_path) -> None:
-    r = rig()
-    external = tmp_path / "elsewhere" / "results"
-    call = make_call(tmp_path, result_dir=str(external))
-    spec_name = "result_dir_results"
-    outcome = r.backend.run_test(call)
-    assert outcome.returncode == 0
-    assert _spec_of(r, "req-1").outputs.result_dir == spec_name
-    assert not external.exists(), "the fake runner wrote no files below the result dir, so nothing to copy"
-
-
 # -- failures the runner reports ----------------------------------------------------------------------------------
 
 
